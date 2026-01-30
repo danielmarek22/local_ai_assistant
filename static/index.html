@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Project Ava: Local AI</title>
+    <title>Project Astra: Local AI</title>
     <style>
         /* --- GLOBAL STYLES --- */
         body { margin: 0; background-color: #111; color: white; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
@@ -166,6 +166,11 @@
 
         // GLOBAL STATE
         let avatarState = "idle"; // idle, thinking, searching, responding
+        const poseTarget = {
+            neckX: 0,
+            neckY: 0,
+            spineY: 0,
+        };
 
         // --- 1. SETUP 3D SCENE ---
         const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
@@ -233,30 +238,27 @@
                 chest.rotation.x = breath * 0.03;
 
                 // Handle Behavior based on State
-                if (avatarState === "thinking" || avatarState === "searching") {
-                    // Look Up and Left (Pondering)
-                    // We use lerp (Linear Interpolation) for smooth transition to the look-up pose
-                    const targetX = -0.2; // Look up
-                    const targetY = 0.3;  // Look left
-                    
-                    neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, targetX, 0.05);
-                    neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, targetY, 0.05);
-                } 
-                else {
-                    // IDLE / RESPONDING: Look at camera (reset)
-                    // Add subtle sway
-                    const sway = Math.sin(time * 0.5);
-                    const headSwayX = Math.sin(time * 0.3) * 0.05;
-                    const headSwayY = Math.cos(time * 0.2) * 0.05;
+                // Smoothly blend toward pose target
+                neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, poseTarget.neckX, 0.05);
+                neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, poseTarget.neckY, 0.05);
+                currentVrm.humanoid.getNormalizedBoneNode('spine').rotation.y =
+                    THREE.MathUtils.lerp(
+                        currentVrm.humanoid.getNormalizedBoneNode('spine').rotation.y,
+                        poseTarget.spineY,
+                        0.05
+                    );
 
-                    // Smoothly return to center + sway
-                    neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, headSwayY, 0.05);
-                    neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, headSwayX, 0.05);
-                    currentVrm.humanoid.getNormalizedBoneNode('spine').rotation.y = sway * 0.02;
-                }
+                // Subtle idle motion layered on top
+                const sway = Math.sin(time * 0.5) * 0.02;
+                neck.rotation.y += sway;
                 
                 // Blink Randomly
-                if (Math.random() < 0.005) blink();
+                const blinkChance =
+                    avatarState === "thinking" || avatarState === "searching"
+                        ? 0.002
+                        : 0.005;
+
+                if (Math.random() < blinkChance) blink();
             }
             renderer.render(scene, camera);
         }
@@ -302,19 +304,44 @@
 
         function updateState(state) {
             avatarState = state;
-            
-            // Remove old status classes
-            chatPanel.classList.remove('status-idle', 'status-thinking', 'status-searching', 'status-responding');
-            
-            // Add new status class
+
+            chatPanel.classList.remove(
+                'status-idle',
+                'status-thinking',
+                'status-searching',
+                'status-responding'
+            );
             chatPanel.classList.add(`status-${state}`);
 
-            // Update Text
-            if (state === 'idle') statusText.innerText = "Ava is Idle";
-            if (state === 'thinking') statusText.innerText = "Ava is Thinking...";
-            if (state === 'searching') statusText.innerText = "Searching Knowledge Base...";
-            if (state === 'responding') statusText.innerText = "Ava is Responding";
+            if (state === 'idle') {
+                statusText.innerText = "Ava is Idle";
+                poseTarget.neckX = 0;
+                poseTarget.neckY = 0;
+                poseTarget.spineY = 0;
+            }
+
+            if (state === 'thinking') {
+                statusText.innerText = "Ava is Thinking...";
+                poseTarget.neckX = -0.25;   // look up
+                poseTarget.neckY = 0.35;    // look left
+                poseTarget.spineY = 0.05;
+            }
+
+            if (state === 'searching') {
+                statusText.innerText = "Searching Knowledge Base...";
+                poseTarget.neckX = -0.15;   // slight look up
+                poseTarget.neckY = -0.4;    // look right (different from thinking!)
+                poseTarget.spineY = -0.05;
+            }
+
+            if (state === 'responding') {
+                statusText.innerText = "Ava is Responding";
+                poseTarget.neckX = 0.05;    // attentive
+                poseTarget.neckY = 0;
+                poseTarget.spineY = 0;
+            }
         }
+
 
         function appendMessage(sender, text) {
             const msgDiv = document.createElement('div');
