@@ -22,10 +22,16 @@ class ContextBuilder:
             "content": self.system_prompt
         })
 
-        # 2. Inject long-term memory (if any)
-        memories = self.memory_store.get_all(limit=self.memory_limit)
+        # 2. Relevant memory
+        memories = self.memory_store.get_relevant(
+            query=user_text,
+            limit=self.memory_limit
+        )
         if memories:
-            memory_block = "Relevant background information:\n"
+            memory_block = (
+                "The following information is known about the user "
+                "and should be considered when responding:\n"
+            )
             for m in memories:
                 memory_block += f"- {m}\n"
 
@@ -34,19 +40,35 @@ class ContextBuilder:
                 "content": memory_block.strip()
             })
 
-        # 3. Inject recent chat history (windowed)
+        # 3. Previous user messages only (no assistant, no duplicates)
         history = self.history_store.get_recent(
             session_id=session_id,
             limit=self.history_limit
         )
 
+        seen = set()
         for row in history:
+            if row["role"] != "user":
+                continue
+
+            content = row["content"].strip()
+
+            # Skip duplicates
+            if content in seen:
+                continue
+
+            # Skip current input if already stored
+            if content == user_text.strip():
+                continue
+
+            seen.add(content)
+
             messages.append({
-                "role": row["role"],
-                "content": row["content"]
+                "role": "user",
+                "content": content
             })
 
-        # 4. Current user input (always last)
+        # 4. CURRENT user input (always last)
         messages.append({
             "role": "user",
             "content": user_text
