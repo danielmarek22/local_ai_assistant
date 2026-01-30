@@ -32,4 +32,13 @@ class Database:
         )
         """)
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_summary (
+            session_id TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+
         self.conn.commit()

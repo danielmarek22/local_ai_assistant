@@ -6,12 +6,14 @@ class ContextBuilder:
         memory_store,
         history_limit: int = 6,
         memory_limit: int = 5,
+        summary_store=None
     ):
         self.system_prompt = system_prompt
         self.history_store = history_store
         self.memory_store = memory_store
         self.history_limit = history_limit
         self.memory_limit = memory_limit
+        self.summary_store = summary_store
 
     def build(self, session_id: str, user_text: str) -> list[dict]:
         messages = []
@@ -40,10 +42,21 @@ class ContextBuilder:
                 "content": memory_block.strip()
             })
 
-        # 3. Previous user messages only (no assistant, no duplicates)
+        summary = self.summary_store.get(session_id)
+        if summary:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Summary of previous conversation:\n"
+                    f"{summary}"
+                )
+            })
+        history_limit = 2 if summary else self.history_limit
+
+                # 3. Previous user messages only (no assistant, no duplicates)
         history = self.history_store.get_recent(
             session_id=session_id,
-            limit=self.history_limit
+            limit=history_limit
         )
 
         seen = set()
