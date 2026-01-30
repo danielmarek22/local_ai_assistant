@@ -50,7 +50,7 @@ def main():
         memory_store=memory_store,
         summary_store=summary_store,
         summarizer=summarizer,
-        summary_trigger=10,
+        summary_trigger=20,
     )
 
     # --- Main loop ---
