@@ -2,6 +2,8 @@ import uuid
 import logging
 from app.core.events import AssistantSpeechEvent
 from app.core.intents import is_memory_command, extract_memory_content
+from app.core.assistant_state import AssistantState
+from app.core.events import AssistantStateEvent
 
 logger = logging.getLogger("orchestrator")
 
@@ -36,6 +38,8 @@ class Orchestrator:
 
     def handle_user_input(self, user_text: str):
         logger.info("[%s] User input received: %s", self.session_id, user_text)
+        yield AssistantStateEvent(state=AssistantState.THINKING)
+
 
         # ------------------------------------------------------------------
         # 1. Persist user input
@@ -75,6 +79,7 @@ class Orchestrator:
         web_context = None
 
         if decision.action == "web_search":
+            yield AssistantStateEvent(state=AssistantState.SEARCHING)
             logger.info("[%s] Performing web search", self.session_id)
             results = self.web_search.search(decision.query or user_text)
             summary = self.search_summarizer.summarize(results)
@@ -98,8 +103,9 @@ class Orchestrator:
         # 5. LLM streaming response
         # ------------------------------------------------------------------
         logger.info("[%s] Calling LLM (streaming)", self.session_id)
-
+        yield AssistantStateEvent(state=AssistantState.RESPONDING)
         buffer = ""
+        
         for chunk in self.llm.stream_chat(messages):
             buffer += chunk
             yield AssistantSpeechEvent(text=chunk)
@@ -112,6 +118,7 @@ class Orchestrator:
         self.history.add(self.session_id, "assistant", buffer)
 
         yield AssistantSpeechEvent(text=buffer, is_final=True)
+        yield AssistantStateEvent(state=AssistantState.IDLE)
 
         # ------------------------------------------------------------------
         # 7. History summarization (if needed)

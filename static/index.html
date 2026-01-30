@@ -5,8 +5,6 @@
     <style>
         /* --- GLOBAL STYLES --- */
         body { margin: 0; background-color: #111; color: white; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
-        
-        /* The 3D Canvas covers the whole screen in the background */
         #canvas-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0; }
 
         /* --- CHAT INTERFACE --- */
@@ -15,18 +13,47 @@
             top: 20px;
             left: 20px;
             width: 350px;
-            height: calc(100vh - 40px); /* Full height minus padding */
-            background: rgba(0, 0, 0, 0.6); /* Dark semi-transparent background */
-            backdrop-filter: blur(10px); /* Blur effect behind the box */
+            height: calc(100vh - 40px);
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
             border-radius: 15px;
             border: 1px solid rgba(255, 255, 255, 0.1);
             display: flex;
             flex-direction: column;
-            z-index: 10; /* Sits on top of the 3D canvas */
+            z-index: 10;
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transition: border-color 0.3s;
         }
 
-        /* The scrollable area for messages */
+        /* NEW: Status Header */
+        #status-bar {
+            padding: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 14px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #ccc;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #555;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        /* Status Colors */
+        .status-idle .status-dot { background-color: #00ff99; box-shadow: 0 0 10px #00ff99; }
+        .status-thinking .status-dot { background-color: #ffcc00; animation: pulse 1s infinite; }
+        .status-searching .status-dot { background-color: #00ccff; animation: pulse 1s infinite; }
+        .status-responding .status-dot { background-color: #00ff99; }
+
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
         #chat-history {
             flex: 1;
             padding: 20px;
@@ -34,13 +61,9 @@
             display: flex;
             flex-direction: column;
             gap: 15px;
-            scrollbar-width: thin; /* For Firefox */
+            scrollbar-width: thin;
             scrollbar-color: #444 transparent;
         }
-
-        /* Custom scrollbar for Webkit (Chrome/Safari) */
-        #chat-history::-webkit-scrollbar { width: 6px; }
-        #chat-history::-webkit-scrollbar-thumb { background-color: #444; border-radius: 3px; }
 
         /* Message Bubbles */
         .message {
@@ -56,7 +79,7 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
         .message.user {
-            align-self: flex-end; /* Push to right */
+            align-self: flex-end;
             background: #00ff99;
             color: #000;
             border-bottom-right-radius: 2px;
@@ -64,14 +87,13 @@
         }
 
         .message.ava {
-            align-self: flex-start; /* Push to left */
+            align-self: flex-start;
             background: rgba(255, 255, 255, 0.1);
             color: #eee;
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-bottom-left-radius: 2px;
         }
 
-        /* Input Area pinned to bottom */
         #input-area {
             padding: 15px;
             background: rgba(0, 0, 0, 0.3);
@@ -121,9 +143,14 @@
 <body>
     <div id="canvas-container"></div>
     
-    <div id="chat-panel">
+    <div id="chat-panel" class="status-idle">
+        <div id="status-bar">
+            <div class="status-dot"></div>
+            <div id="status-text">Ava is Idle</div>
+        </div>
+
         <div id="chat-history">
-            <div class="message ava">System: Ava is online. Waiting for connection...</div>
+            <div class="message ava">System: Online. Ready.</div>
         </div>
         <div id="input-area">
             <input type="text" id="user-input" placeholder="Type a message..." autocomplete="off" />
@@ -136,6 +163,9 @@
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+        // GLOBAL STATE
+        let avatarState = "idle"; // idle, thinking, searching, responding
 
         // --- 1. SETUP 3D SCENE ---
         const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
@@ -194,12 +224,38 @@
             if (currentVrm) {
                 currentVrm.update(deltaTime);
                 
-                // Idle Animations
+                // --- STATE-BASED ANIMATION ---
+                const neck = currentVrm.humanoid.getNormalizedBoneNode('neck');
+                const chest = currentVrm.humanoid.getNormalizedBoneNode('chest');
+
+                // Standard Breathing
                 const breath = Math.sin(time * 1.0);
-                currentVrm.humanoid.getNormalizedBoneNode('chest').rotation.x = breath * 0.03;
-                const sway = Math.sin(time * 0.5);
-                currentVrm.humanoid.getNormalizedBoneNode('spine').rotation.y = sway * 0.02;
+                chest.rotation.x = breath * 0.03;
+
+                // Handle Behavior based on State
+                if (avatarState === "thinking" || avatarState === "searching") {
+                    // Look Up and Left (Pondering)
+                    // We use lerp (Linear Interpolation) for smooth transition to the look-up pose
+                    const targetX = -0.2; // Look up
+                    const targetY = 0.3;  // Look left
+                    
+                    neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, targetX, 0.05);
+                    neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, targetY, 0.05);
+                } 
+                else {
+                    // IDLE / RESPONDING: Look at camera (reset)
+                    // Add subtle sway
+                    const sway = Math.sin(time * 0.5);
+                    const headSwayX = Math.sin(time * 0.3) * 0.05;
+                    const headSwayY = Math.cos(time * 0.2) * 0.05;
+
+                    // Smoothly return to center + sway
+                    neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, headSwayY, 0.05);
+                    neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, headSwayX, 0.05);
+                    currentVrm.humanoid.getNormalizedBoneNode('spine').rotation.y = sway * 0.02;
+                }
                 
+                // Blink Randomly
                 if (Math.random() < 0.005) blink();
             }
             renderer.render(scene, camera);
@@ -220,11 +276,7 @@
         let talkingInterval;
         let stopTalkingTimeout;
 
-        // "Kick" the talking animation. 
-        // If called repeatedly (while streaming), it keeps the mouth moving.
-        // If calls stop, the mouth closes after 0.2 seconds.
         function triggerTalking() {
-            // 1. If not already animating, start the loop
             if (!talkingInterval) {
                 let isOpen = false;
                 talkingInterval = setInterval(() => {
@@ -233,11 +285,7 @@
                     isOpen = !isOpen;
                 }, 100);
             }
-
-            // 2. Reset the "Stop" timer
             if (stopTalkingTimeout) clearTimeout(stopTalkingTimeout);
-            
-            // 3. Set a new timeout to stop talking if no new data comes in for 500ms
             stopTalkingTimeout = setTimeout(() => {
                 clearInterval(talkingInterval);
                 talkingInterval = null;
@@ -245,10 +293,28 @@
             }, 500); 
         }
 
-        // --- 5. CHAT UI LOGIC ---
+        // --- 5. UI HELPERS ---
         const chatHistory = document.getElementById('chat-history');
         const userInput = document.getElementById('user-input');
-        let currentAiMessageDiv = null; // Store reference to current bubble
+        const chatPanel = document.getElementById('chat-panel');
+        const statusText = document.getElementById('status-text');
+        let currentAiMessageDiv = null; 
+
+        function updateState(state) {
+            avatarState = state;
+            
+            // Remove old status classes
+            chatPanel.classList.remove('status-idle', 'status-thinking', 'status-searching', 'status-responding');
+            
+            // Add new status class
+            chatPanel.classList.add(`status-${state}`);
+
+            // Update Text
+            if (state === 'idle') statusText.innerText = "Ava is Idle";
+            if (state === 'thinking') statusText.innerText = "Ava is Thinking...";
+            if (state === 'searching') statusText.innerText = "Searching Knowledge Base...";
+            if (state === 'responding') statusText.innerText = "Ava is Responding";
+        }
 
         function appendMessage(sender, text) {
             const msgDiv = document.createElement('div');
@@ -257,7 +323,7 @@
             msgDiv.innerText = text;
             chatHistory.appendChild(msgDiv);
             chatHistory.scrollTop = chatHistory.scrollHeight;
-            return msgDiv; // Return reference so we can update it
+            return msgDiv; 
         }
 
         // --- 6. WEBSOCKET CONNECTION ---
@@ -265,32 +331,44 @@
             const ws = new WebSocket("ws://localhost:8000/ws");
             
             ws.onopen = () => {
-                appendMessage('ava', 'Connected. Ready for input.');
+                updateState('idle');
             };
 
             ws.onmessage = function(event) {
                 const data = JSON.parse(event.data);
                 
-                // === STREAMING LOGIC ===
-                
-                // 1. AI Starts Generating
-                if (data.type === "assistant_start") {
-                    currentAiMessageDiv = appendMessage('ava', ''); // Create empty bubble
+                // 1. STATE EVENT
+                if (data.type === "assistant_state") {
+                    console.log("State Update:", data.state);
+                    updateState(data.state);
+
+                    // Create a new bubble only when we start thinking/responding if one doesn't exist
+                    if (data.state === "responding" && !currentAiMessageDiv) {
+                        currentAiMessageDiv = appendMessage('ava', '');
+                    }
                 } 
                 
-                // 2. Receiving Token/Chunk
+                // 2. CHUNK EVENT
                 else if (data.type === "assistant_chunk") {
-                    if (currentAiMessageDiv) {
-                        currentAiMessageDiv.innerText += data.content;
-                        chatHistory.scrollTop = chatHistory.scrollHeight; // Auto scroll
-                        triggerTalking(); // Move mouth
+                    // Ensure state is responding (sync safeguard)
+                    if(avatarState !== 'responding') updateState('responding');
+
+                    if (!currentAiMessageDiv) {
+                        currentAiMessageDiv = appendMessage('ava', '');
                     }
+                    
+                    currentAiMessageDiv.innerText += data.content;
+                    chatHistory.scrollTop = chatHistory.scrollHeight;
+                    triggerTalking();
                 }
                 
-                // 3. Finished
+                // 3. END EVENT
                 else if (data.type === "assistant_end") {
-                    currentAiMessageDiv = null; // Reset for next time
-                    // triggerTalking will naturally time out and close mouth
+                    if (currentAiMessageDiv) {
+                        currentAiMessageDiv.innerText = data.content; // Ensure final text is consistent
+                    }
+                    currentAiMessageDiv = null; // Reset current bubble
+                    updateState('idle'); // Return to idle
                 }
             };
 
@@ -302,8 +380,6 @@
                     appendMessage('user', text);
                     ws.send(text);
                     userInput.value = "";
-                } else {
-                    appendMessage('ava', 'Error: Not connected to backend.');
                 }
             }
 

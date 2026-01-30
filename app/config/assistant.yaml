@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: qwen3-vl:8b
+  model: deepseek-r1
 
   generation:
     temperature: 0.6

@@ -4,12 +4,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
 from typing import Iterator, Any
 import json
-from app.core.orchestrator_factory import build_orchestrator
-from app.logging import setup_logging
 import logging
 
+from app.core.orchestrator_factory import build_orchestrator
+from app.core.events import AssistantSpeechEvent, AssistantStateEvent
+from app.logging import setup_logging
+
 setup_logging()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("server")
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -45,39 +47,43 @@ async def run_generator(gen: Iterator[Any]):
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
+    logger.info("WebSocket connected")
+
     orchestrator = build_orchestrator()
 
     try:
         while True:
             user_text = await ws.receive_text()
-
-            started = False
+            logger.info("Received user input via WebSocket")
 
             async for event in run_generator(
                 orchestrator.handle_user_input(user_text)
             ):
-                if not started:
+                # --- STATE EVENTS ---
+                if isinstance(event, AssistantStateEvent):
                     await ws.send_text(json.dumps({
-                        "type": "assistant_start"
+                        "type": "assistant_state",
+                        "state": event.state,
                     }))
-                    started = True
+                    continue
 
-                if not event.is_final:
-                    await ws.send_text(json.dumps({
-                        "type": "assistant_chunk",
-                        "content": event.text
-                    }))
-                else:
-                    await ws.send_text(json.dumps({
-                        "type": "assistant_end",
-                        "content": event.text
-                    }))
+                # --- SPEECH EVENTS ---
+                if isinstance(event, AssistantSpeechEvent):
+                    if event.is_final:
+                        await ws.send_text(json.dumps({
+                            "type": "assistant_end",
+                            "content": event.text,
+                        }))
+                    else:
+                        await ws.send_text(json.dumps({
+                            "type": "assistant_chunk",
+                            "content": event.text,
+                        }))
 
     except WebSocketDisconnect:
-        print("WebSocket disconnected")
+        logger.info("WebSocket disconnected")
 
 
 @app.get("/")
 async def get_index():
     return FileResponse("static/index.html")
-
