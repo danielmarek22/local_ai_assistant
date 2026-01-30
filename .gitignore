@@ -13,3 +13,5 @@ venv/
 *.sqlite3
 
 .github
+models/
+static/audio/
