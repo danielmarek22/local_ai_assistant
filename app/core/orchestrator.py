@@ -1,5 +1,6 @@
 from llm.base import LLMClient
 from core.events import AssistantSpeechEvent
+from core.intents import is_memory_command, extract_memory_content
 import uuid
 
 class Orchestrator:
@@ -11,21 +12,44 @@ class Orchestrator:
         self.session_id = str(uuid.uuid4())
 
     def handle_user_input(self, user_text: str):
-        # Store user message
-        self.history.add(self.session_id, "user", user_text)
+            # Always store user input
+            self.history.add(self.session_id, "user", user_text)
 
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_text},
-        ]
+            # ---- MEMORY COMMAND HANDLING ----
+            if is_memory_command(user_text):
+                memory_content = extract_memory_content(user_text)
 
-        buffer = ""
+                if memory_content:
+                    self.memory.add(
+                        content=memory_content,
+                        importance=2
+                    )
 
-        for chunk in self.llm.stream_chat(messages):
-            buffer += chunk
-            yield AssistantSpeechEvent(text=chunk)
+                    response = "Got it. I’ll remember that."
 
-        # Store assistant response
-        self.history.add(self.session_id, "assistant", buffer)
+                    self.history.add(self.session_id, "assistant", response)
+                    yield AssistantSpeechEvent(text=response)
+                    yield AssistantSpeechEvent(text=response, is_final=True)
+                    return
 
-        yield AssistantSpeechEvent(text=buffer, is_final=True)
+                else:
+                    response = "What would you like me to remember?"
+                    self.history.add(self.session_id, "assistant", response)
+                    yield AssistantSpeechEvent(text=response, is_final=True)
+                    return
+            # --------------------------------
+
+            # Normal LLM flow
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_text},
+            ]
+
+            buffer = ""
+
+            for chunk in self.llm.stream_chat(messages):
+                buffer += chunk
+                yield AssistantSpeechEvent(text=chunk)
+
+            self.history.add(self.session_id, "assistant", buffer)
+            yield AssistantSpeechEvent(text=buffer, is_final=True)
