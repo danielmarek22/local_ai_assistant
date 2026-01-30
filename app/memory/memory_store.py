@@ -1,4 +1,4 @@
-from storage.database import Database
+from app.storage.database import Database
 
 
 class MemoryStore:

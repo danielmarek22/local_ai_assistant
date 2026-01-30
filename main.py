@@ -1,11 +1,11 @@
-from config import Config
-from llm.ollama_stream import OllamaClient
-from core.orchestrator import Orchestrator
-from ui.console import print_event
-from storage.database import Database
-from memory.chat_history import ChatHistoryStore
-from memory.memory_store import MemoryStore
-
+from app.config import Config
+from app.llm.ollama_stream import OllamaClient
+from app.core.orchestrator import Orchestrator
+from app.ui.console import print_event
+from app.storage.database import Database
+from app.memory.chat_history import ChatHistoryStore
+from app.memory.memory_store import MemoryStore
+from app.core.context_builder import ContextBuilder
 
 def main():
     config = Config()
@@ -24,9 +24,17 @@ def main():
         },
     )
 
+    context_builder = ContextBuilder(
+        system_prompt=config.assistant["system_prompt"],
+        history_store=history_store,
+        memory_store=memory_store,
+        history_limit=6,
+        memory_limit=5,
+    )
+
     orchestrator = Orchestrator(
         llm=llm,
-        system_prompt=config.assistant["system_prompt"],
+        context_builder=context_builder,
         history_store=history_store,
         memory_store=memory_store,
     )

@@ -3,7 +3,7 @@ import yaml
 
 
 class Config:
-    def __init__(self, path: str = "config/assistant.yaml"):
+    def __init__(self, path: str = "./app/config/assistant.yaml"):
         with open(Path(path), "r") as f:
             self.raw = yaml.safe_load(f)
 
