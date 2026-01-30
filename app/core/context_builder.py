@@ -15,7 +15,12 @@ class ContextBuilder:
         self.memory_limit = memory_limit
         self.summary_store = summary_store
 
-    def build(self, session_id: str, user_text: str) -> list[dict]:
+    def build(
+        self,
+        session_id: str,
+        user_text: str,
+        web_context: str | None = None,
+    ) -> list[dict]:
         messages = []
 
         # 1. Base system prompt
@@ -51,6 +56,13 @@ class ContextBuilder:
                     f"{summary}"
                 )
             })
+
+        if web_context:
+            messages.append({
+                "role": "system",
+                "content": web_context
+            })
+
         history_limit = 2 if summary else self.history_limit
 
                 # 3. Previous user messages only (no assistant, no duplicates)
