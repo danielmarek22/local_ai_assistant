@@ -86,7 +86,8 @@
             box-shadow: 0 2px 5px rgba(0,255,153,0.2);
         }
 
-        .message.ava {
+        /* Renamed from .ava to .astra */
+        .message.astra {
             align-self: flex-start;
             background: rgba(255, 255, 255, 0.1);
             color: #eee;
@@ -146,11 +147,11 @@
     <div id="chat-panel" class="status-idle">
         <div id="status-bar">
             <div class="status-dot"></div>
-            <div id="status-text">Ava is Idle</div>
+            <div id="status-text">Astra is Idle</div>
         </div>
 
         <div id="chat-history">
-            <div class="message ava">System: Online. Ready.</div>
+            <div class="message astra">System: Online. Ready.</div>
         </div>
         <div id="input-area">
             <input type="text" id="user-input" placeholder="Type a message..." autocomplete="off" />
@@ -313,15 +314,16 @@
             );
             chatPanel.classList.add(`status-${state}`);
 
+            // Renamed Strings in Logic
             if (state === 'idle') {
-                statusText.innerText = "Ava is Idle";
+                statusText.innerText = "Astra is Idle";
                 poseTarget.neckX = 0;
                 poseTarget.neckY = 0;
                 poseTarget.spineY = 0;
             }
 
             if (state === 'thinking') {
-                statusText.innerText = "Ava is Thinking...";
+                statusText.innerText = "Astra is Thinking...";
                 poseTarget.neckX = -0.25;   // look up
                 poseTarget.neckY = 0.35;    // look left
                 poseTarget.spineY = 0.05;
@@ -330,12 +332,12 @@
             if (state === 'searching') {
                 statusText.innerText = "Searching Knowledge Base...";
                 poseTarget.neckX = -0.15;   // slight look up
-                poseTarget.neckY = -0.4;    // look right (different from thinking!)
+                poseTarget.neckY = -0.4;    // look right
                 poseTarget.spineY = -0.05;
             }
 
             if (state === 'responding') {
-                statusText.innerText = "Ava is Responding";
+                statusText.innerText = "Astra is Responding";
                 poseTarget.neckX = 0.05;    // attentive
                 poseTarget.neckY = 0;
                 poseTarget.spineY = 0;
@@ -346,7 +348,8 @@
         function appendMessage(sender, text) {
             const msgDiv = document.createElement('div');
             msgDiv.classList.add('message');
-            msgDiv.classList.add(sender === 'user' ? 'user' : 'ava');
+            // Renamed Class Logic
+            msgDiv.classList.add(sender === 'user' ? 'user' : 'astra');
             msgDiv.innerText = text;
             chatHistory.appendChild(msgDiv);
             chatHistory.scrollTop = chatHistory.scrollHeight;
@@ -369,19 +372,19 @@
                     console.log("State Update:", data.state);
                     updateState(data.state);
 
-                    // Create a new bubble only when we start thinking/responding if one doesn't exist
+                    // Renamed 'ava' -> 'astra'
                     if (data.state === "responding" && !currentAiMessageDiv) {
-                        currentAiMessageDiv = appendMessage('ava', '');
+                        currentAiMessageDiv = appendMessage('astra', '');
                     }
                 } 
                 
                 // 2. CHUNK EVENT
                 else if (data.type === "assistant_chunk") {
-                    // Ensure state is responding (sync safeguard)
                     if(avatarState !== 'responding') updateState('responding');
 
+                    // Renamed 'ava' -> 'astra'
                     if (!currentAiMessageDiv) {
-                        currentAiMessageDiv = appendMessage('ava', '');
+                        currentAiMessageDiv = appendMessage('astra', '');
                     }
                     
                     currentAiMessageDiv.innerText += data.content;
@@ -392,10 +395,10 @@
                 // 3. END EVENT
                 else if (data.type === "assistant_end") {
                     if (currentAiMessageDiv) {
-                        currentAiMessageDiv.innerText = data.content; // Ensure final text is consistent
+                        currentAiMessageDiv.innerText = data.content; 
                     }
-                    currentAiMessageDiv = null; // Reset current bubble
-                    updateState('idle'); // Return to idle
+                    currentAiMessageDiv = null; 
+                    updateState('idle'); 
                 }
             };
 
