@@ -7,5 +7,13 @@ class Config:
         with open(Path(path), "r") as f:
             self.raw = yaml.safe_load(f)
 
-        self.llm = self.raw["llm"]
-        self.assistant = self.raw["assistant"]
+        # Core sections
+        self.llm = self.raw.get("llm", {})
+        self.assistant = self.raw.get("assistant", {})
+
+        # Planner config (NEW)
+        self.planner = self.raw.get("planner", {
+            "mode": "rule",
+            "llm_enabled": False,
+            "timeout_ms": 1500,
+        })

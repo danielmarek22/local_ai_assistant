@@ -13,6 +13,7 @@ from app.core.llm_planner import LLMPlanner
 from app.core.hybrid_planner import HybridPlanner
 from app.tools.web_search import SearXNGClient
 from app.tools.search_summarizer import SearchResultSummarizer
+from app.core.planner_factory import build_planner
 
 
 
@@ -36,7 +37,8 @@ def main():
     summary_store = SummaryStore(db)
     rule_planner = Planner()
     llm_planner = LLMPlanner(llm)
-    planner = HybridPlanner(rule_planner, llm_planner)
+    planner = build_planner(config, llm)
+
 
     web_search = SearXNGClient(base_url="http://localhost:8080")
 

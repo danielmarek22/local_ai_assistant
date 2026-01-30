@@ -2,4 +2,4 @@ requests
 pydantic
 rich
 pyyaml
-
+websockets

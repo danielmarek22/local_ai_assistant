@@ -1,7 +1,6 @@
 import uuid
 from app.core.events import AssistantSpeechEvent
 from app.core.intents import is_memory_command, extract_memory_content
-from app.tools.search_formatter import format_search_results
 
 
 class Orchestrator:
@@ -25,8 +24,6 @@ class Orchestrator:
         self.summary_store = summary_store
         self.summarizer = summarizer
         self.search_summarizer = search_summarizer
-
-
         self.planner = planner
         self.web_search = web_search
         self.summary_trigger = summary_trigger
@@ -47,11 +44,13 @@ class Orchestrator:
                 response = "What would you like me to remember?"
 
             self.history.add(self.session_id, "assistant", response)
+
+            # IMPORTANT: keep double yield
             yield AssistantSpeechEvent(text=response)
             yield AssistantSpeechEvent(text=response, is_final=True)
             return
 
-        # 3. PLANNING STEP 
+        # 3. Planning step
         decision = self.planner.decide(user_text)
         web_context = None
 
@@ -75,6 +74,8 @@ class Orchestrator:
 
         # 6. Store assistant response
         self.history.add(self.session_id, "assistant", buffer)
+
+        # IMPORTANT: final double-yield
         yield AssistantSpeechEvent(text=buffer, is_final=True)
 
         # 7. Maybe summarize history
@@ -98,4 +99,4 @@ class Orchestrator:
         ]
 
         summary = self.summarizer.summarize(summary_input)
-        self.summary_store.upsert(self.session_id, summary)
+        self.summary_store._

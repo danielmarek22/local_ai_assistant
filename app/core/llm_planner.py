@@ -1,41 +1,36 @@
 import json
+import time
 from app.core.planner import PlannerDecision
 
 
 class LLMPlanner:
-    def __init__(self, llm):
+    def __init__(self, llm, timeout_ms: int = 1500):
         self.llm = llm
+        self.timeout_ms = timeout_ms
 
     def decide(self, user_text: str) -> PlannerDecision | None:
+        start = time.time()
+
         prompt = [
             {
                 "role": "system",
                 "content": (
-                    "You are a planner for an AI assistant.\n\n"
-                    "Rules:\n"
-                    "- You must choose exactly one action: \"respond\" or \"web_search\".\n"
-                    "- Choose \"web_search\" ONLY if up-to-date or factual external information is required.\n"
-                    "- Choose \"respond\" for opinions, explanations, formatting questions, or casual conversation.\n"
-                    "- Do NOT answer the user.\n"
-                    "- Do NOT include markdown.\n"
-                    "- Output ONLY valid JSON.\n\n"
-                    "JSON schema:\n"
-                    "{\n"
-                    "  \"action\": \"respond | web_search\",\n"
-                    "  \"query\": string | null,\n"
-                    "  \"reason\": string\n"
-                    "}"
+                    "You are a planner for an AI assistant.\n"
+                    "Decide whether web search is required.\n"
+                    "Output ONLY valid JSON.\n"
+                    "{ \"action\": \"respond | web_search\", "
+                    "\"query\": string | null, "
+                    "\"reason\": string }"
                 )
             },
-            {
-                "role": "user",
-                "content": user_text
-            }
+            {"role": "user", "content": user_text}
         ]
 
         buffer = ""
         for chunk in self.llm.stream_chat(prompt):
             buffer += chunk
+            if (time.time() - start) * 1000 > self.timeout_ms:
+                return None  # timeout → fallback
 
         try:
             data = json.loads(buffer.strip())
