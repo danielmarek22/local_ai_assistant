@@ -1,0 +1,20 @@
+llm:
+  backend: ollama
+  host: http://localhost:11434
+  model: deepseek-r1
+
+  generation:
+    temperature: 0.6
+    top_p: 0.9
+    max_tokens: 256
+
+assistant:
+  system_prompt: |
+    You are a spoken assistant.
+    Respond with the final answer only.
+    Do not reveal internal reasoning.
+    Use short, natural sentences.
+    No markdown or lists.
+
+  personality:
+    default_emotion: neutral

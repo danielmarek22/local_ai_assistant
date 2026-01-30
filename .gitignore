@@ -1,0 +1,13 @@
+# Ignore venv
+venv/
+
+# Ignore all __pycache__ folders everywhere
+**/__pycache__/
+
+# Also ignore compiled Python files (they end in .pyc, .pyo, or .pyd)
+*.py[cod]
+*$py.class
+
+# Ignore local databases
+*.db
+*.sqlite3
