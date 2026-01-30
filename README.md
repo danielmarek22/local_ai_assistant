@@ -75,7 +75,7 @@ The focus is on **correct architecture**, **explicit control**, and **extensibil
 ---
 
 ## Architecture Overview
-
+```
 User Input
 ↓
 Orchestrator
@@ -98,10 +98,11 @@ LLM (Streaming)
 Assistant Events
 ↓
 History + Optional Summarization
+```
 ---
 
 ## Project Structure
----
+```
 app/
 ├── core/
 │ ├── orchestrator.py
@@ -132,7 +133,7 @@ app/
 │
 └── config/
 └── assistant.yaml
----
+```
 
 ---
 
@@ -200,3 +201,4 @@ The current focus can safely shift to:
 
 Local / personal use.  
 License to be defined depending on future distribution.
+
