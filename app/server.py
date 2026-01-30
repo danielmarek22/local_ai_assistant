@@ -1,80 +1,76 @@
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
+from typing import Iterator, Any
 import json
-
-from app.config import Config
-from app.llm.ollama_stream import OllamaClient
-from app.core.orchestrator import Orchestrator
-from app.core.context_builder import ContextBuilder
-from app.storage.database import Database
-from app.memory.chat_history import ChatHistoryStore
-from app.memory.memory_store import MemoryStore
-
-
+from app.core.orchestrator_factory import build_orchestrator
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def create_orchestrator() -> Orchestrator:
-    config = Config()
+_SENTINEL = object()
 
-    db = Database()
-    history_store = ChatHistoryStore(db)
-    memory_store = MemoryStore(db)
 
-    llm = OllamaClient(
-        model=config.llm["model"],
-        host=config.llm["host"],
-        options={
-            "temperature": config.llm["generation"]["temperature"],
-            "top_p": config.llm["generation"]["top_p"],
-            "num_predict": config.llm["generation"]["max_tokens"],
-        },
-    )
+def _next_or_sentinel(iterator: Iterator[Any]):
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _SENTINEL
 
-    context_builder = ContextBuilder(
-        system_prompt=config.assistant["system_prompt"],
-        history_store=history_store,
-        memory_store=memory_store,
-        history_limit=6,
-        memory_limit=5,
-    )
 
-    return Orchestrator(
-        llm=llm,
-        context_builder=context_builder,
-        history_store=history_store,
-        memory_store=memory_store,
-    )
+async def run_generator(gen: Iterator[Any]):
+    loop = asyncio.get_running_loop()
+    iterator = iter(gen)
+
+    while True:
+        item = await loop.run_in_executor(
+            None, _next_or_sentinel, iterator
+        )
+
+        if item is _SENTINEL:
+            break
+
+        yield item
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    orchestrator = create_orchestrator()
+    orchestrator = build_orchestrator()
 
     try:
         while True:
             user_text = await ws.receive_text()
 
-            # Signal start
-            await ws.send_text(json.dumps({
-                "type": "assistant_start"
-            }))
+            started = False
 
-            # Stream assistant response
-            for event in orchestrator.handle_user_input(user_text):
+            async for event in run_generator(
+                orchestrator.handle_user_input(user_text)
+            ):
+                if not started:
+                    await ws.send_text(json.dumps({
+                        "type": "assistant_start"
+                    }))
+                    started = True
+
                 if not event.is_final:
                     await ws.send_text(json.dumps({
                         "type": "assistant_chunk",
                         "content": event.text
                     }))
-                    await asyncio.sleep(0)  # yield control
-
-            # Signal end
-            await ws.send_text(json.dumps({
-                "type": "assistant_end"
-            }))
+                else:
+                    await ws.send_text(json.dumps({
+                        "type": "assistant_end",
+                        "content": event.text
+                    }))
 
     except WebSocketDisconnect:
         print("WebSocket disconnected")
+
+
+@app.get("/")
+async def get_index():
+    return FileResponse("static/index.html")
+

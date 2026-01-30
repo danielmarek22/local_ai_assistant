@@ -38,6 +38,5 @@ class OllamaClient(LLMClient):
 
                 chunk = json.loads(data)
                 delta = chunk["choices"][0]["delta"]
-
                 if "content" in delta:
                     yield delta["content"]
