@@ -1,10 +1,16 @@
 import re
 
-
 class PlannerDecision:
-    def __init__(self, use_web: bool, query: str | None = None):
-        self.use_web = use_web
+    def __init__(
+        self,
+        action: str,              # "respond" | "web_search"
+        query: str | None = None, # rewritten query
+        reason: str | None = None # optional, for debugging
+    ):
+        self.action = action
         self.query = query
+        self.reason = reason
+
 
 
 class Planner:
@@ -25,9 +31,12 @@ class Planner:
         for pattern in self.SEARCH_PATTERNS:
             if re.search(pattern, text):
                 return PlannerDecision(
-                    use_web=True,
-                    query=user_text
+                    action="web_search",
+                    query=user_text,
+                    reason="rule_match"
                 )
 
-        print(PlannerDecision)
-        return PlannerDecision(use_web=False)
+        return PlannerDecision(
+            action="respond",
+            reason="rule_no_match"
+        )

@@ -9,22 +9,15 @@ from app.core.context_builder import ContextBuilder
 from app.memory.summary_store import SummaryStore
 from app.core.summarizer import HistorySummarizer
 from app.core.planner import Planner
+from app.core.llm_planner import LLMPlanner
+from app.core.hybrid_planner import HybridPlanner
 from app.tools.web_search import SearXNGClient
 from app.tools.search_summarizer import SearchResultSummarizer
 
 
 
 def main():
-    config = Config()
-
-    # --- Storage ---
-    db = Database()
-    history_store = ChatHistoryStore(db)
-    memory_store = MemoryStore(db)
-    summary_store = SummaryStore(db)
-    planner = Planner()
-    web_search = SearXNGClient(base_url="http://localhost:8080")
-    
+    config = Config()  
     # --- LLM ---
     llm = OllamaClient(
         model=config.llm["model"],
@@ -35,6 +28,17 @@ def main():
             "num_predict": config.llm["generation"]["max_tokens"],
         },
     )
+
+    # --- Storage ---
+    db = Database()
+    history_store = ChatHistoryStore(db)
+    memory_store = MemoryStore(db)
+    summary_store = SummaryStore(db)
+    rule_planner = Planner()
+    llm_planner = LLMPlanner(llm)
+    planner = HybridPlanner(rule_planner, llm_planner)
+
+    web_search = SearXNGClient(base_url="http://localhost:8080")
 
     # --- Summarizer ---
     summarizer = HistorySummarizer(llm)

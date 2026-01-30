@@ -51,13 +51,14 @@ class Orchestrator:
             yield AssistantSpeechEvent(text=response, is_final=True)
             return
 
-        # 3. PLANNING STEP (NEW)
+        # 3. PLANNING STEP 
         decision = self.planner.decide(user_text)
         web_context = None
 
-        if decision.use_web:
-            results = self.web_search.search(decision.query)
+        if decision.action == "web_search":
+            results = self.web_search.search(decision.query or user_text)
             summary = self.search_summarizer.summarize(results)
+            web_context = f"External information:\n{summary}"
 
         # 4. Build context (ONLY place prompt is assembled)
         messages = self.context_builder.build(
