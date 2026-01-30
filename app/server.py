@@ -5,9 +5,16 @@ import asyncio
 from typing import Iterator, Any
 import json
 from app.core.orchestrator_factory import build_orchestrator
+from app.logging import setup_logging
+import logging
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+logger.info("Starting FastAPI server")
 
 
 _SENTINEL = object()

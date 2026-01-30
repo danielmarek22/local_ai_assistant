@@ -10,12 +10,17 @@ from app.core.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.tools.search_summarizer import SearchResultSummarizer
 from app.core.planner_factory import build_planner
+import logging
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def build_orchestrator() -> Orchestrator:
+    logging.info("Loading configuration...")
     config = Config()
 
     # --- LLM ---
+    logger.info("Initializing LLM client: %s", config.llm["model"])
     llm = OllamaClient(
         model=config.llm["model"],
         host=config.llm["host"],
@@ -27,22 +32,26 @@ def build_orchestrator() -> Orchestrator:
     )
 
     # --- Storage ---
+    logger.info("Initializing database and stores")
     db = Database()
     history_store = ChatHistoryStore(db)
     memory_store = MemoryStore(db)
     summary_store = SummaryStore(db)
 
     # --- Planner ---
+    logger.info("Building planner")
     planner = build_planner(config, llm)
 
     # --- Tools ---
     web_search = SearXNGClient(base_url="http://localhost:8080")
 
     # --- Summarizers ---
+    logger.info("Initializing summarizers")
     summarizer = HistorySummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
 
     # --- Context builder ---
+    logger.info("Setting up context builder")
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
         history_store=history_store,
@@ -53,6 +62,7 @@ def build_orchestrator() -> Orchestrator:
     )
 
     # --- Orchestrator ---
+    logger.info("Orchestrator initialized successfully")
     return Orchestrator(
         llm=llm,
         context_builder=context_builder,
