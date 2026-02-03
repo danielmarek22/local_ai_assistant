@@ -17,8 +17,11 @@ class SummaryStore:
         )
         row = cursor.fetchone()
         return row["summary"] if row else None
+    
+    def set(self, session_id: str, summary: str) -> None:
+        self._upsert(session_id, summary)
 
-    def upsert(self, session_id: str, summary: str):
+    def _upsert(self, session_id: str, summary: str) -> None:
         cursor = self.db.conn.cursor()
         cursor.execute(
             """

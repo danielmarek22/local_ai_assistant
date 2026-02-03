@@ -81,10 +81,25 @@ class Orchestrator:
         if decision.action == "web_search":
             yield AssistantStateEvent(state=AssistantState.SEARCHING)
             logger.info("[%s] Performing web search", self.session_id)
-            results = self.web_search.search(decision.query or user_text)
-            summary = self.search_summarizer.summarize(results)
-            web_context = f"External information:\n{summary}"
-            logger.debug("[%s] Web context injected (%d chars)", self.session_id, len(web_context))
+
+            try:
+                results = self.web_search.search(decision.query or user_text)
+                summary = self.search_summarizer.summarize(results)
+                web_context = f"External information:\n{summary}"
+
+                logger.debug(
+                    "[%s] Web context injected (%d chars)",
+                    self.session_id,
+                    len(web_context),
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "[%s] Web search failed, falling back to local response: %s",
+                    self.session_id,
+                    str(e),
+                )
+                web_context = None
 
         # ------------------------------------------------------------------
         # 4. Context construction
