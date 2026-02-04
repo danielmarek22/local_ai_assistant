@@ -9,8 +9,32 @@ class WebSearchResult:
 
 
 class SearXNGClient:
-    def __init__(self, base_url: str = "http://localhost:8080"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        timeout: float = 10.0,
+    ):
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.is_available: bool = False
+
+    def probe(self) -> bool:
+        """
+        Check whether the SearXNG instance is reachable.
+        This should be called once at startup.
+        """
+        try:
+            requests.get(
+                f"{self.base_url}/search",
+                params={"q": "ping", "format": "json"},
+                timeout=2.0,
+            )
+            self.is_available = True
+        except Exception:
+            self.is_available = False
+
+        return self.is_available
+
 
     def search(self, query: str, limit: int = 5) -> list[WebSearchResult]:
         params = {

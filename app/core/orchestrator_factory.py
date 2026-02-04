@@ -44,6 +44,10 @@ def build_orchestrator() -> Orchestrator:
 
     # --- Tools ---
     web_search = SearXNGClient(base_url="http://localhost:8080")
+    if web_search.probe():
+        logger.info("Web search tool available")
+    else:
+        logger.warning("Web search tool unavailable, continuing without it")
 
     # --- Summarizers ---
     logger.info("Initializing summarizers")

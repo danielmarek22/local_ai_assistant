@@ -79,27 +79,33 @@ class Orchestrator:
         web_context = None
 
         if decision.action == "web_search":
-            yield AssistantStateEvent(state=AssistantState.SEARCHING)
-            logger.info("[%s] Performing web search", self.session_id)
-
-            try:
-                results = self.web_search.search(decision.query or user_text)
-                summary = self.search_summarizer.summarize(results)
-                web_context = f"External information:\n{summary}"
-
-                logger.debug(
-                    "[%s] Web context injected (%d chars)",
+            if not self.web_search.is_available:
+                logger.info(
+                    "[%s] Web search requested but unavailable, skipping",
                     self.session_id,
-                    len(web_context),
                 )
+            else:
+                yield AssistantStateEvent(state=AssistantState.SEARCHING)
+                logger.info("[%s] Performing web search", self.session_id)
 
-            except Exception as e:
-                logger.warning(
-                    "[%s] Web search failed, falling back to local response: %s",
-                    self.session_id,
-                    str(e),
-                )
-                web_context = None
+                try:
+                    results = self.web_search.search(decision.query or user_text)
+                    summary = self.search_summarizer.summarize(results)
+                    web_context = f"External information:\n{summary}"
+
+                    logger.debug(
+                        "[%s] Web context injected (%d chars)",
+                        self.session_id,
+                        len(web_context),
+                    )
+
+                except Exception:
+                    logger.warning(
+                        "[%s] Web search failed during execution, falling back to local response",
+                        self.session_id,
+                    )
+                    web_context = None
+
 
         # ------------------------------------------------------------------
         # 4. Context construction
