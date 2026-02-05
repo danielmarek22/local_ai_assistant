@@ -11,9 +11,23 @@ class Config:
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
 
-        # Planner config (NEW)
-        self.planner = self.raw.get("planner", {
-            "mode": "rule",
-            "llm_enabled": False,
-            "timeout_ms": 1500,
-        })
+        # Planner
+        self.planner = self.raw.get(
+            "planner",
+            {
+                "mode": "rule",
+                "llm_enabled": False,
+                "timeout_ms": 1500,
+            },
+        )
+
+        # Tools
+        self.tools = self.raw.get("tools", {})
+
+        # Orchestrator
+        self.orchestrator = self.raw.get(
+            "orchestrator",
+            {
+                "summary_trigger": 10,
+            },
+        )

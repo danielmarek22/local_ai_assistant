@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: deepseek-r1
+  model: mistral-nemo
 
   generation:
     temperature: 0.6
@@ -48,3 +48,12 @@ planner:
   llm_enabled: true
   timeout_ms: 1500
 
+tools:
+  web:
+    enabled: true
+    base_url: http://localhost:8080
+    timeout: 10.0
+    max_results: 5
+
+orchestrator:
+  summary_trigger: 10

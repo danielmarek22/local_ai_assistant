@@ -233,9 +233,9 @@
                 VRMUtils.removeUnnecessaryJoints(gltf.scene);
                 currentVrm = vrm;
                 scene.add(vrm.scene);
-                vrm.scene.rotation.y = Math.PI; 
-                vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = 1.2; 
-                vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = -1.2;
+                // vrm.scene.rotation.y = Math.PI; 
+                vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = -1.2; 
+                vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = 1.2;
             },
             (progress) => {},
             (error) => console.error(error)

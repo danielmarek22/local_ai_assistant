@@ -6,7 +6,7 @@ class ContextBuilder:
         memory_store,
         history_limit: int = 6,
         memory_limit: int = 5,
-        summary_store=None
+        summary_store=None,
     ):
         self.system_prompt = system_prompt
         self.history_store = history_store
@@ -19,21 +19,35 @@ class ContextBuilder:
         self,
         session_id: str,
         user_text: str,
-        web_context: str | None = None,
+        tool_context: str | None = None,
     ) -> list[dict]:
-        messages = []
+        messages: list[dict] = []
 
+        # --------------------------------------------------
         # 1. Base system prompt
+        # --------------------------------------------------
         messages.append({
             "role": "system",
-            "content": self.system_prompt
+            "content": self.system_prompt,
         })
 
-        # 2. Relevant memory
+        # --------------------------------------------------
+        # 2. Tool-provided context (optional, system-level)
+        # --------------------------------------------------
+        if tool_context:
+            messages.append({
+                "role": "system",
+                "content": tool_context,
+            })
+
+        # --------------------------------------------------
+        # 3. Relevant long-term memory
+        # --------------------------------------------------
         memories = self.memory_store.get_relevant(
             query=user_text,
-            limit=self.memory_limit
+            limit=self.memory_limit,
         )
+
         if memories:
             memory_block = (
                 "The following information is known about the user "
@@ -44,31 +58,30 @@ class ContextBuilder:
 
             messages.append({
                 "role": "system",
-                "content": memory_block.strip()
+                "content": memory_block.strip(),
             })
 
-        summary = self.summary_store.get(session_id)
+        # --------------------------------------------------
+        # 4. Conversation summary (if present)
+        # --------------------------------------------------
+        summary = self.summary_store.get(session_id) if self.summary_store else None
         if summary:
             messages.append({
                 "role": "system",
                 "content": (
                     "Summary of previous conversation:\n"
                     f"{summary}"
-                )
+                ),
             })
 
-        if web_context:
-            messages.append({
-                "role": "system",
-                "content": web_context
-            })
-
+        # --------------------------------------------------
+        # 5. Recent user history (deduplicated)
+        # --------------------------------------------------
         history_limit = 2 if summary else self.history_limit
 
-                # 3. Previous user messages only (no assistant, no duplicates)
         history = self.history_store.get_recent(
             session_id=session_id,
-            limit=history_limit
+            limit=history_limit,
         )
 
         seen = set()
@@ -77,6 +90,9 @@ class ContextBuilder:
                 continue
 
             content = row["content"].strip()
+
+            if not content:
+                continue
 
             # Skip duplicates
             if content in seen:
@@ -90,14 +106,15 @@ class ContextBuilder:
 
             messages.append({
                 "role": "user",
-                "content": content
+                "content": content,
             })
 
-        # 4. CURRENT user input (always last)
+        # --------------------------------------------------
+        # 6. Current user input (always last)
+        # --------------------------------------------------
         messages.append({
             "role": "user",
-            "content": user_text
+            "content": user_text,
         })
 
-        print(messages)
         return messages
