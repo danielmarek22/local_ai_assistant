@@ -5,6 +5,8 @@ from typing import Dict, Optional
 from app.core.events import AssistantSpeechEvent, AssistantStateEvent
 from app.core.assistant_state import AssistantState
 from app.core.intents import is_memory_command, extract_memory_content
+from app.core.actions import Action
+from app.core.plan import Plan
 
 logger = logging.getLogger("orchestrator")
 
@@ -19,6 +21,7 @@ class Orchestrator:
         summary_store,
         summarizer,
         planner,
+        memory_policy,
         tools: Dict[str, object],
         summary_trigger: int = 10,
     ):
@@ -31,6 +34,7 @@ class Orchestrator:
         self.planner = planner
         self.tools = tools
         self.summary_trigger = summary_trigger
+        self.memory_policy = memory_policy
 
         self.session_id = str(uuid.uuid4())[:8]
         logger.info("[%s] Orchestrator initialized", self.session_id)
@@ -46,17 +50,34 @@ class Orchestrator:
         # 1. Persist user input
         self.history.add(self.session_id, "user", user_text)
 
-        # 2. Explicit memory command (early exit)
-        for result in self._handle_explicit_memory_command(user_text):
-            if result:
-                return
-            return
+        # 2. Planning (decide actions)
+        plan = self._plan(user_text)
 
-        # 3. Planning
-        decision = self._plan(user_text)
+        logger.debug(
+            "[%s] Plan actions: %s",
+            self.session_id,
+            [action.type for action in plan.actions],
+        )
 
-        # 4. Optional tool execution
-        tool_context = yield from self._maybe_run_tool(decision, user_text)
+        tool_context: Optional[str] = None
+
+        # 3. Execute actions in order
+        for action in plan.actions:
+            if action.type == "web_search":
+                tool_context = yield from self._run_tool_action(action, user_text)
+
+            elif action.type == "write_memory":
+                self._run_memory_action(action)
+
+            elif action.type == "respond":
+                break
+
+            else:
+                logger.warning(
+                    "[%s] Unknown action '%s', skipping",
+                    self.session_id,
+                    action.type,
+                )
 
         # 5. Context construction
         messages = self._build_context(user_text, tool_context)
@@ -73,50 +94,87 @@ class Orchestrator:
         self._maybe_summarize()
 
     # ============================================================
-    # Planning & tools
+    # Planning
     # ============================================================
 
-    def _plan(self, user_text: str):
+    def _plan(self, user_text: str) -> Plan:
         logger.info("[%s] Running planner", self.session_id)
-        decision = self.planner.decide(user_text)
-        logger.info("[%s] Planner decision: %s", self.session_id, decision.action)
-        return decision
+        plan = self.planner.decide(user_text)
+        logger.info(
+            "[%s] Planner produced %d actions",
+            self.session_id,
+            len(plan.actions),
+        )
+        return plan
 
-    def _maybe_run_tool(self, decision, user_text: str) -> Optional[str]:
-        tool = self.tools.get(decision.action)
+    # ============================================================
+    # Action execution
+    # ============================================================
+
+    def _run_tool_action(self, action: Action, user_text: str) -> Optional[str]:
+        tool = self.tools.get(action.type)
 
         if not tool:
+            logger.info(
+                "[%s] Tool '%s' not registered, skipping",
+                self.session_id,
+                action.type,
+            )
             return None
 
         if not tool.is_available:
             logger.info(
-                "[%s] Tool '%s' requested but unavailable, skipping",
+                "[%s] Tool '%s' unavailable, skipping",
                 self.session_id,
-                decision.action,
+                action.type,
             )
             return None
 
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
-        logger.info("[%s] Running tool: %s", self.session_id, decision.action)
+        logger.info("[%s] Running tool: %s", self.session_id, action.type)
 
         try:
-            context = tool.run(decision.query or user_text)
+            query = (action.payload or {}).get("query") or user_text
+            context = tool.run(query)
+
             if context:
                 logger.debug(
                     "[%s] Tool '%s' returned context (%d chars)",
                     self.session_id,
-                    decision.action,
+                    action.type,
                     len(context),
                 )
+
             return context
 
         except Exception:
             logger.warning(
-                "[%s] Tool '%s' failed during execution, falling back",
+                "[%s] Tool '%s' failed, falling back",
                 self.session_id,
-                decision.action,
+                action.type,
             )
             return None
+
+    def _run_memory_action(self, action: Action):
+        decision = self.memory_policy.decide_from_action(action.payload or {})
+
+        if not decision:
+            logger.debug("[%s] Memory action ignored (no decision)", self.session_id)
+            return
+
+        self.memory.add(
+            content=decision.content,
+            category=decision.category,
+            importance=decision.importance,
+        )
+
+        logger.info(
+            "[%s] Memory written via policy (category=%s, importance=%d)",
+            self.session_id,
+            decision.category,
+            decision.importance,
+    )
+
 
     # ============================================================
     # Context & response
@@ -129,6 +187,7 @@ class Orchestrator:
             user_text=user_text,
             tool_context=tool_context,
         )
+        print(messages)
         logger.debug("[%s] Context message count: %d", self.session_id, len(messages))
         return messages
 
@@ -145,28 +204,8 @@ class Orchestrator:
         return buffer
 
     # ============================================================
-    # Memory & summarization
+    # Summarization
     # ============================================================
-
-    def _handle_explicit_memory_command(self, user_text: str) -> bool:
-        if not is_memory_command(user_text):
-            return False
-
-        logger.info("[%s] Memory command detected", self.session_id)
-        memory_content = extract_memory_content(user_text)
-
-        if memory_content:
-            self.memory.add(content=memory_content, importance=2)
-            response = "Got it. I’ll remember that."
-            logger.info("[%s] Memory stored: %s", self.session_id, memory_content)
-        else:
-            response = "What would you like me to remember?"
-            logger.info("[%s] Memory command without content", self.session_id)
-
-        self.history.add(self.session_id, "assistant", response)
-        yield AssistantSpeechEvent(text=response)
-        yield AssistantSpeechEvent(text=response, is_final=True)
-        return True
 
     def _maybe_summarize(self):
         logger.debug("[%s] Checking summarization conditions", self.session_id)

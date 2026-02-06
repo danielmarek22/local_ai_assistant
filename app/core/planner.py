@@ -1,16 +1,16 @@
 import re
+from app.core.actions import Action
+from app.core.plan import Plan
+from app.core.intents import is_memory_command, extract_memory_content
+from app.core.actions import Action
+from app.core.plan import Plan
 
-class PlannerDecision:
-    def __init__(
-        self,
-        action: str,              # "respond" | "web_search"
-        query: str | None = None, # rewritten query
-        reason: str | None = None # optional, for debugging
-    ):
-        self.action = action
-        self.query = query
-        self.reason = reason
 
+
+import re
+from app.core.actions import Action
+from app.core.plan import Plan
+from app.core.intents import is_memory_command, extract_memory_content
 
 
 class Planner:
@@ -25,18 +25,49 @@ class Planner:
         r"^where is\b",
     ]
 
-    def decide(self, user_text: str) -> PlannerDecision:
+    def decide(self, user_text: str) -> Plan:
+        actions = []
         text = user_text.lower().strip()
 
-        for pattern in self.SEARCH_PATTERNS:
-            if re.search(pattern, text):
-                return PlannerDecision(
-                    action="web_search",
-                    query=user_text,
-                    reason="rule_match"
+        # --------------------------------------------------
+        # 1. Explicit memory command
+        # --------------------------------------------------
+        if is_memory_command(user_text):
+            content = extract_memory_content(user_text)
+
+            if content:
+                actions.append(
+                    Action(
+                        type="write_memory",
+                        payload={"content": content},
+                    )
                 )
 
-        return PlannerDecision(
-            action="respond",
-            reason="rule_no_match"
+            # Always respond after memory intent
+            actions.append(Action(type="respond"))
+            return Plan(actions=actions)
+
+        # --------------------------------------------------
+        # 2. Web search intent
+        # --------------------------------------------------
+        for pattern in self.SEARCH_PATTERNS:
+            if re.search(pattern, text):
+                return Plan(
+                    actions=[
+                        Action(
+                            type="web_search",
+                            payload={"query": user_text},
+                        ),
+                        Action(type="respond"),
+                    ]
+                )
+
+        # --------------------------------------------------
+        # 3. Default response
+        # --------------------------------------------------
+        return Plan(
+            actions=[
+                Action(type="respond"),
+            ]
         )
+

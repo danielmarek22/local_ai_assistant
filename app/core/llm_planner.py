@@ -1,6 +1,7 @@
 import json
 import time
-from app.core.planner import PlannerDecision
+from app.core.actions import Action
+from app.core.plan import Plan
 
 
 class LLMPlanner:
@@ -8,7 +9,7 @@ class LLMPlanner:
         self.llm = llm
         self.timeout_ms = timeout_ms
 
-    def decide(self, user_text: str) -> PlannerDecision | None:
+    def decide(self, user_text: str) -> Plan:
         start = time.time()
 
         prompt = [
@@ -16,28 +17,54 @@ class LLMPlanner:
                 "role": "system",
                 "content": (
                     "You are a planner for an AI assistant.\n"
-                    "Decide whether web search is required.\n"
-                    "Output ONLY valid JSON.\n"
-                    "{ \"action\": \"respond | web_search\", "
-                    "\"query\": string | null, "
-                    "\"reason\": string }"
-                )
+                    "Decide what actions to take.\n"
+                    "Output ONLY valid JSON.\n\n"
+                    "Schema:\n"
+                    "{\n"
+                    '  "actions": [\n'
+                    '    { "type": "web_search", "query": string } | '
+                    '{ "type": "respond" } |\n'
+                    '    { "type": "write_memory", "content": string }\n'
+                    "  ]\n"
+                    "}"
+                ),
             },
-            {"role": "user", "content": user_text}
+            {"role": "user", "content": user_text},
         ]
 
         buffer = ""
         for chunk in self.llm.stream_chat(prompt):
             buffer += chunk
             if (time.time() - start) * 1000 > self.timeout_ms:
-                return None  # timeout → fallback
+                break  # timeout → fallback
 
         try:
             data = json.loads(buffer.strip())
-            return PlannerDecision(
-                action=data["action"],
-                query=data.get("query"),
-                reason=data.get("reason"),
-            )
+            actions = []
+
+            for item in data.get("actions", []):
+                if item["type"] == "web_search":
+                    actions.append(
+                        Action(
+                            type="web_search",
+                            payload={"query": item.get("query")},
+                        )
+                    )
+                elif item["type"] == "write_memory":
+                    actions.append(
+                        Action(
+                            type="write_memory",
+                            payload={"content": item.get("content")},
+                        )
+                    )
+                elif item["type"] == "respond":
+                    actions.append(Action(type="respond"))
+
+            if actions:
+                return Plan(actions=actions)
+
         except Exception:
-            return None
+            pass
+
+        # Fallback: always respond
+        return Plan(actions=[Action(type="respond")])
