@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 
 
+
 class Database:
     def __init__(self, path: str = "data/assistant.db"):
         Path("data").mkdir(exist_ok=True)
@@ -25,7 +26,7 @@ class Database:
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT,
+            category TEXT,
             content TEXT NOT NULL,
             importance INTEGER DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -39,6 +40,5 @@ class Database:
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """)
-
 
         self.conn.commit()

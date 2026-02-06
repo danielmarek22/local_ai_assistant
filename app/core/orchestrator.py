@@ -172,6 +172,7 @@ class Orchestrator:
             user_text=user_text,
             tool_context=tool_context,
         )
+        print(messages)
         logger.debug("[%s] Context message count: %d", self.session_id, len(messages))
         return messages
 
@@ -186,30 +187,6 @@ class Orchestrator:
 
         logger.info("[%s] LLM response complete (%d chars)", self.session_id, len(buffer))
         return buffer
-
-    # ============================================================
-    # Explicit memory command (temporary bridge)
-    # ============================================================
-
-    # def _handle_explicit_memory_command(self, user_text: str):
-    #     if not is_memory_command(user_text):
-    #         return False
-
-    #     logger.info("[%s] Memory command detected", self.session_id)
-    #     memory_content = extract_memory_content(user_text)
-
-    #     if memory_content:
-    #         self.memory.add(content=memory_content, importance=2)
-    #         response = "Got it. I’ll remember that."
-    #         logger.info("[%s] Memory stored: %s", self.session_id, memory_content)
-    #     else:
-    #         response = "What would you like me to remember?"
-    #         logger.info("[%s] Memory command without content", self.session_id)
-
-    #     self.history.add(self.session_id, "assistant", response)
-    #     yield AssistantSpeechEvent(text=response)
-    #     yield AssistantSpeechEvent(text=response, is_final=True)
-    #     return True
 
     # ============================================================
     # Summarization
