@@ -1,6 +1,6 @@
 import uuid
 import logging
-from typing import Dict, Optional
+from typing import Generator, Optional, Dict
 
 from app.core.events import AssistantSpeechEvent, AssistantStateEvent
 from app.core.assistant_state import AssistantState
@@ -111,7 +111,12 @@ class Orchestrator:
     # Action execution
     # ============================================================
 
-    def _run_tool_action(self, action: Action, user_text: str) -> Optional[str]:
+    def _run_tool_action(
+        self,
+        action: Action,
+        user_text: str,
+    ) -> Generator[AssistantStateEvent, None, Optional[str]]:
+        
         tool = self.tools.get(action.type)
 
         if not tool:
