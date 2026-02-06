@@ -11,6 +11,8 @@ from app.tools.web_search import SearXNGClient
 from app.tools.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.core.planner_factory import build_planner
+from app.memory.memory_policy import SimpleMemoryPolicy
+
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +58,9 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing summarizers")
     history_summarizer = HistorySummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
+
+    #Memory policy
+    memory_policy = SimpleMemoryPolicy()
 
     # --------------------------------------------------
     # Tools
@@ -111,5 +116,6 @@ def build_orchestrator() -> Orchestrator:
         summarizer=history_summarizer,
         planner=planner,
         tools=tools,
+        memory_policy=memory_policy,
         summary_trigger=10,
     )

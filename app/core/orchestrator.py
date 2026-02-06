@@ -21,6 +21,7 @@ class Orchestrator:
         summary_store,
         summarizer,
         planner,
+        memory_policy,
         tools: Dict[str, object],
         summary_trigger: int = 10,
     ):
@@ -33,6 +34,7 @@ class Orchestrator:
         self.planner = planner
         self.tools = tools
         self.summary_trigger = summary_trigger
+        self.memory_policy = memory_policy
 
         self.session_id = str(uuid.uuid4())[:8]
         logger.info("[%s] Orchestrator initialized", self.session_id)
@@ -154,12 +156,25 @@ class Orchestrator:
             return None
 
     def _run_memory_action(self, action: Action):
-        content = (action.payload or {}).get("content")
-        if not content:
+        decision = self.memory_policy.decide_from_action(action.payload or {})
+
+        if not decision:
+            logger.debug("[%s] Memory action ignored (no decision)", self.session_id)
             return
 
-        self.memory.add(content=content, importance=2)
-        logger.info("[%s] Memory written via planner action", self.session_id)
+        self.memory.add(
+            content=decision.content,
+            category=decision.category,
+            importance=decision.importance,
+        )
+
+        logger.info(
+            "[%s] Memory written via policy (category=%s, importance=%d)",
+            self.session_id,
+            decision.category,
+            decision.importance,
+    )
+
 
     # ============================================================
     # Context & response
