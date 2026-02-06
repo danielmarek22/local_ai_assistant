@@ -1,5 +1,6 @@
 import uuid
 import logging
+import time
 from typing import Generator, Optional, Dict
 
 from app.core.events import AssistantSpeechEvent, AssistantStateEvent
@@ -37,18 +38,33 @@ class Orchestrator:
         self.memory_policy = memory_policy
 
         self.session_id = str(uuid.uuid4())[:8]
-        logger.info("[%s] Orchestrator initialized", self.session_id)
+
+        logger.info(
+            "[%s] Orchestrator initialized (tools=%d, summary_trigger=%d)",
+            self.session_id,
+            len(tools),
+            summary_trigger,
+        )
 
     # ============================================================
     # Public entry point
     # ============================================================
 
     def handle_user_input(self, user_text: str):
-        logger.info("[%s] User input received: %s", self.session_id, user_text)
+        start_ts = time.perf_counter()
+
+        logger.info(
+            "[%s] User input received (len=%d)",
+            self.session_id,
+            len(user_text),
+        )
+        logger.debug("[%s] User input text: %r", self.session_id, user_text)
+
         yield AssistantStateEvent(state=AssistantState.THINKING)
 
         # 1. Persist user input
         self.history.add(self.session_id, "user", user_text)
+        logger.debug("[%s] User input persisted to history", self.session_id)
 
         # 2. Planning (decide actions)
         plan = self._plan(user_text)
@@ -63,6 +79,12 @@ class Orchestrator:
 
         # 3. Execute actions in order
         for action in plan.actions:
+            logger.info(
+                "[%s] Executing action '%s'",
+                self.session_id,
+                action.type,
+            )
+
             if action.type == "web_search":
                 tool_context = yield from self._run_tool_action(action, user_text)
 
@@ -70,6 +92,7 @@ class Orchestrator:
                 self._run_memory_action(action)
 
             elif action.type == "respond":
+                logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
                 break
 
             else:
@@ -79,19 +102,27 @@ class Orchestrator:
                     action.type,
                 )
 
-        # 5. Context construction
+        # 4. Context construction
         messages = self._build_context(user_text, tool_context)
 
-        # 6. LLM streaming response
+        # 5. LLM streaming response
         response = yield from self._stream_response(messages)
 
-        # 7. Persist assistant response
+        # 6. Persist assistant response
         self.history.add(self.session_id, "assistant", response)
+        logger.debug("[%s] Assistant response persisted to history", self.session_id)
+
         yield AssistantSpeechEvent(text=response, is_final=True)
         yield AssistantStateEvent(state=AssistantState.IDLE)
 
-        # 8. Post-processing (summarization)
+        # 7. Post-processing (summarization)
         self._maybe_summarize()
+
+        logger.info(
+            "[%s] Turn completed (duration=%.2f ms)",
+            self.session_id,
+            (time.perf_counter() - start_ts) * 1000,
+        )
 
     # ============================================================
     # Planning
@@ -99,7 +130,13 @@ class Orchestrator:
 
     def _plan(self, user_text: str) -> Plan:
         logger.info("[%s] Running planner", self.session_id)
-        plan = self.planner.decide(user_text)
+
+        try:
+            plan = self.planner.decide(user_text)
+        except Exception:
+            logger.exception("[%s] Planner failed", self.session_id)
+            raise
+
         logger.info(
             "[%s] Planner produced %d actions",
             self.session_id,
@@ -116,11 +153,11 @@ class Orchestrator:
         action: Action,
         user_text: str,
     ) -> Generator[AssistantStateEvent, None, Optional[str]]:
-        
+
         tool = self.tools.get(action.type)
 
         if not tool:
-            logger.info(
+            logger.warning(
                 "[%s] Tool '%s' not registered, skipping",
                 self.session_id,
                 action.type,
@@ -128,7 +165,7 @@ class Orchestrator:
             return None
 
         if not tool.is_available:
-            logger.info(
+            logger.warning(
                 "[%s] Tool '%s' unavailable, skipping",
                 self.session_id,
                 action.type,
@@ -136,11 +173,23 @@ class Orchestrator:
             return None
 
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
-        logger.info("[%s] Running tool: %s", self.session_id, action.type)
+
+        logger.info("[%s] Running tool '%s'", self.session_id, action.type)
+
+        start_ts = time.perf_counter()
 
         try:
             query = (action.payload or {}).get("query") or user_text
+            logger.debug("[%s] Tool '%s' query: %r", self.session_id, action.type, query)
+
             context = tool.run(query)
+
+            logger.info(
+                "[%s] Tool '%s' completed (duration=%.2f ms)",
+                self.session_id,
+                action.type,
+                (time.perf_counter() - start_ts) * 1000,
+            )
 
             if context:
                 logger.debug(
@@ -149,11 +198,13 @@ class Orchestrator:
                     action.type,
                     len(context),
                 )
+            else:
+                logger.debug("[%s] Tool '%s' returned no context", self.session_id, action.type)
 
             return context
 
         except Exception:
-            logger.warning(
+            logger.exception(
                 "[%s] Tool '%s' failed, falling back",
                 self.session_id,
                 action.type,
@@ -161,10 +212,12 @@ class Orchestrator:
             return None
 
     def _run_memory_action(self, action: Action):
+        logger.debug("[%s] Processing memory action", self.session_id)
+
         decision = self.memory_policy.decide_from_action(action.payload or {})
 
         if not decision:
-            logger.debug("[%s] Memory action ignored (no decision)", self.session_id)
+            logger.debug("[%s] Memory action ignored by policy", self.session_id)
             return
 
         self.memory.add(
@@ -174,12 +227,11 @@ class Orchestrator:
         )
 
         logger.info(
-            "[%s] Memory written via policy (category=%s, importance=%d)",
+            "[%s] Memory written (category=%s, importance=%d)",
             self.session_id,
             decision.category,
             decision.importance,
-    )
-
+        )
 
     # ============================================================
     # Context & response
@@ -187,13 +239,19 @@ class Orchestrator:
 
     def _build_context(self, user_text: str, tool_context: Optional[str]):
         logger.info("[%s] Building context", self.session_id)
+
         messages = self.context_builder.build(
             session_id=self.session_id,
             user_text=user_text,
             tool_context=tool_context,
         )
-        print(messages)
-        logger.debug("[%s] Context message count: %d", self.session_id, len(messages))
+
+        logger.debug(
+            "[%s] Context built (messages=%d, tool_context=%s)",
+            self.session_id,
+            len(messages),
+            bool(tool_context),
+        )
         return messages
 
     def _stream_response(self, messages):
@@ -201,11 +259,18 @@ class Orchestrator:
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
         buffer = ""
+        start_ts = time.perf_counter()
+
         for chunk in self.llm.stream_chat(messages):
             buffer += chunk
             yield AssistantSpeechEvent(text=chunk)
 
-        logger.info("[%s] LLM response complete (%d chars)", self.session_id, len(buffer))
+        logger.info(
+            "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
+            self.session_id,
+            len(buffer),
+            (time.perf_counter() - start_ts) * 1000,
+        )
         return buffer
 
     # ============================================================
@@ -240,7 +305,16 @@ class Orchestrator:
             for row in history
         ]
 
-        summary = self.summarizer.summarize(summary_input)
+        try:
+            summary = self.summarizer.summarize(summary_input)
+        except Exception:
+            logger.exception("[%s] Summarization failed", self.session_id)
+            return
+
         self.summary_store.set(self.session_id, summary)
 
-        logger.info("[%s] History summarized (%d chars)", self.session_id, len(summary))
+        logger.info(
+            "[%s] History summarized (%d chars)",
+            self.session_id,
+            len(summary),
+        )

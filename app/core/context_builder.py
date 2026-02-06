@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger("context_builder")
+
+
 class ContextBuilder:
     def __init__(
         self,
@@ -15,12 +20,22 @@ class ContextBuilder:
         self.memory_limit = memory_limit
         self.summary_store = summary_store
 
+        logger.info(
+            "ContextBuilder initialized (history_limit=%d, memory_limit=%d, summary=%s)",
+            history_limit,
+            memory_limit,
+            summary_store is not None,
+        )
+
     def build(
         self,
         session_id: str,
         user_text: str,
         tool_context: str | None = None,
     ) -> list[dict]:
+        logger.info("[%s] Building context", session_id)
+        logger.debug("[%s] User input len=%d", session_id, len(user_text))
+
         messages: list[dict] = []
 
         # --------------------------------------------------
@@ -30,6 +45,7 @@ class ContextBuilder:
             "role": "system",
             "content": self.system_prompt,
         })
+        logger.debug("[%s] Added base system prompt", session_id)
 
         # --------------------------------------------------
         # 2. Tool-provided context (optional, system-level)
@@ -39,6 +55,13 @@ class ContextBuilder:
                 "role": "system",
                 "content": tool_context,
             })
+            logger.info(
+                "[%s] Added tool context (len=%d)",
+                session_id,
+                len(tool_context),
+            )
+        else:
+            logger.debug("[%s] No tool context provided", session_id)
 
         # --------------------------------------------------
         # 3. Relevant long-term memory
@@ -49,6 +72,12 @@ class ContextBuilder:
         )
 
         if memories:
+            logger.info(
+                "[%s] Retrieved %d relevant memories",
+                session_id,
+                len(memories),
+            )
+
             memory_block = (
                 "The following information is known about the user "
                 "and should be considered when responding:\n"
@@ -60,6 +89,8 @@ class ContextBuilder:
                 "role": "system",
                 "content": memory_block.strip(),
             })
+        else:
+            logger.debug("[%s] No relevant memories found", session_id)
 
         # --------------------------------------------------
         # 4. Conversation summary (if present)
@@ -73,6 +104,13 @@ class ContextBuilder:
                     f"{summary}"
                 ),
             })
+            logger.info(
+                "[%s] Added conversation summary (len=%d)",
+                session_id,
+                len(summary),
+            )
+        else:
+            logger.debug("[%s] No conversation summary available", session_id)
 
         # --------------------------------------------------
         # 5. Recent user history (deduplicated)
@@ -84,30 +122,39 @@ class ContextBuilder:
             limit=history_limit,
         )
 
+        added_history = 0
         seen = set()
+
         for row in history:
             if row["role"] != "user":
                 continue
 
             content = row["content"].strip()
-
             if not content:
                 continue
 
-            # Skip duplicates
             if content in seen:
+                logger.debug("[%s] Skipping duplicate history entry", session_id)
                 continue
 
-            # Skip current input if already stored
             if content == user_text.strip():
+                logger.debug("[%s] Skipping current input from history", session_id)
                 continue
 
             seen.add(content)
+            added_history += 1
 
             messages.append({
                 "role": "user",
                 "content": content,
             })
+
+        logger.info(
+            "[%s] Added %d history messages (limit=%d)",
+            session_id,
+            added_history,
+            history_limit,
+        )
 
         # --------------------------------------------------
         # 6. Current user input (always last)
@@ -116,5 +163,11 @@ class ContextBuilder:
             "role": "user",
             "content": user_text,
         })
+
+        logger.debug(
+            "[%s] Final context built (total_messages=%d)",
+            session_id,
+            len(messages),
+        )
 
         return messages

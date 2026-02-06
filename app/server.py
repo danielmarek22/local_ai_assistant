@@ -6,6 +6,7 @@ from typing import Iterator, Any
 import json
 import logging
 import uuid
+import time
 from pathlib import Path
 
 from app.core.orchestrator_factory import build_orchestrator
@@ -23,6 +24,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Ensure audio directory exists
 AUDIO_DIR = Path("static/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
 tts = PiperTTS(
     model_path=Path("models/piper/en_US-amy-medium.onnx"),
@@ -30,7 +32,6 @@ tts = PiperTTS(
 )
 
 logger.info("Starting FastAPI server")
-
 
 _SENTINEL = object()
 
@@ -43,8 +44,13 @@ def _next_or_sentinel(iterator: Iterator[Any]):
 
 
 async def run_generator(gen: Iterator[Any]):
+    """
+    Run a blocking generator in an executor and re-yield items async.
+    """
     loop = asyncio.get_running_loop()
     iterator = iter(gen)
+
+    logger.debug("Starting generator bridge")
 
     while True:
         item = await loop.run_in_executor(
@@ -52,6 +58,7 @@ async def run_generator(gen: Iterator[Any]):
         )
 
         if item is _SENTINEL:
+            logger.debug("Generator exhausted")
             break
 
         yield item
@@ -59,15 +66,25 @@ async def run_generator(gen: Iterator[Any]):
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    session_id = uuid.uuid4().hex[:8]
+    start_ts = time.perf_counter()
+
     await ws.accept()
-    logger.info("WebSocket connected")
+    logger.info("[%s] WebSocket connected", session_id)
 
     orchestrator = build_orchestrator()
+    logger.debug("[%s] Orchestrator created", session_id)
 
     try:
         while True:
             user_text = await ws.receive_text()
-            logger.info("Received user input via WebSocket")
+
+            logger.info(
+                "[%s] Received user input (len=%d)",
+                session_id,
+                len(user_text),
+            )
+            logger.debug("[%s] User input text: %r", session_id, user_text)
 
             # Buffer for sentence-based TTS
             text_buffer = ""
@@ -77,6 +94,11 @@ async def websocket_endpoint(ws: WebSocket):
             ):
                 # --- STATE EVENTS ---
                 if isinstance(event, AssistantStateEvent):
+                    logger.debug(
+                        "[%s] Assistant state -> %s",
+                        session_id,
+                        event.state,
+                    )
                     await ws.send_text(json.dumps({
                         "type": "assistant_state",
                         "state": event.state,
@@ -85,25 +107,34 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # --- SPEECH EVENTS ---
                 if isinstance(event, AssistantSpeechEvent):
-                    # Accumulate streamed text
                     if not event.is_final:
                         text_buffer += event.text
 
-                        # Forward text chunk to frontend
                         await ws.send_text(json.dumps({
                             "type": "assistant_chunk",
                             "content": event.text,
                         }))
 
-                        # Sentence detection
                         sentences, text_buffer = split_sentences(text_buffer)
 
                         for sentence in sentences:
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
-                            logger.debug("Synthesizing sentence: %s", sentence)
+                            logger.debug(
+                                "[%s] TTS synth sentence (%d chars)",
+                                session_id,
+                                len(sentence),
+                            )
+
+                            tts_start = time.perf_counter()
                             tts.synthesize(sentence, audio_path)
+
+                            logger.debug(
+                                "[%s] TTS complete (%.2f ms)",
+                                session_id,
+                                (time.perf_counter() - tts_start) * 1000,
+                            )
 
                             await ws.send_text(json.dumps({
                                 "type": "assistant_audio",
@@ -111,15 +142,16 @@ async def websocket_endpoint(ws: WebSocket):
                             }))
 
                     else:
-                        # Final event: synthesize leftover text if any
                         if text_buffer.strip():
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                             logger.debug(
-                                "Synthesizing final fragment: %s",
-                                text_buffer
+                                "[%s] TTS final fragment (%d chars)",
+                                session_id,
+                                len(text_buffer),
                             )
+
                             tts.synthesize(text_buffer, audio_path)
 
                             await ws.send_text(json.dumps({
@@ -127,16 +159,31 @@ async def websocket_endpoint(ws: WebSocket):
                                 "url": f"/static/audio/{audio_id}.wav",
                             }))
 
-                        # Signal end of assistant turn
                         await ws.send_text(json.dumps({
                             "type": "assistant_end",
                             "content": event.text,
                         }))
 
+                        logger.info(
+                            "[%s] Assistant turn completed",
+                            session_id,
+                        )
+
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info(
+            "[%s] WebSocket disconnected (uptime=%.2f s)",
+            session_id,
+            time.perf_counter() - start_ts,
+        )
+
+    except Exception:
+        logger.exception("[%s] WebSocket handler crashed", session_id)
+
+    finally:
+        logger.debug("[%s] WebSocket cleanup complete", session_id)
 
 
 @app.get("/")
 async def get_index():
+    logger.debug("Serving index.html")
     return FileResponse("static/index.html")

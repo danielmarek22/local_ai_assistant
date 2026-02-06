@@ -1,3 +1,5 @@
+import logging
+
 from app.config import Config
 from app.llm.ollama_stream import OllamaClient
 from app.core.orchestrator import Orchestrator
@@ -13,20 +15,33 @@ from app.tools.web_search import WebSearchTool
 from app.core.planner_factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
 
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("orchestrator_factory")
 
 
 def build_orchestrator() -> Orchestrator:
-    logger.info("Loading configuration...")
+    logger.info("Building orchestrator")
+
+    # --------------------------------------------------
+    # Configuration
+    # --------------------------------------------------
+    logger.info("Loading configuration")
     config = Config()
+
+    logger.debug(
+        "Config summary: llm_model=%s, tools=%s",
+        config.llm.get("model"),
+        list(config.tools.keys()),
+    )
 
     # --------------------------------------------------
     # LLM
     # --------------------------------------------------
-    logger.info("Initializing LLM client: %s", config.llm["model"])
+    logger.info(
+        "Initializing LLM client (model=%s, host=%s)",
+        config.llm.get("model"),
+        config.llm.get("host"),
+    )
+
     llm = OllamaClient(
         model=config.llm["model"],
         host=config.llm["host"],
@@ -37,48 +52,70 @@ def build_orchestrator() -> Orchestrator:
         },
     )
 
+    logger.debug(
+        "LLM options: temperature=%.2f top_p=%.2f max_tokens=%d",
+        config.llm["generation"]["temperature"],
+        config.llm["generation"]["top_p"],
+        config.llm["generation"]["max_tokens"],
+    )
+
     # --------------------------------------------------
     # Storage
     # --------------------------------------------------
     logger.info("Initializing database and stores")
+
     db = Database()
     history_store = ChatHistoryStore(db)
     memory_store = MemoryStore(db)
     summary_store = SummaryStore(db)
+
+    logger.debug("Storage initialized: history, memory, summary")
 
     # --------------------------------------------------
     # Planner
     # --------------------------------------------------
     logger.info("Building planner")
     planner = build_planner(config, llm)
+    logger.info("Planner ready: %s", planner.__class__.__name__)
 
     # --------------------------------------------------
     # Summarizers
     # --------------------------------------------------
     logger.info("Initializing summarizers")
+
     history_summarizer = HistorySummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
 
-    #Memory policy
+    logger.debug(
+        "Summarizers ready: history=%s search=%s",
+        history_summarizer.__class__.__name__,
+        search_summarizer.__class__.__name__,
+    )
+
+    # --------------------------------------------------
+    # Memory policy
+    # --------------------------------------------------
     memory_policy = SimpleMemoryPolicy()
+    logger.debug("Memory policy: %s", memory_policy.__class__.__name__)
 
     # --------------------------------------------------
     # Tools
     # --------------------------------------------------
     tools = {}
-
     web_cfg = config.tools.get("web", {})
 
     if web_cfg.get("enabled", False):
+        logger.info("Web search tool enabled via config")
+
         web_client = SearXNGClient(
             base_url=web_cfg.get("base_url", "http://localhost:8080"),
             timeout=web_cfg.get("timeout", 10.0),
         )
 
         if web_client.probe():
-            logger.info("Web search tool available")
+            logger.info("Web search backend reachable")
         else:
-            logger.warning("Web search tool unavailable")
+            logger.warning("Web search backend unreachable")
 
         web_tool = WebSearchTool(
             client=web_client,
@@ -86,14 +123,16 @@ def build_orchestrator() -> Orchestrator:
         )
 
         tools[web_tool.name] = web_tool
+        logger.info("Web search tool registered as '%s'", web_tool.name)
+
     else:
         logger.info("Web search tool disabled via config")
-
 
     # --------------------------------------------------
     # Context builder
     # --------------------------------------------------
     logger.info("Setting up context builder")
+
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
         history_store=history_store,
@@ -103,11 +142,18 @@ def build_orchestrator() -> Orchestrator:
         memory_limit=5,
     )
 
+    logger.debug(
+        "Context builder configured (history_limit=%d, memory_limit=%d)",
+        6,
+        5,
+    )
+
     # --------------------------------------------------
     # Orchestrator
     # --------------------------------------------------
     logger.info("Initializing orchestrator")
-    return Orchestrator(
+
+    orchestrator = Orchestrator(
         llm=llm,
         context_builder=context_builder,
         history_store=history_store,
@@ -119,3 +165,10 @@ def build_orchestrator() -> Orchestrator:
         memory_policy=memory_policy,
         summary_trigger=10,
     )
+
+    logger.info(
+        "Orchestrator built successfully (tools=%d)",
+        len(tools),
+    )
+
+    return orchestrator
