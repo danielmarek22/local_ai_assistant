@@ -8,6 +8,7 @@ from app.core.assistant_state import AssistantState
 from app.core.intents import is_memory_command, extract_memory_content
 from app.core.actions import Action
 from app.core.plan import Plan
+from app.perception.state import PerceptionState
 
 logger = logging.getLogger("orchestrator")
 
@@ -37,6 +38,8 @@ class Orchestrator:
         self.summary_trigger = summary_trigger
         self.memory_policy = memory_policy
 
+        self.perception = PerceptionState()  # NEW
+
         self.session_id = str(uuid.uuid4())[:8]
 
         logger.info(
@@ -62,12 +65,28 @@ class Orchestrator:
 
         yield AssistantStateEvent(state=AssistantState.THINKING)
 
-        # 1. Persist user input
+        # --------------------------------------------------------
+        # 1. Update perception (NEW)
+        # --------------------------------------------------------
+        self.perception.update(
+            "user.input",
+            {
+                "text": user_text,
+                "source": "keyboard",  # later: voice
+            },
+        )
+
+        # --------------------------------------------------------
+        # 2. Persist user input
+        # --------------------------------------------------------
         self.history.add(self.session_id, "user", user_text)
         logger.debug("[%s] User input persisted to history", self.session_id)
 
-        # 2. Planning (decide actions)
-        plan = self._plan(user_text)
+        # --------------------------------------------------------
+        # 3. Planning (decide actions)
+        # --------------------------------------------------------
+        perception_snapshot = self.perception.snapshot()  # NEW
+        plan = self._plan(user_text, perception_snapshot)  # NEW
 
         logger.debug(
             "[%s] Plan actions: %s",
@@ -77,7 +96,9 @@ class Orchestrator:
 
         tool_context: Optional[str] = None
 
-        # 3. Execute actions in order
+        # --------------------------------------------------------
+        # 4. Execute actions
+        # --------------------------------------------------------
         for action in plan.actions:
             logger.info(
                 "[%s] Executing action '%s'",
@@ -92,7 +113,10 @@ class Orchestrator:
                 self._run_memory_action(action)
 
             elif action.type == "respond":
-                logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
+                logger.debug(
+                    "[%s] Respond action reached, stopping action loop",
+                    self.session_id,
+                )
                 break
 
             else:
@@ -102,20 +126,28 @@ class Orchestrator:
                     action.type,
                 )
 
-        # 4. Context construction
+        # --------------------------------------------------------
+        # 5. Context construction
+        # --------------------------------------------------------
         messages = self._build_context(user_text, tool_context)
 
-        # 5. LLM streaming response
+        # --------------------------------------------------------
+        # 6. LLM streaming response
+        # --------------------------------------------------------
         response = yield from self._stream_response(messages)
 
-        # 6. Persist assistant response
+        # --------------------------------------------------------
+        # 7. Persist assistant response
+        # --------------------------------------------------------
         self.history.add(self.session_id, "assistant", response)
         logger.debug("[%s] Assistant response persisted to history", self.session_id)
 
         yield AssistantSpeechEvent(text=response, is_final=True)
         yield AssistantStateEvent(state=AssistantState.IDLE)
 
-        # 7. Post-processing (summarization)
+        # --------------------------------------------------------
+        # 8. Post-processing (summarization)
+        # --------------------------------------------------------
         self._maybe_summarize()
 
         logger.info(
@@ -128,11 +160,14 @@ class Orchestrator:
     # Planning
     # ============================================================
 
-    def _plan(self, user_text: str) -> Plan:
+    def _plan(self, user_text: str, perception: dict) -> Plan:  # NEW
         logger.info("[%s] Running planner", self.session_id)
 
         try:
-            plan = self.planner.decide(user_text)
+            plan = self.planner.decide(
+                user_text=user_text,
+                perception=perception,  # NEW
+            )
         except Exception:
             logger.exception("[%s] Planner failed", self.session_id)
             raise

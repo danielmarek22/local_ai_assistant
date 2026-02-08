@@ -1,6 +1,7 @@
 import json
 import time
 import logging
+from typing import Dict
 
 from app.core.actions import Action
 from app.core.plan import Plan
@@ -18,7 +19,7 @@ class LLMPlanner:
             timeout_ms,
         )
 
-    def decide(self, user_text: str) -> Plan:
+    def decide(self, user_text: str, perception: dict) -> Plan:
         start_ts = time.perf_counter()
 
         logger.info(
@@ -27,13 +28,18 @@ class LLMPlanner:
         )
         logger.debug("LLMPlanner input text: %r", user_text)
 
+        perception_text = self._format_perception(perception)
+
         prompt = [
             {
                 "role": "system",
                 "content": (
                     "You are a planner for an AI assistant.\n"
                     "Decide what actions to take.\n"
+                    "Use the current environment context if helpful.\n"
                     "Output ONLY valid JSON.\n\n"
+                    "Current perception:\n"
+                    f"{perception_text}\n\n"
                     "Schema:\n"
                     "{\n"
                     '  "actions": [\n'
@@ -50,25 +56,15 @@ class LLMPlanner:
         buffer = ""
         timed_out = False
 
-        logger.debug("Starting LLM stream for planning")
-
         for chunk in self.llm.stream_chat(prompt):
             buffer += chunk
 
-            elapsed_ms = (time.perf_counter() - start_ts) * 1000
-            if elapsed_ms > self.timeout_ms:
+            if (time.perf_counter() - start_ts) * 1000 > self.timeout_ms:
                 timed_out = True
-                logger.warning(
-                    "LLMPlanner timeout after %.2f ms",
-                    elapsed_ms,
-                )
+                logger.warning("LLMPlanner timeout")
                 break
 
-        logger.debug(
-            "LLMPlanner raw output (%d chars): %r",
-            len(buffer),
-            buffer,
-        )
+        logger.debug("LLMPlanner raw output: %r", buffer)
 
         try:
             data = json.loads(buffer.strip())
@@ -101,26 +97,31 @@ class LLMPlanner:
 
             if actions:
                 logger.info(
-                    "LLMPlanner produced %d actions (timeout=%s, duration=%.2f ms)",
+                    "LLMPlanner produced %d actions (timeout=%s)",
                     len(actions),
                     timed_out,
-                    (time.perf_counter() - start_ts) * 1000,
                 )
                 return Plan(actions=actions)
 
-            logger.warning(
-                "LLMPlanner parsed JSON but produced no valid actions",
-            )
-
         except Exception:
-            logger.exception(
-                "LLMPlanner failed to parse output as JSON",
-            )
+            logger.exception("LLMPlanner failed to parse output")
 
-        # Fallback: always respond
-        logger.info(
-            "LLMPlanner fallback to default respond (duration=%.2f ms)",
-            (time.perf_counter() - start_ts) * 1000,
-        )
-
+        logger.info("LLMPlanner fallback to default respond")
         return Plan(actions=[Action(type="respond")])
+
+    def _format_perception(self, perception: dict) -> str:
+        if not perception:
+            return "No additional perception available."
+
+        lines = []
+        for key, entry in perception.items():
+            try:
+                age = f"{entry.age:.1f}s"
+                value = entry.value
+            except Exception:
+                age = "unknown"
+                value = entry
+
+            lines.append(f"- {key}: {value} (age: {age})")
+
+        return "\n".join(lines)

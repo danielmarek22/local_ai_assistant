@@ -1,5 +1,6 @@
 import re
 import logging
+from typing import Dict
 
 from app.core.actions import Action
 from app.core.plan import Plan
@@ -20,9 +21,15 @@ class Planner:
         r"^where is\b",
     ]
 
-    def decide(self, user_text: str) -> Plan:
+    def decide(self, user_text: str, perception: dict) -> Plan:
         logger.info("Planner invoked (len=%d)", len(user_text))
         logger.debug("Planner input text: %r", user_text)
+
+        # NEW: perception is accepted but not required
+        logger.debug(
+            "Planner perception keys: %s",
+            list(perception.keys()),
+        )
 
         actions = []
         text = user_text.lower().strip()
@@ -66,7 +73,7 @@ class Planner:
                     "Web search intent detected (pattern=%r)",
                     pattern,
                 )
-                plan = Plan(
+                return Plan(
                     actions=[
                         Action(
                             type="web_search",
@@ -76,19 +83,9 @@ class Planner:
                     ]
                 )
 
-                logger.info(
-                    "Planner decision: web_search + respond (%d actions)",
-                    len(plan.actions),
-                )
-                return plan
-
         # --------------------------------------------------
         # 3. Default response
         # --------------------------------------------------
         logger.info("Planner decision: default respond")
 
-        return Plan(
-            actions=[
-                Action(type="respond"),
-            ]
-        )
+        return Plan(actions=[Action(type="respond")])
