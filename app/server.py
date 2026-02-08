@@ -8,6 +8,7 @@ import logging
 import uuid
 import time
 from pathlib import Path
+from app.config import Config
 
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.events import AssistantSpeechEvent, AssistantStateEvent
@@ -26,9 +27,11 @@ AUDIO_DIR = Path("static/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
+config = Config()
+
 tts = PiperTTS(
-    model_path=Path("models/piper/en_US-amy-medium.onnx"),
-    use_cuda=False,
+    model_path=Path(config.tts["model_path"]),
+    use_cuda=config.tts["use_cuda"],
 )
 
 logger.info("Starting FastAPI server")

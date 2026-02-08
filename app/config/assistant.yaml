@@ -47,6 +47,17 @@ planner:
   mode: rule   # options: rule | llm | hybrid
   llm_enabled: true
   timeout_ms: 1500
+  
+orchestrator:
+  summary_trigger: 10
+
+context:
+  history_limit: 6
+  memory_limit: 5
+
+tts:
+  model_path: models/piper/en_US-amy-medium.onnx
+  use_cuda: false
 
 tools:
   web:

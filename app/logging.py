@@ -9,7 +9,7 @@ _LOGGING_CONFIGURED = False
 
 def setup_logging(level=logging.INFO, log_dir: str = "logs"):
     global _LOGGING_CONFIGURED
-
+    
     if _LOGGING_CONFIGURED:
         logging.getLogger(__name__).debug("Logging already configured, skipping")
         return

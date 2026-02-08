@@ -138,14 +138,14 @@ def build_orchestrator() -> Orchestrator:
         history_store=history_store,
         memory_store=memory_store,
         summary_store=summary_store,
-        history_limit=6,
-        memory_limit=5,
+        history_limit=config.context["history_limit"],
+        memory_limit=config.context["memory_limit"],
     )
 
     logger.debug(
         "Context builder configured (history_limit=%d, memory_limit=%d)",
-        6,
-        5,
+        config.context["history_limit"],
+        config.context["memory_limit"],
     )
 
     # --------------------------------------------------
@@ -163,7 +163,7 @@ def build_orchestrator() -> Orchestrator:
         planner=planner,
         tools=tools,
         memory_policy=memory_policy,
-        summary_trigger=10,
+        summary_trigger=config.orchestrator["summary_trigger"],
     )
 
     logger.info(
