@@ -108,8 +108,8 @@ def build_orchestrator() -> Orchestrator:
         logger.info("Web search tool enabled via config")
 
         web_client = SearXNGClient(
-            base_url=web_cfg.get("base_url", "http://localhost:8080"),
-            timeout=web_cfg.get("timeout", 10.0),
+            base_url=web_cfg.get("base_url", config.tools["web"]["base_url"]),
+            timeout=web_cfg.get("timeout", config.planner["timeout_ms"] / 1000),
         )
 
         if web_client.probe():
