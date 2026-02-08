@@ -18,6 +18,9 @@ def build_planner(config, llm):
         return llm_planner
 
     if mode == "hybrid":
-        return HybridPlanner(rule_planner, llm_planner)
+        return HybridPlanner(
+            rule_planner=rule_planner,
+            llm_planner=llm_planner,
+        )
 
     raise ValueError(f"Unknown planner mode: {mode}")
