@@ -1,204 +1,42 @@
-# Local AI Assistant Backend
 
-This project is a **fully local AI assistant backend** inspired by *Razer Project Ava*, but designed to run **entirely on the user’s machine**.
+# Local AI Assistant
 
-The focus is on **correct architecture**, **explicit control**, and **extensibility**, rather than prompt hacks or monolithic scripts. The system is designed to support future frontends such as **Live2D avatars**, **TTS**, and **real-time UI clients**, while remaining model- and backend-agnostic.
+Local AI Assistant is a modular, locally-runnable AI assistant framework designed for experimentation with LLMs, planning, memory, perception, and tool use.  
+It emphasizes **hackability**, **clear separation of concerns**, and **offline / local-first execution**.
 
----
+## PSA: Most of this project was vibe-coded. 
 
-## High-Level Goals
+## High-level Architecture
 
-- Run **fully locally** (no cloud dependencies)
-- Support **stateful conversations**
-- Separate **reasoning, planning, tools, and memory**
-- Enable **tool use** (web search) in a controlled way
-- Remain **model-agnostic** (Ollama now, llama.cpp later)
-- Be inspectable, debuggable, and extensible
+The system is composed of several loosely-coupled subsystems:
 
----
+- **Core orchestration** – session lifecycle, action routing, logging
+- **LLM interface** – model loading, prompting, and inference
+- **Planners** – decide *what* the assistant should do next
+- **Memory & storage** – long-term and short-term memory management
+- **Tools & services** – external capabilities exposed to the planner
+- **UI & server** – user interaction layer
 
-## Core Features
+Each major subsystem lives in its own directory under `app/` and is documented individually.
 
-### ✅ Local LLM Inference
-- Uses **Ollama** as the current backend
-- Streaming responses via OpenAI-compatible API
-- Easy to swap models (DeepSeek, LLaMA, Mistral, etc.)
+## Entry Points
 
-### ✅ Persistent Chat History
-- Stored in **SQLite**
-- Session-based
-- Lossless (no rewriting or deletion)
-- Used only as a data source, never blindly injected
+- `main.py` – application entry point
+- `app/server.py` – HTTP / UI server bootstrap
+- `app/config/assistant.yaml` – main configuration file
 
-### ✅ Long-Term Memory
-- Explicit memory writes (“remember this”)
-- Stored separately from chat history
-- Persisted across sessions
-- Injected into context deliberately
+## Philosophy
 
-### ✅ Context Builder (Central Control Point)
-- Single place where prompts are assembled
-- Injects:
-  - system instructions
-  - long-term memory
-  - conversation summaries
-  - web search context
-  - recent user turns
-- Prevents prompt bloat and accidental leakage
+This project is intentionally **not** a polished product.  
+It is a research playground for:
 
-### ✅ Conversation Summarization
-- Older conversations are summarized into a **factual, neutral recap**
-- Summaries are:
-  - domain-agnostic
-  - non-advisory
-  - safe against hallucination
-- Prevents long-context degradation
-- Full chat history is always preserved
+- Agent architectures
+- Memory policies
+- Planner / tool separation
+- Running LLMs efficiently on consumer hardware
 
-### ✅ Planner (Hybrid)
-- **Rule-based planner** for deterministic behavior
-- **LLM-based planner** for flexible intent detection
-- Unified decision format
-- Planner decides *whether* to use tools, never executes them
+Expect iteration, forks, and refactors.
 
-### ✅ Local Web Search (SearXNG)
-- Uses **SearXNG** running locally via Docker
-- JSON API only (no HTML scraping)
-- Privacy-friendly and offline-capable (LAN only)
+## Directory Overview
 
-### ✅ Constrained Search Result Summarization
-- Raw search results are **never** shown to the main LLM
-- A dedicated summarizer converts snippets into a neutral briefing
-- Strong constraints prevent hallucinated facts or quantities
-- Significantly improves factual grounding
-
----
-
-## Architecture Overview
-```
-User Input
-↓
-Orchestrator
-├─ Chat History Store
-├─ Manual Memory Handler
-├─ Planner (Hybrid)
-│ ├─ Rule-based
-│ └─ LLM-based
-├─ Web Search (SearXNG, optional)
-├─ Search Result Summarizer (optional)
-├─ Context Builder
-│ ├─ System Prompt
-│ ├─ Long-Term Memory
-│ ├─ Conversation Summary
-│ ├─ Web Context
-│ └─ Recent User Turns
-↓
-LLM (Streaming)
-↓
-Assistant Events
-↓
-History + Optional Summarization
-```
----
-
-## Project Structure
-```
-app/
-├── core/
-│ ├── orchestrator.py
-│ ├── context_builder.py
-│ ├── planner.py
-│ ├── llm_planner.py
-│ ├── hybrid_planner.py
-│ └── summarizer.py
-│
-├── memory/
-│ ├── chat_history.py
-│ ├── memory_store.py
-│ └── summary_store.py
-│
-├── storage/
-│ └── database.py
-│
-├── tools/
-│ ├── web_search.py
-│ ├── search_formatter.py
-│ └── search_summarizer.py
-│
-├── llm/
-│ └── ollama_client.py
-│
-├── ui/
-│ └── console.py
-│
-└── config/
-└── assistant.yaml
-```
-
----
-
-## Configuration
-
-All model and behavior configuration is externalized in YAML:
-
-- Model name
-- Backend host
-- Generation parameters
-- System prompt
-
-This allows rapid iteration without touching code.
-
----
-
-## Why This Design
-
-This project deliberately avoids:
-- prompt-only “agent” logic
-- letting the LLM decide which tools exist
-- stuffing full chat logs into the prompt
-- hidden state or global magic
-
-Instead, it follows a **backend-first philosophy**:
-> The LLM is a component — not the system.
-
-This makes the assistant:
-- predictable
-- debuggable
-- extensible
-- safe to evolve
-
----
-
-## Planned Extensions
-
-The backend is intentionally ready for:
-
-- 3D avatar frontend
-- TTS and audio I/O
-- Emotional state signaling
-- Tool caching
-- Citation rendering
-- llama.cpp backend swap
-- Vision or multimodal inputs
-
-No major refactor is required for these.
-
----
-
-## Status
-
-**Backend: feature-complete and stable**
-
-The current focus can safely shift to:
-- frontend integration
-- UX and embodiment (Live2D)
-- model experimentation
-- performance tuning
-
----
-
-## License
-
-Local / personal use.  
-License to be defined depending on future distribution.
-
+See the `README.md` files inside each subdirectory of `app/` for detailed explanations.
