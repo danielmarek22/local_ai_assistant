@@ -4,7 +4,7 @@ import logging
 from typing import Dict
 
 from app.core.actions import Action
-from app.core.plan import Plan
+from app.planners.plan import Plan
 
 logger = logging.getLogger("llm_planner")
 

@@ -12,7 +12,7 @@ from app.core.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.tools.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
-from app.core.planner_factory import build_planner
+from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
 
 logger = logging.getLogger("orchestrator_factory")

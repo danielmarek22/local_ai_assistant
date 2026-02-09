@@ -1,4 +1,4 @@
-from app.core.plan import Plan
+from app.planners.plan import Plan
 
 
 class HybridPlanner:
