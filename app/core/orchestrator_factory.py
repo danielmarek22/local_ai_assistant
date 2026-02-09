@@ -14,6 +14,7 @@ from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
+from app.services.tool_executor import ToolExecutor
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -102,6 +103,7 @@ def build_orchestrator() -> Orchestrator:
     # Tools
     # --------------------------------------------------
     tools = {}
+    
     web_cfg = config.tools.get("web", {})
 
     if web_cfg.get("enabled", False):
@@ -128,6 +130,8 @@ def build_orchestrator() -> Orchestrator:
     else:
         logger.info("Web search tool disabled via config")
 
+    tool_executor = ToolExecutor(tools)
+
     # --------------------------------------------------
     # Context builder
     # --------------------------------------------------
@@ -153,6 +157,7 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Initializing orchestrator")
 
+
     orchestrator = Orchestrator(
         llm=llm,
         context_builder=context_builder,
@@ -161,7 +166,7 @@ def build_orchestrator() -> Orchestrator:
         summary_store=summary_store,
         summarizer=history_summarizer,
         planner=planner,
-        tools=tools,
+        tool_executor=tool_executor,
         memory_policy=memory_policy,
         summary_trigger=config.orchestrator["summary_trigger"],
     )

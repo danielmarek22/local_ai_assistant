@@ -8,6 +8,8 @@ from app.core.assistant_state import AssistantState
 from app.core.actions import Action
 from app.core.plan import Plan
 from app.perception.state import PerceptionState
+from app.services.tool_executor import ToolExecutor
+
 
 logger = logging.getLogger("orchestrator")
 
@@ -23,7 +25,7 @@ class Orchestrator:
         summarizer,
         planner,
         memory_policy,
-        tools: Dict[str, object],
+        tool_executor: ToolExecutor,
         summary_trigger: int = 10,
     ):
         self.llm = llm
@@ -33,7 +35,7 @@ class Orchestrator:
         self.summary_store = summary_store
         self.summarizer = summarizer
         self.planner = planner
-        self.tools = tools
+        self.tool_executor = tool_executor
         self.summary_trigger = summary_trigger
         self.memory_policy = memory_policy
 
@@ -42,9 +44,8 @@ class Orchestrator:
         self.session_id = str(uuid.uuid4())[:8]
 
         logger.info(
-            "[%s] Orchestrator initialized (tools=%d, summary_trigger=%d)",
+            "[%s] Orchestrator initialized (summary_trigger=%d)",
             self.session_id,
-            len(tools),
             summary_trigger,
         )
 
@@ -106,7 +107,10 @@ class Orchestrator:
             )
 
             if action.type == "web_search":
-                tool_context = yield from self._run_tool_action(action, user_text)
+                    tool_context = yield from self.tool_executor.execute(
+                        action,
+                        user_text,
+                    )
 
             elif action.type == "write_memory":
                 self._run_memory_action(action)
