@@ -7,10 +7,10 @@ from app.storage.database import Database
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
-from app.core.context_builder import ContextBuilder
-from app.core.summarizer import HistorySummarizer
+from app.services.context_builder import ContextBuilder
+from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
-from app.tools.search_summarizer import SearchResultSummarizer
+from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy

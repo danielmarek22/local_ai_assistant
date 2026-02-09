@@ -14,7 +14,7 @@ from app.core.orchestrator_factory import build_orchestrator
 from app.core.events import AssistantSpeechEvent, AssistantStateEvent
 from app.logging import setup_logging
 from app.tts.piper_tts import PiperTTS
-from app.core.sentence_splitter import split_sentences
+from app.services.sentence_splitter import split_sentences
 
 setup_logging()
 logger = logging.getLogger("server")
