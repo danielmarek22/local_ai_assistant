@@ -10,12 +10,31 @@ class OllamaClient(LLMClient):
         self.url = f"{host}/v1/chat/completions"
         self.options = options or {}
 
+    def chat(self, messages) -> str:
+        """
+        Non-streaming chat call.
+        Used for planners, summarizers, and other structured outputs.
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": self.options,
+        }
+
+        r = requests.post(self.url, json=payload)
+        r.raise_for_status()
+
+        data = r.json()
+
+        return data["choices"][0]["message"]["content"]
+
     def stream_chat(self, messages):
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": self.options
+            "options": self.options,
         }
 
         with requests.post(self.url, json=payload, stream=True) as r:
@@ -27,7 +46,6 @@ class OllamaClient(LLMClient):
 
                 line = line.decode("utf-8")
 
-                # Ollama uses SSE-style streaming
                 if not line.startswith("data:"):
                     continue
 

@@ -54,17 +54,7 @@ class LLMPlanner:
             {"role": "user", "content": user_text},
         ]
 
-        buffer = ""
-        timed_out = False
-
-        for chunk in self.llm.stream_chat(prompt):
-            buffer += chunk
-
-            if (time.perf_counter() - start_ts) * 1000 > self.timeout_ms:
-                timed_out = True
-                logger.warning("LLMPlanner timeout")
-                break
-
+        buffer = self.llm.chat(prompt)
         logger.debug("LLMPlanner raw output: %r", buffer)
 
         try:
@@ -105,9 +95,8 @@ class LLMPlanner:
 
             if actions:
                 logger.info(
-                    "LLMPlanner produced %d actions (timeout=%s)",
+                    "LLMPlanner produced %d actions",
                     len(actions),
-                    timed_out,
                 )
                 return Plan(actions=actions)
 
