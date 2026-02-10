@@ -1,0 +1,125 @@
+
+/* --- GLOBAL STYLES --- */
+body { margin: 0; background-color: #111; color: white; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+#canvas-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0; }
+
+/* --- CHAT INTERFACE --- */
+#chat-panel {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    width: 350px;
+    height: calc(100vh - 40px);
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(10px);
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    transition: border-color 0.3s;
+}
+
+/* Status Header */
+#status-bar {
+    padding: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 14px;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #ccc;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #555;
+    box-shadow: 0 0 5px rgba(0,0,0,0.5);
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+
+/* Status Colors */
+.status-idle .status-dot { background-color: #00ff99; box-shadow: 0 0 10px #00ff99; }
+.status-thinking .status-dot { background-color: #ffcc00; animation: pulse 1s infinite; }
+.status-searching .status-dot { background-color: #00ccff; animation: pulse 1s infinite; }
+.status-responding .status-dot { background-color: #00ff99; }
+
+@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+#chat-history {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    scrollbar-width: thin;
+    scrollbar-color: #444 transparent;
+}
+
+/* Message Bubbles */
+.message {
+    padding: 12px 16px;
+    border-radius: 12px;
+    max-width: 85%;
+    word-wrap: break-word;
+    font-size: 14px;
+    line-height: 1.5;
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.message.user {
+    align-self: flex-end;
+    background: #00ff99;
+    color: #000;
+    border-bottom-right-radius: 2px;
+    box-shadow: 0 2px 5px rgba(0,255,153,0.2);
+}
+
+.message.astra {
+    align-self: flex-start;
+    background: rgba(255, 255, 255, 0.1);
+    color: #eee;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom-left-radius: 2px;
+}
+
+#input-area {
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.3);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    gap: 10px;
+    border-bottom-left-radius: 15px;
+    border-bottom-right-radius: 15px;
+}
+
+#user-input {
+    flex: 1;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    outline: none;
+    transition: border 0.2s;
+}
+#user-input:focus { border-color: #00ff99; }
+
+#send-btn {
+    padding: 0 20px;
+    border-radius: 8px;
+    border: none;
+    background: #00ff99;
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+#send-btn:active { transform: scale(0.95); }
