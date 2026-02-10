@@ -1,11 +1,21 @@
 from abc import ABC, abstractmethod
-from typing import Iterator
+from typing import Iterator, List, Dict
+
 
 class LLMClient(ABC):
     @abstractmethod
-    def stream_chat(self, messages: list[dict]) -> Iterator[str]:
+    def chat(self, messages: List[Dict]) -> str:
         """
-        Streams tokens from the LLM.
-        Yields text chunks.
+        Blocking, non-streaming call.
+        Must return the full assistant message.
+        Used for planners, summarizers, classifiers, etc.
         """
-        pass
+        raise NotImplementedError
+
+    @abstractmethod
+    def stream_chat(self, messages: List[Dict]) -> Iterator[str]:
+        """
+        Streaming call.
+        Yields text chunks for user-facing responses.
+        """
+        raise NotImplementedError
