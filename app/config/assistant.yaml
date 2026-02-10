@@ -44,7 +44,7 @@ assistant:
     default_emotion: neutral
     
 planner:
-  mode: rule   # options: rule | llm | hybrid
+  mode: llm   # options: rule | llm | hybrid
   llm_enabled: true
   timeout_ms: 1500
   

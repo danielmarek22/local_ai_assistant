@@ -1,7 +1,19 @@
-
 /* --- GLOBAL STYLES --- */
-body { margin: 0; background-color: #111; color: white; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
-#canvas-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0; }
+body { 
+    margin: 0; 
+    background-color: #111; 
+    color: white; 
+    overflow: hidden; 
+    font-family: 'Segoe UI', sans-serif; 
+}
+#canvas-container { 
+    position: fixed; 
+    top: 0; 
+    left: 0; 
+    width: 100vw; 
+    height: 100vh; 
+    z-index: 0; 
+}
 
 /* --- CHAT INTERFACE --- */
 #chat-panel {

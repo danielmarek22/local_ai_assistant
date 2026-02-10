@@ -2,9 +2,8 @@
 <html>
 <head>
     <title>Project Astra: Local AI</title>
-
-    <link rel="stylesheet" href="/static/css/main.css" />
-
+    <link rel="stylesheet" href="/static/css/styles.css">
+    
     <script type="importmap">
         {
             "imports": {
@@ -17,7 +16,7 @@
 </head>
 <body>
     <div id="canvas-container"></div>
-
+    
     <div id="chat-panel" class="status-idle">
         <div id="status-bar">
             <div class="status-dot"></div>
@@ -27,13 +26,12 @@
         <div id="chat-history">
             <div class="message astra">System: Online. Ready.</div>
         </div>
-
         <div id="input-area">
-            <input id="user-input" placeholder="Type a message..." autocomplete="off" />
+            <input type="text" id="user-input" placeholder="Type a message..." autocomplete="off" />
             <button id="send-btn">Send</button>
         </div>
     </div>
 
-    <script type="module" src="/static/js/app.js"></script>
+    <script type="module" src="/static/main.js"></script>
 </body>
 </html>

@@ -1,7 +1,8 @@
 import json
 import time
 import logging
-from typing import Dict
+import re
+from typing import Dict, Optional
 
 from app.core.actions import Action
 from app.core.plan import Plan
@@ -67,7 +68,11 @@ class LLMPlanner:
         logger.debug("LLMPlanner raw output: %r", buffer)
 
         try:
-            data = json.loads(buffer.strip())
+            data = self._extract_json(buffer)
+
+            if not data:
+                raise ValueError("No valid JSON found in LLM output")
+
             actions = []
 
             for item in data.get("actions", []):
@@ -80,6 +85,7 @@ class LLMPlanner:
                             payload={"query": item.get("query")},
                         )
                     )
+
                 elif action_type == "write_memory":
                     actions.append(
                         Action(
@@ -87,8 +93,10 @@ class LLMPlanner:
                             payload={"content": item.get("content")},
                         )
                     )
+
                 elif action_type == "respond":
                     actions.append(Action(type="respond"))
+
                 else:
                     logger.warning(
                         "Unknown action type from LLM: %r",
@@ -103,11 +111,37 @@ class LLMPlanner:
                 )
                 return Plan(actions=actions)
 
+            logger.warning("LLMPlanner parsed JSON but produced no actions")
+
         except Exception:
-            logger.exception("LLMPlanner failed to parse output")
+            logger.exception(
+                "LLMPlanner failed to parse output as JSON. Raw output: %r",
+                buffer,
+            )
 
         logger.info("LLMPlanner fallback to default respond")
         return Plan(actions=[Action(type="respond")])
+
+    # ============================================================
+    # Helpers
+    # ============================================================
+
+    def _extract_json(self, text: str) -> Optional[dict]:
+        """
+        Extract the first JSON object found in the text.
+        This makes the planner robust against:
+        - streamed partial output
+        - extra commentary
+        - markdown fences
+        """
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
 
     def _format_perception(self, perception: dict) -> str:
         if not perception:
