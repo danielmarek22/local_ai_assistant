@@ -107,6 +107,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     display: flex;
+    align-items: flex-end; /* Aligns button to bottom when text grows */
     gap: 10px;
     border-bottom-left-radius: 15px;
     border-bottom-right-radius: 15px;
@@ -121,10 +122,20 @@ body {
     color: white;
     outline: none;
     transition: border 0.2s;
+    
+    /* New styles for auto-expansion */
+    resize: none;         /* Hide manual resize handle */
+    overflow-y: hidden;   /* Hide scrollbar initially */
+    min-height: 20px;     /* Minimum height (approx 1 line) */
+    max-height: 150px;    /* Limit height to prevent taking over screen */
+    line-height: 1.5;     /* Good readability */
 }
+
 #user-input:focus { border-color: #00ff99; }
 
 #send-btn {
+    /* Height needs to match single-line input visually or auto-adjust */
+    height: 44px; /* Fixed height to align with single line of text */
     padding: 0 20px;
     border-radius: 8px;
     border: none;

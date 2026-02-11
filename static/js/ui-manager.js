@@ -9,6 +9,14 @@ export class UIManager {
         this.sendBtn = document.getElementById('send-btn');
         
         this.currentAiMessageDiv = null;
+        this.initAutoResize();
+    }
+
+    initAutoResize() {
+        this.userInput.addEventListener('input', () => {
+            this.userInput.style.height = 'auto'; // Reset to calculate shrink
+            this.userInput.style.height = this.userInput.scrollHeight + 'px';
+        });
     }
 
     updateStatus(state) {
@@ -57,16 +65,27 @@ export class UIManager {
     }
 
     onSend(callback) {
-        const handler = () => {
-            const text = this.userInput.value.trim();
-            if (!text) return;
-            callback(text);
-            this.userInput.value = "";
-        };
+            const handler = (e) => {
+                // If it's a keypress (Enter), prevent default newline
+                if (e && e.type === 'keypress') {
+                    e.preventDefault();
+                }
 
-        this.sendBtn.addEventListener('click', handler);
-        this.userInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') handler();
-        });
+                const text = this.userInput.value.trim();
+                if (!text) return;
+                
+                callback(text);
+                
+                this.userInput.value = "";
+                this.userInput.style.height = 'auto'; // Reset height after sending
+            };
+
+            this.sendBtn.addEventListener('click', () => handler());
+            
+            this.userInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    handler(e);
+                }
+            });
     }
 }
