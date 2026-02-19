@@ -8,6 +8,8 @@ import logging
 import uuid
 import time
 from pathlib import Path
+from dataclasses import dataclass
+from contextlib import suppress
 from app.config import Config
 
 from app.core.orchestrator_factory import build_orchestrator
@@ -37,6 +39,16 @@ tts = PiperTTS(
 logger.info("Starting FastAPI server")
 
 _SENTINEL = object()
+_TTS_STOP = object()
+TTS_QUEUE_MAXSIZE = 128
+
+
+@dataclass
+class TTSJob:
+    text: str
+    output_path: Path
+    result_future: asyncio.Future[None]
+    session_id: str
 
 
 def _next_or_sentinel(iterator: Iterator[Any]):
@@ -65,6 +77,83 @@ async def run_generator(gen: Iterator[Any]):
             break
 
         yield item
+
+
+async def tts_worker(queue: asyncio.Queue):
+    """
+    Single TTS worker that serializes synth requests and keeps blocking work
+    off the asyncio event loop.
+    """
+    loop = asyncio.get_running_loop()
+    logger.info("TTS worker started")
+
+    while True:
+        job = await queue.get()
+        try:
+            if job is _TTS_STOP:
+                logger.info("TTS worker stopping")
+                return
+
+            tts_start = time.perf_counter()
+            await loop.run_in_executor(
+                None,
+                tts.synthesize,
+                job.text,
+                job.output_path,
+            )
+
+            logger.debug(
+                "[%s] TTS complete (%.2f ms)",
+                job.session_id,
+                (time.perf_counter() - tts_start) * 1000,
+            )
+
+            if not job.result_future.done():
+                job.result_future.set_result(None)
+
+        except Exception as exc:
+            if isinstance(job, TTSJob) and not job.result_future.done():
+                job.result_future.set_exception(exc)
+            logger.exception("TTS worker failed to synthesize audio")
+
+        finally:
+            queue.task_done()
+
+
+async def synthesize_async(text: str, output_path: Path, session_id: str):
+    queue: asyncio.Queue = app.state.tts_queue
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[None] = loop.create_future()
+
+    await queue.put(
+        TTSJob(
+            text=text,
+            output_path=output_path,
+            result_future=result_future,
+            session_id=session_id,
+        )
+    )
+    await result_future
+
+
+@app.on_event("startup")
+async def startup_event():
+    app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
+    app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
+    logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    queue = getattr(app.state, "tts_queue", None)
+    worker_task = getattr(app.state, "tts_worker_task", None)
+
+    if queue is not None:
+        await queue.put(_TTS_STOP)
+
+    if worker_task is not None:
+        with suppress(asyncio.CancelledError):
+            await worker_task
 
 
 @app.websocket("/ws")
@@ -130,13 +219,10 @@ async def websocket_endpoint(ws: WebSocket):
                                 len(sentence),
                             )
 
-                            tts_start = time.perf_counter()
-                            tts.synthesize(sentence, audio_path)
-
-                            logger.debug(
-                                "[%s] TTS complete (%.2f ms)",
-                                session_id,
-                                (time.perf_counter() - tts_start) * 1000,
+                            await synthesize_async(
+                                text=sentence,
+                                output_path=audio_path,
+                                session_id=session_id,
                             )
 
                             await ws.send_text(json.dumps({
@@ -155,7 +241,11 @@ async def websocket_endpoint(ws: WebSocket):
                                 len(text_buffer),
                             )
 
-                            tts.synthesize(text_buffer, audio_path)
+                            await synthesize_async(
+                                text=text_buffer,
+                                output_path=audio_path,
+                                session_id=session_id,
+                            )
 
                             await ws.send_text(json.dumps({
                                 "type": "assistant_audio",

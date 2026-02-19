@@ -5,5 +5,5 @@ pyyaml
 fastapi
 uvicorn[standard]
 piper-tts
- onnxruntime-gpu
+onnxruntime-gpu
 
