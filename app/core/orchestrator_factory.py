@@ -139,6 +139,7 @@ def build_orchestrator() -> Orchestrator:
 
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
+        user_context=config.user_context,
         history_store=history_store,
         memory_store=memory_store,
         summary_store=summary_store,

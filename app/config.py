@@ -1,6 +1,5 @@
 from pathlib import Path
 import yaml
-import logging
 
 
 class Config:
@@ -11,6 +10,7 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
+        self.user_context = self.raw.get("user_context", {})
 
         # Planner
         self.planner = self.raw.get(

@@ -42,6 +42,15 @@ assistant:
 
   personality:
     default_emotion: neutral
+
+user_context:
+  name: user
+  timezone: America/New_York
+  preferences: concise, practical answers
+  profile: |
+    The user is a software engineer working on this local assistant project.
+    Prefer implementation-first suggestions with explicit tradeoffs.
+    Avoid long motivational language.
     
 planner:
   mode: llm   # options: rule | llm | hybrid
