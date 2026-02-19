@@ -65,6 +65,3 @@ tools:
     base_url: http://localhost:8080
     timeout: 10.0
     max_results: 5
-
-orchestrator:
-  summary_trigger: 10
