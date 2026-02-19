@@ -40,3 +40,14 @@ Expect iteration, forks, and refactors.
 ## Directory Overview
 
 See the `README.md` files inside each subdirectory of `app/` for detailed explanations.
+
+## Running Tests
+
+The project now includes a baseline unit test suite under `tests/` for planner logic, context building, and memory ranking behavior.  
+From the project root, run:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+For a deeper breakdown of test scope and how to add more coverage, see `tests/README.md`.
