@@ -12,7 +12,10 @@ def build_planner(config, llm):
     if mode == "rule" or not llm_enabled:
         return rule_planner
 
-    llm_planner = LLMPlanner(llm)
+    llm_planner = LLMPlanner(
+        llm,
+        timeout_ms=config.planner.get("timeout_ms", 4000),
+    )
 
     if mode == "llm":
         return llm_planner

@@ -138,6 +138,9 @@ async def synthesize_async(text: str, output_path: Path, session_id: str):
 
 @app.on_event("startup")
 async def startup_event():
+    app.state.orchestrator = build_orchestrator()
+    logger.info("Orchestrator initialized at startup")
+
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
@@ -164,8 +167,8 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     logger.info("[%s] WebSocket connected", session_id)
 
-    orchestrator = build_orchestrator()
-    logger.debug("[%s] Orchestrator created", session_id)
+    orchestrator = app.state.orchestrator
+    logger.debug("[%s] Reusing startup orchestrator", session_id)
 
     try:
         while True:

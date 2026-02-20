@@ -55,7 +55,7 @@ user_context:
 planner:
   mode: llm   # options: rule | llm | hybrid
   llm_enabled: true
-  timeout_ms: 1500
+  timeout_ms: 4000
   
 orchestrator:
   summary_trigger: 10

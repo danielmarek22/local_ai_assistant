@@ -18,7 +18,7 @@ class Config:
             {
                 "mode": "rule",
                 "llm_enabled": False,
-                "timeout_ms": 1500,
+                "timeout_ms": 4000,
             },
         )
 

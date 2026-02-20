@@ -1,4 +1,5 @@
 import unittest
+import time
 
 from app.planners.llm_planner import LLMPlanner
 
@@ -8,6 +9,16 @@ class FakeLLM:
         self.response = response
 
     def chat(self, _messages):
+        return self.response
+
+
+class SlowLLM:
+    def __init__(self, delay_s: float, response: str):
+        self.delay_s = delay_s
+        self.response = response
+
+    def chat(self, _messages):
+        time.sleep(self.delay_s)
         return self.response
 
 
@@ -38,6 +49,26 @@ class LLMPlannerTests(unittest.TestCase):
     def test_invalid_json_falls_back_to_respond(self):
         llm = FakeLLM("not-json")
         planner = LLMPlanner(llm)
+
+        plan = planner.decide("hello", {})
+
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].type, "respond")
+
+    def test_missing_required_action_fields_are_skipped(self):
+        llm = FakeLLM('{"actions":[{"type":"web_search"},{"type":"respond"}]}')
+        planner = LLMPlanner(llm)
+
+        plan = planner.decide("hello", {})
+
+        self.assertEqual([a.type for a in plan.actions], ["respond"])
+
+    def test_timeout_falls_back_to_respond(self):
+        llm = SlowLLM(
+            delay_s=0.05,
+            response='{"actions":[{"type":"respond"}]}',
+        )
+        planner = LLMPlanner(llm, timeout_ms=10)
 
         plan = planner.decide("hello", {})
 
