@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("context_builder")
 
@@ -50,7 +51,20 @@ class ContextBuilder:
         logger.debug("[%s] Added base system prompt", session_id)
 
         # --------------------------------------------------
-        # 2. Static user profile/context from config (optional)
+        # 2. Current local system datetime
+        # --------------------------------------------------
+        now_local = datetime.now().astimezone()
+        messages.append({
+            "role": "system",
+            "content": (
+                "Current system datetime (local): "
+                f"{now_local.isoformat()}"
+            ),
+        })
+        logger.debug("[%s] Added current system datetime context", session_id)
+
+        # --------------------------------------------------
+        # 3. Static user profile/context from config (optional)
         # --------------------------------------------------
         if self.user_context:
             user_lines = []
@@ -80,7 +94,7 @@ class ContextBuilder:
                 )
 
         # --------------------------------------------------
-        # 3. Tool-provided context (optional, system-level)
+        # 4. Tool-provided context (optional, system-level)
         # --------------------------------------------------
         if tool_context:
             messages.append({
@@ -96,7 +110,7 @@ class ContextBuilder:
             logger.debug("[%s] No tool context provided", session_id)
 
         # --------------------------------------------------
-        # 4. Relevant long-term memory
+        # 5. Relevant long-term memory
         # --------------------------------------------------
         memories = self.memory_store.get_relevant(
             query=user_text,
@@ -125,7 +139,7 @@ class ContextBuilder:
             logger.debug("[%s] No relevant memories found", session_id)
 
         # --------------------------------------------------
-        # 5. Conversation summary (if present)
+        # 6. Conversation summary (if present)
         # --------------------------------------------------
         summary = self.summary_store.get(session_id) if self.summary_store else None
         if summary:
@@ -145,7 +159,7 @@ class ContextBuilder:
             logger.debug("[%s] No conversation summary available", session_id)
 
         # --------------------------------------------------
-        # 6. Recent conversation history (deduplicated)
+        # 7. Recent conversation history (deduplicated)
         # --------------------------------------------------
         history_limit = 2 if summary else self.history_limit
 
@@ -191,7 +205,7 @@ class ContextBuilder:
         )
 
         # --------------------------------------------------
-        # 7. Current user input (always last)
+        # 8. Current user input (always last)
         # --------------------------------------------------
         messages.append({
             "role": "user",
@@ -203,5 +217,7 @@ class ContextBuilder:
             session_id,
             len(messages),
         )
+
+        print(messages)
 
         return messages

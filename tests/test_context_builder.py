@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 
 from app.services.context_builder import ContextBuilder
 
@@ -63,8 +64,18 @@ class ContextBuilderTests(unittest.TestCase):
         )
 
         self.assertEqual(messages[0], {"role": "system", "content": "System prompt"})
-        self.assertEqual(messages[1]["role"], "system")
-        self.assertIn("External information:", messages[1]["content"])
+        system_contents = [m["content"] for m in messages if m["role"] == "system"]
+        datetime_line = next(
+            (c for c in system_contents if c.startswith("Current system datetime (local): ")),
+            None,
+        )
+        self.assertIsNotNone(datetime_line)
+        self.assertIsNotNone(
+            datetime.fromisoformat(datetime_line.split(": ", 1)[1]),
+        )
+        self.assertTrue(
+            any("External information:" in c for c in system_contents),
+        )
         self.assertEqual(messages[-1], {"role": "user", "content": "Current question"})
 
         all_user_contents = [m["content"] for m in messages if m["role"] == "user"]
@@ -103,11 +114,19 @@ class ContextBuilderTests(unittest.TestCase):
             tool_context=None,
         )
 
-        self.assertEqual(messages[1]["role"], "system")
-        self.assertIn("User profile/context (configured):", messages[1]["content"])
-        self.assertIn("- name: Bob", messages[1]["content"])
-        self.assertIn("- timezone: America/New_York", messages[1]["content"])
-        self.assertIn("- preferences: concise answers", messages[1]["content"])
+        user_context_message = next(
+            (
+                m["content"]
+                for m in messages
+                if m["role"] == "system"
+                and "User profile/context (configured):" in m["content"]
+            ),
+            "",
+        )
+        self.assertIn("User profile/context (configured):", user_context_message)
+        self.assertIn("- name: Bob", user_context_message)
+        self.assertIn("- timezone: America/New_York", user_context_message)
+        self.assertIn("- preferences: concise answers", user_context_message)
 
     def test_build_includes_multiline_user_profile_inside_user_context(self):
         history = FakeHistoryStore([])
@@ -135,19 +154,26 @@ class ContextBuilderTests(unittest.TestCase):
             tool_context=None,
         )
 
-        profile_messages = [m for m in messages if m["role"] == "system"]
-        self.assertGreaterEqual(len(profile_messages), 2)
+        profile_message = next(
+            (
+                m["content"]
+                for m in messages
+                if m["role"] == "system"
+                and "- profile:" in m["content"]
+            ),
+            "",
+        )
         self.assertIn(
             "- profile:",
-            profile_messages[1]["content"],
+            profile_message,
         )
         self.assertIn(
             "User has ADHD.",
-            profile_messages[1]["content"],
+            profile_message,
         )
         self.assertIn(
             "Prefers short, direct responses.",
-            profile_messages[1]["content"],
+            profile_message,
         )
 
 
