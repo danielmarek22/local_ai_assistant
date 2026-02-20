@@ -6,4 +6,3 @@ fastapi
 uvicorn[standard]
 piper-tts
 onnxruntime-gpu
-
