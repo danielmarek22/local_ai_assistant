@@ -102,6 +102,61 @@ body {
     border-bottom-left-radius: 2px;
 }
 
+/* Markdown content in assistant bubbles */
+.message.astra p {
+    margin: 0 0 0.6em;
+}
+
+.message.astra p:last-child {
+    margin-bottom: 0;
+}
+
+.message.astra ul,
+.message.astra ol {
+    margin: 0.3em 0 0.6em 1.2em;
+    padding: 0;
+}
+
+.message.astra li + li {
+    margin-top: 0.2em;
+}
+
+.message.astra code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.9em;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    padding: 0.1em 0.35em;
+}
+
+.message.astra pre {
+    margin: 0.5em 0;
+    padding: 0.75em;
+    overflow-x: auto;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+}
+
+.message.astra pre code {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+}
+
+.message.astra a {
+    color: #6fd6ff;
+}
+
+.message.astra blockquote {
+    margin: 0.5em 0;
+    padding-left: 0.8em;
+    border-left: 3px solid rgba(255, 255, 255, 0.25);
+    color: #d8d8d8;
+}
+
 #input-area {
     padding: 15px;
     background: rgba(0, 0, 0, 0.3);

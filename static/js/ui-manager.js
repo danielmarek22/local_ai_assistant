@@ -1,4 +1,11 @@
 import { CONFIG } from './config.js';
+import { marked } from 'https://cdn.jsdelivr.net/npm/marked@13.0.2/lib/marked.esm.js';
+import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.1.6/+esm';
+
+marked.setOptions({
+    gfm: true,
+    breaks: true
+});
 
 export class UIManager {
     constructor() {
@@ -40,13 +47,14 @@ export class UIManager {
 
     appendToAiMessage(text) {
         if (!this.currentAiMessageDiv) this.startAiMessage();
-        this.currentAiMessageDiv.innerText += text;
+        const rawText = (this.currentAiMessageDiv.dataset.rawText || '') + text;
+        this.setMessageContent(this.currentAiMessageDiv, rawText);
         this.scrollToBottom();
     }
 
     finalizeAiMessage(text) {
         if (this.currentAiMessageDiv) {
-            this.currentAiMessageDiv.innerText = text;
+            this.setMessageContent(this.currentAiMessageDiv, text);
             this.currentAiMessageDiv = null;
         }
     }
@@ -54,10 +62,30 @@ export class UIManager {
     createMessageDiv(sender, text) {
         const msgDiv = document.createElement('div');
         msgDiv.classList.add('message', sender);
-        msgDiv.innerText = text;
+        this.setMessageContent(msgDiv, text);
         this.chatHistory.appendChild(msgDiv);
         this.scrollToBottom();
         return msgDiv;
+    }
+
+    setMessageContent(msgDiv, text) {
+        msgDiv.dataset.rawText = text;
+
+        if (msgDiv.classList.contains('astra')) {
+            const unsafeHtml = marked.parse(text);
+            const safeHtml = DOMPurify.sanitize(unsafeHtml, {
+                USE_PROFILES: { html: true }
+            });
+            msgDiv.innerHTML = safeHtml;
+
+            for (const link of msgDiv.querySelectorAll('a')) {
+                link.setAttribute('target', '_blank');
+                link.setAttribute('rel', 'noopener noreferrer');
+            }
+            return;
+        }
+
+        msgDiv.innerText = text;
     }
 
     scrollToBottom() {
