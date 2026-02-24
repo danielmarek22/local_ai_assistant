@@ -6,6 +6,10 @@ body {
     overflow: hidden; 
     font-family: 'Segoe UI', sans-serif; 
 }
+
+.hidden {
+    display: none !important;
+}
 #canvas-container { 
     position: fixed; 
     top: 0; 
@@ -22,12 +26,18 @@ body {
     left: 20px;
     width: 350px;
     height: calc(100vh - 40px);
+    min-width: 280px;
+    min-height: 260px;
+    max-width: calc(100vw - 40px);
+    max-height: calc(100vh - 40px);
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(10px);
     border-radius: 15px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     display: flex;
     flex-direction: column;
+    resize: both;
+    overflow: hidden;
     z-index: 10;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     transition: border-color 0.3s;
@@ -40,9 +50,15 @@ body {
     font-size: 14px;
     font-weight: bold;
     display: flex;
+    align-items: center;    
+    justify-content: space-between;
+    color: #ccc;
+}
+
+.status-left {
+    display: flex;
     align-items: center;
     gap: 10px;
-    color: #ccc;
 }
 
 .status-dot {
@@ -59,6 +75,37 @@ body {
 .status-thinking .status-dot { background-color: #ffcc00; animation: pulse 1s infinite; }
 .status-searching .status-dot { background-color: #00ccff; animation: pulse 1s infinite; }
 .status-responding .status-dot { background-color: #00ff99; }
+
+.panel-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.08);
+    color: #ddd;
+    cursor: pointer;
+}
+
+.panel-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.chat-open-btn {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 11;
+    padding: 10px 16px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.7);
+    color: #eee;
+    cursor: pointer;
+}
+
+.chat-open-btn.hidden {
+    display: none;
+}
 
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 

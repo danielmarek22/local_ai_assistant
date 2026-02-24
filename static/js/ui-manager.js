@@ -14,9 +14,12 @@ export class UIManager {
         this.chatHistory = document.getElementById('chat-history');
         this.userInput = document.getElementById('user-input');
         this.sendBtn = document.getElementById('send-btn');
+        this.chatCloseBtn = document.getElementById('chat-close-btn');
+        this.chatOpenBtn = document.getElementById('chat-open-btn');
         
         this.currentAiMessageDiv = null;
         this.initAutoResize();
+        this.initPanelControls();
     }
 
     initAutoResize() {
@@ -24,6 +27,21 @@ export class UIManager {
             this.userInput.style.height = 'auto'; // Reset to calculate shrink
             this.userInput.style.height = this.userInput.scrollHeight + 'px';
         });
+    }
+
+    initPanelControls() {
+        this.chatCloseBtn.addEventListener('click', () => {
+            this.chatPanel.classList.add('hidden');
+            this.chatOpenBtn.classList.remove('hidden');
+        });
+
+        this.chatOpenBtn.addEventListener('click', () => {
+            this.chatPanel.classList.remove('hidden');
+            this.chatOpenBtn.classList.add('hidden');
+            this.userInput.focus();
+        });
+
+        this.chatOpenBtn.classList.add('hidden');
     }
 
     updateStatus(state) {
