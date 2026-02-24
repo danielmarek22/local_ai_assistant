@@ -5,6 +5,7 @@ import asyncio
 from typing import Iterator, Any
 import json
 import logging
+import re
 import uuid
 import time
 from pathlib import Path
@@ -41,6 +42,25 @@ logger.info("Starting FastAPI server")
 _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
+_FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MARKDOWN_MARKER_RE = re.compile(r"[*_~`>#]")
+
+
+def _prepare_tts_text(text: str) -> str:
+    """
+    Lightweight markdown skipping for TTS:
+    - drop fenced code blocks
+    - keep link labels, drop URLs
+    - remove common markdown marker chars
+    """
+    if not text:
+        return ""
+
+    cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", text)
+    cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_MARKER_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 @dataclass
@@ -213,17 +233,21 @@ async def websocket_endpoint(ws: WebSocket):
                         sentences, text_buffer = split_sentences(text_buffer)
 
                         for sentence in sentences:
+                            tts_text = _prepare_tts_text(sentence)
+                            if not tts_text:
+                                continue
+
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                             logger.debug(
                                 "[%s] TTS synth sentence (%d chars)",
                                 session_id,
-                                len(sentence),
+                                len(tts_text),
                             )
 
                             await synthesize_async(
-                                text=sentence,
+                                text=tts_text,
                                 output_path=audio_path,
                                 session_id=session_id,
                             )
@@ -234,18 +258,19 @@ async def websocket_endpoint(ws: WebSocket):
                             }))
 
                     else:
-                        if text_buffer.strip():
+                        tts_text = _prepare_tts_text(text_buffer)
+                        if tts_text:
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                             logger.debug(
                                 "[%s] TTS final fragment (%d chars)",
                                 session_id,
-                                len(text_buffer),
+                                len(tts_text),
                             )
 
                             await synthesize_async(
-                                text=text_buffer,
+                                text=tts_text,
                                 output_path=audio_path,
                                 session_id=session_id,
                             )
