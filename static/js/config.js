@@ -13,10 +13,12 @@ export const CONFIG = {
             idle:       [
                 '/static/animations/Idle_1.fbx', 
                 '/static/animations/Idle_2.fbx',
-                // '/static/animations/Idle_3.fbx'
+                '/static/animations/Idle_3.fbx',
+                '/static/animations/Idle_4.fbx'
             ],
             thinking:   [
-                '/static/animations/Thinking_1.fbx' // Arrays work even with just one item!
+                '/static/animations/Thinking_1.fbx',
+                '/static/animations/Thinking_2.fbx'
             ],
             searching:  [
                 '/static/animations/Typing_Or_Searching.fbx'
@@ -35,6 +37,9 @@ export const CONFIG = {
         LIP_SYNC_SMOOTHING: 0.3   
     },
     UI: {
+        STORAGE_KEYS: {
+            CHAT_HISTORY: 'astra-chat-history'
+        },
         STATUS_TEXT: {
             idle:       "Astra is Idle",
             thinking:   "Astra is Thinking...",

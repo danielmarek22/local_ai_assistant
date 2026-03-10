@@ -2,7 +2,7 @@ import { CONFIG } from './config.js';
 
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onState, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -38,7 +38,10 @@ export class NetworkClient {
             this.ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 
-                if (data.type === "assistant_state" && this.handlers.onState) {
+                if (data.type === "session_init" && this.handlers.onSessionInit) {
+                    this.handlers.onSessionInit(data.server_instance_id);
+                }
+                else if (data.type === "assistant_state" && this.handlers.onState) {
                     this.handlers.onState(data.state);
                 } 
                 else if (data.type === "assistant_chunk" && this.handlers.onChunk) {

@@ -15,6 +15,9 @@ const avatarManager = new AvatarManager(
 
 // 3. Define Network Handlers
 const handlers = {
+    onSessionInit: (serverInstanceId) => {
+        uiManager.setSessionScope(serverInstanceId);
+    },
     onState: (state) => {
         uiManager.updateStatus(state);
         avatarManager.setState(state);

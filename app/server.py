@@ -158,8 +158,12 @@ async def synthesize_async(text: str, output_path: Path, session_id: str):
 
 @app.on_event("startup")
 async def startup_event():
+    app.state.server_instance_id = uuid.uuid4().hex[:8]
     app.state.orchestrator = build_orchestrator()
-    logger.info("Orchestrator initialized at startup")
+    logger.info(
+        "Orchestrator initialized at startup (server_instance_id=%s)",
+        app.state.server_instance_id,
+    )
 
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
@@ -183,9 +187,14 @@ async def shutdown_event():
 async def websocket_endpoint(ws: WebSocket):
     session_id = uuid.uuid4().hex[:8]
     start_ts = time.perf_counter()
+    server_instance_id = app.state.server_instance_id
 
     await ws.accept()
     logger.info("[%s] WebSocket connected", session_id)
+    await ws.send_text(json.dumps({
+        "type": "session_init",
+        "server_instance_id": server_instance_id,
+    }))
 
     orchestrator = app.state.orchestrator
     logger.debug("[%s] Reusing startup orchestrator", session_id)

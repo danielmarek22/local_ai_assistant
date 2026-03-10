@@ -18,6 +18,8 @@ export class UIManager {
         this.chatOpenBtn = document.getElementById('chat-open-btn');
         
         this.currentAiMessageDiv = null;
+        this.chatHistoryStorageKey = null;
+        this.defaultMessages = this.serializeChatHistory();
         this.initAutoResize();
         this.initPanelControls();
     }
@@ -67,12 +69,14 @@ export class UIManager {
         if (!this.currentAiMessageDiv) this.startAiMessage();
         const rawText = (this.currentAiMessageDiv.dataset.rawText || '') + text;
         this.setMessageContent(this.currentAiMessageDiv, rawText);
+        this.persistChatHistory();
         this.scrollToBottom();
     }
 
     finalizeAiMessage(text) {
         if (this.currentAiMessageDiv) {
             this.setMessageContent(this.currentAiMessageDiv, text);
+            this.persistChatHistory();
             this.currentAiMessageDiv = null;
         }
     }
@@ -82,6 +86,7 @@ export class UIManager {
         msgDiv.classList.add('message', sender);
         this.setMessageContent(msgDiv, text);
         this.chatHistory.appendChild(msgDiv);
+        this.persistChatHistory();
         this.scrollToBottom();
         return msgDiv;
     }
@@ -104,6 +109,74 @@ export class UIManager {
         }
 
         msgDiv.innerText = text;
+    }
+
+    setSessionScope(serverInstanceId) {
+        const nextStorageKey = `${CONFIG.UI.STORAGE_KEYS.CHAT_HISTORY}:${serverInstanceId}`;
+        if (this.chatHistoryStorageKey === nextStorageKey) return;
+
+        this.chatHistoryStorageKey = nextStorageKey;
+        this.currentAiMessageDiv = null;
+        this.restoreChatHistory();
+    }
+
+    restoreChatHistory() {
+        if (!this.chatHistoryStorageKey) return;
+
+        const savedHistory = sessionStorage.getItem(this.chatHistoryStorageKey);
+        if (!savedHistory) {
+            this.renderMessages(this.defaultMessages);
+            this.persistChatHistory();
+            return;
+        }
+
+        try {
+            const messages = JSON.parse(savedHistory);
+            if (!Array.isArray(messages) || messages.length === 0) {
+                this.renderMessages(this.defaultMessages);
+                this.persistChatHistory();
+                return;
+            }
+            this.renderMessages(messages);
+        } catch (error) {
+            console.warn('Failed to restore chat history from session storage:', error);
+            sessionStorage.removeItem(this.chatHistoryStorageKey);
+            this.renderMessages(this.defaultMessages);
+            this.persistChatHistory();
+        }
+    }
+
+    persistChatHistory() {
+        if (!this.chatHistoryStorageKey) return;
+
+        sessionStorage.setItem(this.chatHistoryStorageKey, JSON.stringify(this.serializeChatHistory()));
+    }
+
+    serializeChatHistory() {
+        return Array.from(this.chatHistory.querySelectorAll('.message')).map((message) => {
+            const sender = Array.from(message.classList).find((className) => className !== 'message') || 'astra';
+            return {
+                sender,
+                text: message.dataset.rawText || ''
+            };
+        });
+    }
+
+    renderMessages(messages) {
+        this.chatHistory.replaceChildren();
+
+        for (const message of messages) {
+            if (!message || typeof message.sender !== 'string' || typeof message.text !== 'string') {
+                continue;
+            }
+
+            const msgDiv = document.createElement('div');
+            msgDiv.classList.add('message', message.sender);
+            this.setMessageContent(msgDiv, message.text);
+            this.chatHistory.appendChild(msgDiv);
+        }
+
+        this.scrollToBottom();
     }
 
     scrollToBottom() {
