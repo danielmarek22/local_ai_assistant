@@ -63,6 +63,25 @@ def _prepare_tts_text(text: str) -> str:
     return cleaned.strip()
 
 
+def resolve_session_id(
+    session_mode: str,
+    requested_session_id: str | None,
+    known_server_instance_id: str | None,
+    server_instance_id: str,
+) -> str:
+    if session_mode == "open" and requested_session_id:
+        return requested_session_id
+
+    if (
+        session_mode == "resume"
+        and requested_session_id
+        and known_server_instance_id == server_instance_id
+    ):
+        return requested_session_id
+
+    return uuid.uuid4().hex[:8]
+
+
 @dataclass
 class TTSJob:
     text: str
@@ -247,16 +266,12 @@ async def websocket_endpoint(ws: WebSocket):
     requested_session_id = ws.query_params.get("session_id")
     known_server_instance_id = ws.query_params.get("server_instance_id")
 
-    if session_mode == "open" and requested_session_id:
-        session_id = requested_session_id
-    elif (
-        session_mode == "resume"
-        and requested_session_id
-        and known_server_instance_id == server_instance_id
-    ):
-        session_id = requested_session_id
-    else:
-        session_id = uuid.uuid4().hex[:8]
+    session_id = resolve_session_id(
+        session_mode=session_mode,
+        requested_session_id=requested_session_id,
+        known_server_instance_id=known_server_instance_id,
+        server_instance_id=server_instance_id,
+    )
 
     await ws.accept()
     logger.info(

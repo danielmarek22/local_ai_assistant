@@ -253,6 +253,29 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(summarizer.calls), 0)
         self.assertEqual(len(summary_store.saved), 0)
 
+    def test_set_session_updates_session_id_and_resets_perception(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        original_perception = orch.perception
+        orch.perception.update("user.input", {"text": "hello"})
+
+        orch.set_session("session-2")
+
+        self.assertEqual(orch.session_id, "session-2")
+        self.assertIsNot(orch.perception, original_perception)
+        self.assertEqual(orch.perception.snapshot(), {})
+
 
 if __name__ == "__main__":
     unittest.main()
