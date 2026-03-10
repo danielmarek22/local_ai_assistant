@@ -11,6 +11,7 @@ const sessionStorageKey = CONFIG.UI.STORAGE_KEYS.CURRENT_SESSION;
 let currentServerInstanceId = null;
 let currentSessionId = null;
 let assistantState = 'idle';
+let assistantExpression = 'neutral';
 
 function readStoredSessionContext() {
     const rawValue = sessionStorage.getItem(sessionStorageKey);
@@ -50,6 +51,7 @@ function syncAssistantPresentation() {
     const visualState = audioManager.hasActiveSpeech() ? 'responding' : assistantState;
     uiManager.updateStatus(visualState);
     avatarManager.setState(visualState);
+    avatarManager.setExpression(assistantExpression);
 }
 
 audioManager.setPlaybackHandlers({
@@ -75,6 +77,10 @@ const handlers = {
         if (state === "responding") {
             uiManager.startAiMessage();
         }
+    },
+    onExpression: (expression) => {
+        assistantExpression = expression;
+        syncAssistantPresentation();
     },
     onChunk: (content) => {
         assistantState = 'responding';

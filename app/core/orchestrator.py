@@ -1,9 +1,14 @@
 import uuid
 import logging
+import re
 import time
 from typing import Generator, Optional, Dict
 
-from app.core.events import AssistantSpeechEvent, AssistantStateEvent
+from app.core.events import (
+    AssistantSpeechEvent,
+    AssistantStateEvent,
+    AvatarExpressionEvent,
+)
 from app.core.assistant_state import AssistantState
 from app.core.actions import Action
 from app.core.plan import Plan
@@ -12,6 +17,13 @@ from app.services.tool_executor import ToolExecutor
 
 
 logger = logging.getLogger("orchestrator")
+
+_AVATAR_EXPRESSION_PATTERN = re.compile(
+    r"\[\s*state\s*:\s*(happy|angry|sad|relaxed|surprised|neutral)\s*\]",
+    re.IGNORECASE,
+)
+_DEFAULT_AVATAR_EXPRESSION = "neutral"
+_EXPRESSION_TAG_PREFIX_PATTERN = re.compile(r"\[\s*state\s*:\s*", re.IGNORECASE)
 
 
 class Orchestrator:
@@ -246,20 +258,125 @@ class Orchestrator:
         logger.info("[%s] Calling LLM (streaming)", self.session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
-        buffer = ""
+        visible_buffer = ""
+        stream_buffer = ""
+        expression_initialized = False
         start_ts = time.perf_counter()
 
         for chunk in self.llm.stream_chat(messages):
-            buffer += chunk
-            yield AssistantSpeechEvent(text=chunk)
+            stream_buffer += chunk
+
+            events, stream_buffer = self._extract_expression_events(stream_buffer)
+            for event_type, value in events:
+                if event_type == "expression":
+                    expression_initialized = True
+                    logger.info(
+                        "[%s] Model selected avatar expression '%s'",
+                        self.session_id,
+                        value,
+                    )
+                    yield AvatarExpressionEvent(expression=value)
+                    continue
+
+                if not expression_initialized and value:
+                    expression_initialized = True
+                    logger.info(
+                        "[%s] Model selected avatar expression '%s'",
+                        self.session_id,
+                        _DEFAULT_AVATAR_EXPRESSION,
+                    )
+                    yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+
+                if value:
+                    visible_buffer += value
+                    yield AssistantSpeechEvent(text=value)
+
+        events, stream_buffer = self._extract_expression_events(stream_buffer, force=True)
+        for event_type, value in events:
+            if event_type == "expression":
+                expression_initialized = True
+                logger.info(
+                    "[%s] Model selected avatar expression '%s'",
+                    self.session_id,
+                    value,
+                )
+                yield AvatarExpressionEvent(expression=value)
+                continue
+
+            if not expression_initialized and value:
+                expression_initialized = True
+                logger.info(
+                    "[%s] Model selected avatar expression '%s'",
+                    self.session_id,
+                    _DEFAULT_AVATAR_EXPRESSION,
+                )
+                yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+
+            if value:
+                visible_buffer += value
+                yield AssistantSpeechEvent(text=value)
+
+        if not expression_initialized:
+            logger.info(
+                "[%s] Model selected avatar expression '%s'",
+                self.session_id,
+                _DEFAULT_AVATAR_EXPRESSION,
+            )
+            yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
             "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
             self.session_id,
-            len(buffer),
+            len(visible_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )
-        return buffer
+        return visible_buffer
+
+    def _extract_expression_events(self, text: str, force: bool = False):
+        events = []
+        remainder = text
+
+        while remainder:
+            match = _AVATAR_EXPRESSION_PATTERN.search(remainder)
+            if match:
+                if match.start() > 0:
+                    events.append(("text", remainder[:match.start()]))
+
+                events.append(("expression", match.group(1).lower()))
+                remainder = remainder[match.end():]
+                continue
+
+            if force:
+                events.append(("text", remainder))
+                return events, ""
+
+            marker_start = self._find_incomplete_expression_start(remainder)
+            if marker_start is None:
+                events.append(("text", remainder))
+                return events, ""
+
+            if marker_start > 0:
+                events.append(("text", remainder[:marker_start]))
+
+            return events, remainder[marker_start:]
+
+        return events, remainder
+
+    def _find_incomplete_expression_start(self, text: str):
+        last_bracket = text.rfind("[")
+        if last_bracket == -1:
+            return None
+
+        candidate = text[last_bracket:]
+        normalized = re.sub(r"\s+", "", candidate.lower())
+
+        if "[state:".startswith(normalized):
+            return last_bracket
+
+        if _EXPRESSION_TAG_PREFIX_PATTERN.match(candidate) and "]" not in candidate:
+            return last_bracket
+
+        return None
 
     # ============================================================
     # Summarization

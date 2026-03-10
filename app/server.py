@@ -14,7 +14,11 @@ from contextlib import suppress
 from app.config import Config
 
 from app.core.orchestrator_factory import build_orchestrator
-from app.core.events import AssistantSpeechEvent, AssistantStateEvent
+from app.core.events import (
+    AssistantSpeechEvent,
+    AssistantStateEvent,
+    AvatarExpressionEvent,
+)
 from app.logging import setup_logging
 from app.tts.piper_tts import PiperTTS
 from app.services.sentence_splitter import split_sentences
@@ -317,6 +321,18 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_text(json.dumps({
                         "type": "assistant_state",
                         "state": event.state,
+                    }))
+                    continue
+
+                if isinstance(event, AvatarExpressionEvent):
+                    logger.debug(
+                        "[%s] Avatar expression -> %s",
+                        connection_id,
+                        event.expression,
+                    )
+                    await ws.send_text(json.dumps({
+                        "type": "assistant_expression",
+                        "expression": event.expression,
                     }))
                     continue
 

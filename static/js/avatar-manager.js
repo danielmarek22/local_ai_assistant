@@ -14,6 +14,7 @@ export class AvatarManager {
         
         this.currentVrm = null;
         this.currentState = "idle";
+        this.currentExpression = "neutral";
         
         // Animation Mixer & Storage
         this.mixer = null;
@@ -185,6 +186,14 @@ export class AvatarManager {
         this.playRandomVariant(state);
     }
 
+    setExpression(expression) {
+        if (!CONFIG.AVATAR.EXPRESSIONS.includes(expression)) {
+            expression = 'neutral';
+        }
+
+        this.currentExpression = expression;
+    }
+
     animate() {
         requestAnimationFrame(this.animate);
         
@@ -195,9 +204,21 @@ export class AvatarManager {
             // --- Update procedural features BEFORE updating the VRM ---
             this.updateEyes(deltaTime);
             this.updateBlinking(deltaTime);
+            this.updateExpression(deltaTime);
             
-            // Apply Audio Lip Sync
-            const targetMouthOpen = this.getAudioLevel();
+            // --- UPDATED: Dynamic Audio Lip Sync ---
+            let targetMouthOpen = this.getAudioLevel();
+
+            // Prevent blendshape clashing by dampening lip-sync during strong expressions
+            if (this.currentExpression !== 'neutral' && this.currentVrm.expressionManager) {
+                const activeExpWeight = this.currentVrm.expressionManager.getValue(this.currentExpression) || 0;
+                
+                // If expression is at 1.0, reduce lip-sync by 60%. 
+                // You can tweak this 0.6 value based on how extreme your specific VRM's expressions are.
+                const dampeningFactor = 1.0 - (activeExpWeight * 0.6); 
+                targetMouthOpen *= dampeningFactor;
+            }
+
             const currentMouth = this.currentVrm.expressionManager.getValue('aa');
             const smoothedMouth = THREE.MathUtils.lerp(currentMouth, targetMouthOpen, CONFIG.AUDIO.LIP_SYNC_SMOOTHING);
             this.currentVrm.expressionManager.setValue('aa', smoothedMouth);
@@ -210,8 +231,7 @@ export class AvatarManager {
         }
         
         this.renderer.render(this.scene, this.camera);
-    }
-
+        }
     // --- NEW: Eye Tracking Logic ---
     updateEyes(deltaTime) {
         this.eyeTimer += deltaTime;
@@ -243,6 +263,21 @@ export class AvatarManager {
         // Smoothly move our invisible target object to that position
         // A lerp factor of 10.0 gives a nice, quick "eye dart" feel
         this.lookAtTarget.position.lerp(targetPos, 10.0 * deltaTime);
+    }
+
+    updateExpression(deltaTime) {
+        if (!this.currentVrm?.expressionManager) return;
+
+        const blendSpeed = Math.min(1, deltaTime * 6);
+
+        for (const expression of CONFIG.AVATAR.EXPRESSIONS) {
+            if (expression === 'neutral') continue;
+
+            const targetValue = this.currentExpression === expression ? 1 : 0;
+            const currentValue = this.currentVrm.expressionManager.getValue(expression) || 0;
+            const nextValue = THREE.MathUtils.lerp(currentValue, targetValue, blendSpeed);
+            this.currentVrm.expressionManager.setValue(expression, nextValue);
+        }
     }
 
     updateBlinking(deltaTime) {

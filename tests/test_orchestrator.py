@@ -2,7 +2,11 @@ import unittest
 
 from app.core.actions import Action
 from app.core.assistant_state import AssistantState
-from app.core.events import AssistantSpeechEvent, AssistantStateEvent
+from app.core.events import (
+    AssistantSpeechEvent,
+    AssistantStateEvent,
+    AvatarExpressionEvent,
+)
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
 
@@ -189,6 +193,11 @@ class OrchestratorTests(unittest.TestCase):
             ],
         )
 
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["neutral"])
+
         speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
         self.assertEqual(speech_texts[:-1], ["Hello", " world"])
         self.assertEqual(speech_texts[-1], "Hello world")
@@ -275,6 +284,104 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(orch.session_id, "session-2")
         self.assertIsNot(orch.perception, original_perception)
         self.assertEqual(orch.perception.snapshot(), {})
+
+    def test_response_expression_tag_is_extracted_from_stream(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["[st", "ate:happy]Hello", " there"],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input("hello"))
+
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["happy"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hello", " there"])
+        self.assertEqual(speech_texts[-1], "Hello there")
+        self.assertEqual(history.records[1][2], "Hello there")
+
+    def test_response_can_switch_expressions_multiple_times(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=[
+                "[state:happy]That worked. ",
+                "[sta",
+                "te:surprised]Wait, even better. ",
+                "[state:relaxed]All set.",
+            ],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input("hello"))
+
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["happy", "surprised", "relaxed"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(
+            speech_texts[:-1],
+            ["That worked. ", "Wait, even better. ", "All set."],
+        )
+        self.assertEqual(speech_texts[-1], "That worked. Wait, even better. All set.")
+        self.assertEqual(history.records[1][2], "That worked. Wait, even better. All set.")
+
+    def test_response_expression_tag_allows_internal_spacing(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["[state ", ": surprised ]Hello there"],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input("hello"))
+
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["surprised"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hello there"])
+        self.assertEqual(speech_texts[-1], "Hello there")
+        self.assertEqual(history.records[1][2], "Hello there")
 
 
 if __name__ == "__main__":

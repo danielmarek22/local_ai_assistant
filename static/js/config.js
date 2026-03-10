@@ -6,6 +6,7 @@ export const CONFIG = {
     },
     AVATAR: {
         MODEL_PATH: '/static/avatar.vrm',
+        EXPRESSIONS: ['happy', 'angry', 'sad', 'relaxed', 'surprised', 'neutral'],
         
         // --- UPDATED: Animation Arrays ---
         ANIMATIONS: {
