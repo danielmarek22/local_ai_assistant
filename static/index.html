@@ -26,18 +26,52 @@
             <button id="chat-close-btn" class="panel-btn" type="button" aria-label="Close chat panel">x</button>
         </div>
 
-        <div id="chat-history">
-            <div class="message astra">System: Online. Ready.</div>
+        <div id="chat-tabs" role="tablist" aria-label="Chat panel tabs">
+            <button class="chat-tab active" type="button" role="tab" aria-selected="true" aria-controls="chat-view" data-tab-target="chat-view">Chat</button>
+            <button class="chat-tab" type="button" role="tab" aria-selected="false" aria-controls="config-view" data-tab-target="config-view">Config</button>
+            <button class="chat-tab" type="button" role="tab" aria-selected="false" aria-controls="history-view" data-tab-target="history-view">History</button>
         </div>
-        
-        <div id="input-area">
-            <textarea 
-                id="user-input" 
-                placeholder="Type a message..." 
-                rows="1"
-            ></textarea>
-            <button id="send-btn">Send</button>
-        </div> 
+
+        <div id="tab-panels">
+            <section id="chat-view" class="tab-panel active" role="tabpanel">
+                <div id="chat-history">
+                    <div class="message astra">System: Online. Ready.</div>
+                </div>
+                
+                <div id="input-area">
+                    <textarea 
+                        id="user-input" 
+                        placeholder="Type a message..." 
+                        rows="1"
+                    ></textarea>
+                    <button id="send-btn">Send</button>
+                </div>
+            </section>
+
+            <section id="config-view" class="tab-panel" role="tabpanel" aria-hidden="true">
+                <div class="panel-placeholder">
+                    <h2>Config</h2>
+                    <p>Configuration controls will go here.</p>
+                </div>
+            </section>
+
+            <section id="history-view" class="tab-panel" role="tabpanel" aria-hidden="true">
+                <div class="history-panel">
+                    <div class="panel-section-header">
+                        <div>
+                            <h2>History</h2>
+                            <p id="history-subtitle">Saved conversations on this machine.</p>
+                        </div>
+                        <div class="history-header-actions">
+                            <button id="history-new-chat-btn" class="history-toolbar-btn" type="button">New Chat</button>
+                            <button id="history-refresh-btn" class="history-toolbar-btn" type="button" aria-label="Refresh history">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="history-status" class="history-status hidden"></div>
+                    <div id="history-list" class="history-list"></div>
+                </div>
+            </section>
+        </div>
         </div>
 
     <button id="chat-open-btn" class="chat-open-btn" type="button" aria-label="Open chat panel">Chat</button>

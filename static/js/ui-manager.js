@@ -16,12 +16,21 @@ export class UIManager {
         this.sendBtn = document.getElementById('send-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
+        this.chatTabs = Array.from(document.querySelectorAll('.chat-tab'));
+        this.tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+        this.historyList = document.getElementById('history-list');
+        this.historyStatus = document.getElementById('history-status');
+        this.historyRefreshBtn = document.getElementById('history-refresh-btn');
+        this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
         
         this.currentAiMessageDiv = null;
         this.chatHistoryStorageKey = null;
+        this.currentSessionId = null;
         this.defaultMessages = this.serializeChatHistory();
         this.initAutoResize();
         this.initPanelControls();
+        this.initTabs();
+        this.initHistoryControls();
     }
 
     initAutoResize() {
@@ -44,6 +53,63 @@ export class UIManager {
         });
 
         this.chatOpenBtn.classList.add('hidden');
+    }
+
+    initTabs() {
+        for (const tab of this.chatTabs) {
+            tab.addEventListener('click', () => {
+                this.setActiveTab(tab.dataset.tabTarget);
+            });
+        }
+    }
+
+    setActiveTab(tabId) {
+        for (const tab of this.chatTabs) {
+            const isActive = tab.dataset.tabTarget === tabId;
+            tab.classList.toggle('active', isActive);
+            tab.setAttribute('aria-selected', String(isActive));
+        }
+
+        for (const panel of this.tabPanels) {
+            const isActive = panel.id === tabId;
+            panel.classList.toggle('active', isActive);
+            panel.setAttribute('aria-hidden', String(!isActive));
+        }
+
+        if (tabId === 'chat-view') {
+            this.userInput.focus();
+            this.scrollToBottom();
+        }
+    }
+
+    initHistoryControls() {
+        this.historyRefreshBtn.addEventListener('click', () => {
+            if (this.onHistoryRefreshHandler) {
+                this.onHistoryRefreshHandler();
+            }
+        });
+
+        this.historyNewChatBtn.addEventListener('click', () => {
+            if (this.onHistoryNewChatHandler) {
+                this.onHistoryNewChatHandler();
+            }
+        });
+
+        this.historyList.addEventListener('click', (event) => {
+            const actionButton = event.target.closest('[data-history-action]');
+            if (!actionButton) return;
+
+            const { historyAction, sessionId } = actionButton.dataset;
+            if (!sessionId) return;
+
+            if (historyAction === 'open' && this.onHistoryOpenHandler) {
+                this.onHistoryOpenHandler(sessionId);
+            }
+
+            if (historyAction === 'delete' && this.onHistoryDeleteHandler) {
+                this.onHistoryDeleteHandler(sessionId);
+            }
+        });
     }
 
     updateStatus(state) {
@@ -111,10 +177,11 @@ export class UIManager {
         msgDiv.innerText = text;
     }
 
-    setSessionScope(serverInstanceId) {
-        const nextStorageKey = `${CONFIG.UI.STORAGE_KEYS.CHAT_HISTORY}:${serverInstanceId}`;
+    setSessionScope(serverInstanceId, sessionId) {
+        const nextStorageKey = `${CONFIG.UI.STORAGE_KEYS.CHAT_HISTORY}:${serverInstanceId}:${sessionId}`;
         if (this.chatHistoryStorageKey === nextStorageKey) return;
 
+        this.currentSessionId = sessionId;
         this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
         this.restoreChatHistory();
@@ -177,6 +244,118 @@ export class UIManager {
         }
 
         this.scrollToBottom();
+    }
+
+    renderSessionMessages(sessionData) {
+        const messages = sessionData.messages.map((message) => ({
+            sender: message.role === 'assistant' ? 'astra' : message.role,
+            text: message.content,
+        }));
+
+        this.currentAiMessageDiv = null;
+        this.renderMessages(messages);
+        this.persistChatHistory();
+    }
+
+    resetChatToDefault() {
+        this.currentAiMessageDiv = null;
+        this.renderMessages(this.defaultMessages);
+        this.persistChatHistory();
+    }
+
+    setHistoryLoading(isLoading) {
+        this.historyRefreshBtn.disabled = isLoading;
+        this.historyRefreshBtn.textContent = isLoading ? 'Refreshing...' : 'Refresh';
+        this.historyNewChatBtn.disabled = isLoading;
+    }
+
+    setHistoryStatus(message = '', tone = 'info') {
+        this.historyStatus.textContent = message;
+        this.historyStatus.classList.toggle('hidden', !message);
+        this.historyStatus.classList.toggle('error', tone === 'error');
+    }
+
+    renderHistorySessions(sessions, activeSessionId) {
+        this.historyList.replaceChildren();
+
+        if (!sessions.length) {
+            const emptyState = document.createElement('div');
+            emptyState.className = 'history-empty';
+            emptyState.textContent = 'No saved conversations yet.';
+            this.historyList.appendChild(emptyState);
+            return;
+        }
+
+        for (const session of sessions) {
+            const item = document.createElement('article');
+            item.className = 'history-item';
+            if (session.session_id === activeSessionId) {
+                item.classList.add('active');
+            }
+
+            const preview = session.preview || 'No preview available.';
+            const title = this.buildSessionTitle(session);
+            const updatedAt = this.formatTimestamp(session.updated_at);
+            const itemMeta = `${session.message_count} messages • ${updatedAt}`;
+
+            item.innerHTML = `
+                <div class="history-item-header">
+                    <div>
+                        <div class="history-item-title">${this.escapeHtml(title)}</div>
+                        <div class="history-item-meta">${this.escapeHtml(itemMeta)}</div>
+                    </div>
+                </div>
+                <div class="history-item-preview">${this.escapeHtml(preview)}</div>
+                <div class="history-item-actions">
+                    <button class="history-action-btn" type="button" data-history-action="open" data-session-id="${this.escapeHtml(session.session_id)}">Open</button>
+                    <button class="history-action-btn delete" type="button" data-history-action="delete" data-session-id="${this.escapeHtml(session.session_id)}">Delete</button>
+                </div>
+            `;
+
+            this.historyList.appendChild(item);
+        }
+    }
+
+    buildSessionTitle(session) {
+        if (session.preview) {
+            return session.preview.slice(0, 48);
+        }
+
+        return `Session ${session.session_id}`;
+    }
+
+    formatTimestamp(timestamp) {
+        const date = new Date(timestamp);
+        if (Number.isNaN(date.getTime())) {
+            return timestamp;
+        }
+
+        return date.toLocaleString();
+    }
+
+    escapeHtml(value) {
+        return String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+    }
+
+    onHistoryRefresh(callback) {
+        this.onHistoryRefreshHandler = callback;
+    }
+
+    onHistoryOpen(callback) {
+        this.onHistoryOpenHandler = callback;
+    }
+
+    onHistoryDelete(callback) {
+        this.onHistoryDeleteHandler = callback;
+    }
+
+    onHistoryNewChat(callback) {
+        this.onHistoryNewChatHandler = callback;
     }
 
     scrollToBottom() {

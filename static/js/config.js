@@ -38,7 +38,8 @@ export const CONFIG = {
     },
     UI: {
         STORAGE_KEYS: {
-            CHAT_HISTORY: 'astra-chat-history'
+            CHAT_HISTORY: 'astra-chat-history',
+            CURRENT_SESSION: 'astra-current-session'
         },
         STATUS_TEXT: {
             idle:       "Astra is Idle",

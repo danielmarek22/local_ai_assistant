@@ -49,6 +49,20 @@ class Orchestrator:
             summary_trigger,
         )
 
+    def set_session(self, session_id: str):
+        if self.session_id == session_id:
+            return
+
+        previous_session_id = self.session_id
+        self.session_id = session_id
+        self.perception = PerceptionState()
+
+        logger.info(
+            "[%s] Session activated (previous=%s)",
+            self.session_id,
+            previous_session_id,
+        )
+
     # ============================================================
     # Public entry point
     # ============================================================

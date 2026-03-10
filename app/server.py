@@ -1,6 +1,6 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 import asyncio
 from typing import Iterator, Any
 import json
@@ -183,21 +183,97 @@ async def shutdown_event():
             await worker_task
 
 
+@app.get("/api/sessions")
+async def list_sessions():
+    history_store = app.state.orchestrator.history
+    rows = history_store.list_sessions()
+    sessions = [
+        {
+            "session_id": row["session_id"],
+            "started_at": row["started_at"],
+            "updated_at": row["updated_at"],
+            "message_count": row["message_count"],
+            "preview": row["preview"],
+        }
+        for row in rows
+    ]
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    history_store = app.state.orchestrator.history
+    rows = history_store.get_all(session_id)
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    summary = app.state.orchestrator.summary_store.get(session_id)
+    return {
+        "session_id": session_id,
+        "summary": summary,
+        "messages": [
+            {
+                "role": row["role"],
+                "content": row["content"],
+                "timestamp": row["timestamp"],
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    orchestrator = app.state.orchestrator
+    deleted_count = orchestrator.history.delete_session(session_id)
+    orchestrator.summary_store.delete(session_id)
+
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if orchestrator.session_id == session_id:
+        orchestrator.set_session(uuid.uuid4().hex[:8])
+
+    return {"deleted": True, "session_id": session_id}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    session_id = uuid.uuid4().hex[:8]
+    connection_id = uuid.uuid4().hex[:8]
     start_ts = time.perf_counter()
     server_instance_id = app.state.server_instance_id
+    session_mode = ws.query_params.get("session_mode", "new")
+    requested_session_id = ws.query_params.get("session_id")
+    known_server_instance_id = ws.query_params.get("server_instance_id")
+
+    if session_mode == "open" and requested_session_id:
+        session_id = requested_session_id
+    elif (
+        session_mode == "resume"
+        and requested_session_id
+        and known_server_instance_id == server_instance_id
+    ):
+        session_id = requested_session_id
+    else:
+        session_id = uuid.uuid4().hex[:8]
 
     await ws.accept()
-    logger.info("[%s] WebSocket connected", session_id)
+    logger.info(
+        "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
+        connection_id,
+        session_id,
+        session_mode,
+    )
     await ws.send_text(json.dumps({
         "type": "session_init",
         "server_instance_id": server_instance_id,
+        "session_id": session_id,
     }))
 
     orchestrator = app.state.orchestrator
-    logger.debug("[%s] Reusing startup orchestrator", session_id)
+    orchestrator.set_session(session_id)
+    logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     try:
         while True:
@@ -205,10 +281,10 @@ async def websocket_endpoint(ws: WebSocket):
 
             logger.info(
                 "[%s] Received user input (len=%d)",
-                session_id,
+                connection_id,
                 len(user_text),
             )
-            logger.debug("[%s] User input text: %r", session_id, user_text)
+            logger.debug("[%s] User input text: %r", connection_id, user_text)
 
             # Buffer for sentence-based TTS
             text_buffer = ""
@@ -220,7 +296,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if isinstance(event, AssistantStateEvent):
                     logger.debug(
                         "[%s] Assistant state -> %s",
-                        session_id,
+                        connection_id,
                         event.state,
                     )
                     await ws.send_text(json.dumps({
@@ -251,14 +327,14 @@ async def websocket_endpoint(ws: WebSocket):
 
                             logger.debug(
                                 "[%s] TTS synth sentence (%d chars)",
-                                session_id,
+                                connection_id,
                                 len(tts_text),
                             )
 
                             await synthesize_async(
                                 text=tts_text,
                                 output_path=audio_path,
-                                session_id=session_id,
+                                session_id=connection_id,
                             )
 
                             await ws.send_text(json.dumps({
@@ -274,14 +350,14 @@ async def websocket_endpoint(ws: WebSocket):
 
                             logger.debug(
                                 "[%s] TTS final fragment (%d chars)",
-                                session_id,
+                                connection_id,
                                 len(tts_text),
                             )
 
                             await synthesize_async(
                                 text=tts_text,
                                 output_path=audio_path,
-                                session_id=session_id,
+                                session_id=connection_id,
                             )
 
                             await ws.send_text(json.dumps({
@@ -296,21 +372,21 @@ async def websocket_endpoint(ws: WebSocket):
 
                         logger.info(
                             "[%s] Assistant turn completed",
-                            session_id,
+                            connection_id,
                         )
 
     except WebSocketDisconnect:
         logger.info(
             "[%s] WebSocket disconnected (uptime=%.2f s)",
-            session_id,
+            connection_id,
             time.perf_counter() - start_ts,
         )
 
     except Exception:
-        logger.exception("[%s] WebSocket handler crashed", session_id)
+        logger.exception("[%s] WebSocket handler crashed", connection_id)
 
     finally:
-        logger.debug("[%s] WebSocket cleanup complete", session_id)
+        logger.debug("[%s] WebSocket cleanup complete", connection_id)
 
 
 @app.get("/")

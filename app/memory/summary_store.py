@@ -35,3 +35,14 @@ class SummaryStore:
             (session_id, summary)
         )
         self.db.conn.commit()
+
+    def delete(self, session_id: str) -> None:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM conversation_summary
+            WHERE session_id = ?
+            """,
+            (session_id,)
+        )
+        self.db.conn.commit()
