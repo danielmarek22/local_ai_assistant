@@ -98,7 +98,15 @@ export class AvatarManager {
 
                 // Listen for animation loops to trigger variety
                 this.mixer.addEventListener('loop', (e) => {
-                    if (Math.random() < 0.3) {
+                    // Default 30% chance to switch for idle, thinking, etc.
+                    let switchChance = 0.3; 
+                    
+                    // If talking, increase the chance to 85% for dynamic hand gestures
+                    if (this.currentState === 'responding') {
+                        switchChance = 0.85; 
+                    }
+
+                    if (Math.random() < switchChance) {
                         this.playRandomVariant(this.currentState);
                     }
                 });

@@ -5,6 +5,7 @@ export class AudioManager {
         this.audioQueue = [];
         this.isPlaying = false;
         this.isSpeechActive = false;
+        this.speechEndTimer = null;
         this.audioContext = null;
         this.analyser = null;
         this.dataArray = null;
@@ -55,28 +56,51 @@ export class AudioManager {
     }
 
     hasActiveSpeech() {
-        return this.isPlaying || !this.audioEl.paused;
+        return this.isSpeechActive;
+    }
+
+    getCurrentSpeechActivity() {
+        return !this.audioEl.paused && !this.audioEl.ended && Boolean(this.audioEl.currentSrc);
     }
 
     updateSpeechActivity() {
-        const nextSpeechActive = this.hasActiveSpeech();
+        const nextSpeechActive = this.getCurrentSpeechActivity();
         if (nextSpeechActive === this.isSpeechActive) return;
 
-        this.isSpeechActive = nextSpeechActive;
-
-        if (this.isSpeechActive) {
+        if (nextSpeechActive) {
+            this.clearSpeechEndTimer();
+            this.isSpeechActive = true;
             this.onSpeechStart?.();
             return;
         }
 
-        this.onSpeechEnd?.();
+        this.scheduleSpeechEnd();
+    }
+
+    clearSpeechEndTimer() {
+        if (!this.speechEndTimer) return;
+
+        clearTimeout(this.speechEndTimer);
+        this.speechEndTimer = null;
+    }
+
+    scheduleSpeechEnd() {
+        this.clearSpeechEndTimer();
+        this.speechEndTimer = window.setTimeout(() => {
+            this.speechEndTimer = null;
+
+            if (this.getCurrentSpeechActivity()) return;
+            if (!this.isSpeechActive) return;
+
+            this.isSpeechActive = false;
+            this.onSpeechEnd?.();
+        }, CONFIG.AUDIO.SPEECH_END_HOLD_MS);
     }
 
     playNext() {
         if (this.isPlaying || this.audioQueue.length === 0) return;
 
         this.isPlaying = true;
-        this.updateSpeechActivity();
         const audioUrl = this.audioQueue.shift();
         this.audioEl.src = audioUrl;
         
