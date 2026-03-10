@@ -4,16 +4,27 @@ export class AudioManager {
     constructor() {
         this.audioQueue = [];
         this.isPlaying = false;
+        this.isSpeechActive = false;
         this.audioContext = null;
         this.analyser = null;
         this.dataArray = null;
+        this.onSpeechStart = null;
+        this.onSpeechEnd = null;
         
         this.audioEl = new Audio();
         this.audioEl.crossOrigin = "anonymous";
+
+        this.audioEl.onplaying = () => {
+            this.updateSpeechActivity();
+        };
+        this.audioEl.onpause = () => {
+            this.updateSpeechActivity();
+        };
         
         this.audioEl.onended = () => {
             this.isPlaying = false;
             this.playNext();
+            this.updateSpeechActivity();
         };
     }
 
@@ -38,16 +49,42 @@ export class AudioManager {
         this.playNext();
     }
 
+    setPlaybackHandlers({ onSpeechStart, onSpeechEnd } = {}) {
+        this.onSpeechStart = onSpeechStart || null;
+        this.onSpeechEnd = onSpeechEnd || null;
+    }
+
+    hasActiveSpeech() {
+        return this.isPlaying || !this.audioEl.paused;
+    }
+
+    updateSpeechActivity() {
+        const nextSpeechActive = this.hasActiveSpeech();
+        if (nextSpeechActive === this.isSpeechActive) return;
+
+        this.isSpeechActive = nextSpeechActive;
+
+        if (this.isSpeechActive) {
+            this.onSpeechStart?.();
+            return;
+        }
+
+        this.onSpeechEnd?.();
+    }
+
     playNext() {
         if (this.isPlaying || this.audioQueue.length === 0) return;
 
         this.isPlaying = true;
+        this.updateSpeechActivity();
         const audioUrl = this.audioQueue.shift();
         this.audioEl.src = audioUrl;
         
         this.audioEl.play().catch(e => {
             console.error("Audio play failed:", e);
             this.isPlaying = false;
+            this.updateSpeechActivity();
+            this.playNext();
         });
     }
 

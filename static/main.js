@@ -10,6 +10,7 @@ const uiManager = new UIManager();
 const sessionStorageKey = CONFIG.UI.STORAGE_KEYS.CURRENT_SESSION;
 let currentServerInstanceId = null;
 let currentSessionId = null;
+let assistantState = 'idle';
 
 function readStoredSessionContext() {
     const rawValue = sessionStorage.getItem(sessionStorageKey);
@@ -45,6 +46,21 @@ const avatarManager = new AvatarManager(
     () => audioManager.getLipSyncValue() 
 );
 
+function syncAssistantPresentation() {
+    const visualState = audioManager.hasActiveSpeech() ? 'responding' : assistantState;
+    uiManager.updateStatus(visualState);
+    avatarManager.setState(visualState);
+}
+
+audioManager.setPlaybackHandlers({
+    onSpeechStart: () => {
+        syncAssistantPresentation();
+    },
+    onSpeechEnd: () => {
+        syncAssistantPresentation();
+    }
+});
+
 // 3. Define Network Handlers
 const handlers = {
     onSessionInit: ({ serverInstanceId, sessionId }) => {
@@ -54,17 +70,15 @@ const handlers = {
         persistSessionContext();
     },
     onState: (state) => {
-        uiManager.updateStatus(state);
-        avatarManager.setState(state);
+        assistantState = state;
+        syncAssistantPresentation();
         if (state === "responding") {
             uiManager.startAiMessage();
         }
     },
     onChunk: (content) => {
-        if (avatarManager.currentState !== 'responding') {
-            uiManager.updateStatus('responding');
-            avatarManager.setState('responding');
-        }
+        assistantState = 'responding';
+        syncAssistantPresentation();
         uiManager.appendToAiMessage(content);
     },
     onAudio: (url) => {
@@ -72,8 +86,8 @@ const handlers = {
     },
     onEnd: (finalContent) => {
         uiManager.finalizeAiMessage(finalContent);
-        uiManager.updateStatus('idle');
-        avatarManager.setState('idle');
+        assistantState = 'idle';
+        syncAssistantPresentation();
     }
 };
 

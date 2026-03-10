@@ -172,6 +172,7 @@ export class AvatarManager {
     }
 
     setState(state) {
+        if (this.currentState === state) return;
         this.currentState = state;
         this.playRandomVariant(state);
     }
