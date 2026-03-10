@@ -51,6 +51,9 @@ def build_orchestrator() -> Orchestrator:
             "top_p": config.llm["generation"]["top_p"],
             "num_predict": config.llm["generation"]["max_tokens"],
         },
+        timeout_s=config.llm.get("timeout_s", 30.0),
+        max_retries=config.llm.get("max_retries", 2),
+        retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
     )
 
     logger.debug(
@@ -112,6 +115,8 @@ def build_orchestrator() -> Orchestrator:
         web_client = SearXNGClient(
             base_url=web_cfg.get("base_url", config.tools["web"]["base_url"]),
             timeout=web_cfg.get("timeout", config.planner["timeout_ms"] / 1000),
+            max_retries=web_cfg.get("max_retries", 2),
+            retry_backoff_s=web_cfg.get("retry_backoff_s", 0.25),
         )
 
         if web_client.probe():
@@ -139,6 +144,7 @@ def build_orchestrator() -> Orchestrator:
 
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
+        user_context=config.user_context,
         history_store=history_store,
         memory_store=memory_store,
         summary_store=summary_store,

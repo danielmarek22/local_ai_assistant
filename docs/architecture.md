@@ -135,11 +135,15 @@ Memory is treated as an **active subsystem**, not a passive database.
 **Role:** Persistence backend
 
 Storage:
-- Abstracts databases and files
-- Ensures consistency
-- Provides a clean API to memory and services
+- Owns the SQLite connection and schema initialization
+- Provides a shared `Database` object used by stores
+- Centralizes persistence configuration (path, connection setup)
 
-No other module touches the database directly.
+Current implementation note:
+- Store classes in `app/memory` (`ChatHistoryStore`, `MemoryStore`, `SummaryStore`)
+  execute SQL directly through the shared `Database.conn`.
+- So the boundary is currently "core/services -> memory stores -> database connection",
+  not a strict repository abstraction layer yet.
 
 ---
 

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("context_builder")
 
@@ -7,6 +8,7 @@ class ContextBuilder:
     def __init__(
         self,
         system_prompt: str,
+        user_context,
         history_store,
         memory_store,
         history_limit: int = 6,
@@ -14,6 +16,7 @@ class ContextBuilder:
         summary_store=None,
     ):
         self.system_prompt = system_prompt
+        self.user_context = user_context or {}
         self.history_store = history_store
         self.memory_store = memory_store
         self.history_limit = history_limit
@@ -48,7 +51,50 @@ class ContextBuilder:
         logger.debug("[%s] Added base system prompt", session_id)
 
         # --------------------------------------------------
-        # 2. Tool-provided context (optional, system-level)
+        # 2. Current local system datetime
+        # --------------------------------------------------
+        now_local = datetime.now().astimezone()
+        messages.append({
+            "role": "system",
+            "content": (
+                "Current system datetime (local): "
+                f"{now_local.isoformat()}"
+            ),
+        })
+        logger.debug("[%s] Added current system datetime context", session_id)
+
+        # --------------------------------------------------
+        # 3. Static user profile/context from config (optional)
+        # --------------------------------------------------
+        if self.user_context:
+            user_lines = []
+            for key, value in self.user_context.items():
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                if isinstance(value, str) and "\n" in value:
+                    user_lines.append(f"- {key}:")
+                    user_lines.extend(f"  {line}" for line in value.splitlines() if line.strip())
+                else:
+                    user_lines.append(f"- {key}: {value}")
+
+            if user_lines:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "User profile/context (configured):\n"
+                        + "\n".join(user_lines)
+                    ),
+                })
+                logger.info(
+                    "[%s] Added configured user context (%d fields)",
+                    session_id,
+                    len(user_lines),
+                )
+
+        # --------------------------------------------------
+        # 4. Tool-provided context (optional, system-level)
         # --------------------------------------------------
         if tool_context:
             messages.append({
@@ -64,7 +110,7 @@ class ContextBuilder:
             logger.debug("[%s] No tool context provided", session_id)
 
         # --------------------------------------------------
-        # 3. Relevant long-term memory
+        # 5. Relevant long-term memory
         # --------------------------------------------------
         memories = self.memory_store.get_relevant(
             query=user_text,
@@ -93,7 +139,7 @@ class ContextBuilder:
             logger.debug("[%s] No relevant memories found", session_id)
 
         # --------------------------------------------------
-        # 4. Conversation summary (if present)
+        # 6. Conversation summary (if present)
         # --------------------------------------------------
         summary = self.summary_store.get(session_id) if self.summary_store else None
         if summary:
@@ -113,7 +159,7 @@ class ContextBuilder:
             logger.debug("[%s] No conversation summary available", session_id)
 
         # --------------------------------------------------
-        # 5. Recent user history (deduplicated)
+        # 7. Recent conversation history (deduplicated)
         # --------------------------------------------------
         history_limit = 2 if summary else self.history_limit
 
@@ -126,26 +172,28 @@ class ContextBuilder:
         seen = set()
 
         for row in history:
-            if row["role"] != "user":
+            role = row["role"]
+            if role not in {"user", "assistant"}:
                 continue
 
             content = row["content"].strip()
             if not content:
                 continue
 
-            if content in seen:
+            key = (role, content)
+            if key in seen:
                 logger.debug("[%s] Skipping duplicate history entry", session_id)
                 continue
 
-            if content == user_text.strip():
+            if role == "user" and content == user_text.strip():
                 logger.debug("[%s] Skipping current input from history", session_id)
                 continue
 
-            seen.add(content)
+            seen.add(key)
             added_history += 1
 
             messages.append({
-                "role": "user",
+                "role": role,
                 "content": content,
             })
 
@@ -157,7 +205,7 @@ class ContextBuilder:
         )
 
         # --------------------------------------------------
-        # 6. Current user input (always last)
+        # 8. Current user input (always last)
         # --------------------------------------------------
         messages.append({
             "role": "user",
@@ -169,5 +217,7 @@ class ContextBuilder:
             session_id,
             len(messages),
         )
+
+        print(messages)
 
         return messages

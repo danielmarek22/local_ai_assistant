@@ -4,7 +4,7 @@
 Local AI Assistant is a modular, locally-runnable AI assistant framework designed for experimentation with LLMs, planning, memory, perception, and tool use.  
 It emphasizes **hackability**, **clear separation of concerns**, and **offline / local-first execution**.
 
-## PSA: Most of this project was vibe-coded. 
+## PSA: This is just a toy project and most of it was vibe-coded.
 
 ## High-level Architecture
 

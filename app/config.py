@@ -1,6 +1,5 @@
 from pathlib import Path
 import yaml
-import logging
 
 
 class Config:
@@ -11,6 +10,7 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
+        self.user_context = self.raw.get("user_context", {})
 
         # Planner
         self.planner = self.raw.get(
@@ -18,7 +18,7 @@ class Config:
             {
                 "mode": "rule",
                 "llm_enabled": False,
-                "timeout_ms": 1500,
+                "timeout_ms": 4000,
             },
         )
 

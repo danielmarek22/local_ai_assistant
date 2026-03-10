@@ -2,6 +2,9 @@ llm:
   backend: ollama
   host: http://localhost:11434
   model: mistral-nemo
+  timeout_s: 30.0
+  max_retries: 2
+  retry_backoff_s: 0.25
 
   generation:
     temperature: 0.6
@@ -42,11 +45,20 @@ assistant:
 
   personality:
     default_emotion: neutral
+
+user_context:
+  name: user
+  timezone: America/New_York
+  preferences: concise, practical answers
+  profile: |
+    The user is a software engineer working on this local assistant project.
+    Prefer implementation-first suggestions with explicit tradeoffs.
+    Avoid long motivational language.
     
 planner:
   mode: llm   # options: rule | llm | hybrid
   llm_enabled: true
-  timeout_ms: 1500
+  timeout_ms: 4000
   
 orchestrator:
   summary_trigger: 10
@@ -64,4 +76,6 @@ tools:
     enabled: true
     base_url: http://localhost:8080
     timeout: 10.0
+    max_retries: 2
+    retry_backoff_s: 0.25
     max_results: 5

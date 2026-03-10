@@ -1,10 +1,11 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 import asyncio
 from typing import Iterator, Any
 import json
 import logging
+import re
 import uuid
 import time
 from pathlib import Path
@@ -41,6 +42,44 @@ logger.info("Starting FastAPI server")
 _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
+_FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MARKDOWN_MARKER_RE = re.compile(r"[*_~`>#]")
+
+
+def _prepare_tts_text(text: str) -> str:
+    """
+    Lightweight markdown skipping for TTS:
+    - drop fenced code blocks
+    - keep link labels, drop URLs
+    - remove common markdown marker chars
+    """
+    if not text:
+        return ""
+
+    cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", text)
+    cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_MARKER_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def resolve_session_id(
+    session_mode: str,
+    requested_session_id: str | None,
+    known_server_instance_id: str | None,
+    server_instance_id: str,
+) -> str:
+    if session_mode == "open" and requested_session_id:
+        return requested_session_id
+
+    if (
+        session_mode == "resume"
+        and requested_session_id
+        and known_server_instance_id == server_instance_id
+    ):
+        return requested_session_id
+
+    return uuid.uuid4().hex[:8]
 
 
 @dataclass
@@ -138,6 +177,13 @@ async def synthesize_async(text: str, output_path: Path, session_id: str):
 
 @app.on_event("startup")
 async def startup_event():
+    app.state.server_instance_id = uuid.uuid4().hex[:8]
+    app.state.orchestrator = build_orchestrator()
+    logger.info(
+        "Orchestrator initialized at startup (server_instance_id=%s)",
+        app.state.server_instance_id,
+    )
+
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
@@ -156,16 +202,93 @@ async def shutdown_event():
             await worker_task
 
 
+@app.get("/api/sessions")
+async def list_sessions():
+    history_store = app.state.orchestrator.history
+    rows = history_store.list_sessions()
+    sessions = [
+        {
+            "session_id": row["session_id"],
+            "started_at": row["started_at"],
+            "updated_at": row["updated_at"],
+            "message_count": row["message_count"],
+            "preview": row["preview"],
+        }
+        for row in rows
+    ]
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    history_store = app.state.orchestrator.history
+    rows = history_store.get_all(session_id)
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    summary = app.state.orchestrator.summary_store.get(session_id)
+    return {
+        "session_id": session_id,
+        "summary": summary,
+        "messages": [
+            {
+                "role": row["role"],
+                "content": row["content"],
+                "timestamp": row["timestamp"],
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    orchestrator = app.state.orchestrator
+    deleted_count = orchestrator.history.delete_session(session_id)
+    orchestrator.summary_store.delete(session_id)
+
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if orchestrator.session_id == session_id:
+        orchestrator.set_session(uuid.uuid4().hex[:8])
+
+    return {"deleted": True, "session_id": session_id}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    session_id = uuid.uuid4().hex[:8]
+    connection_id = uuid.uuid4().hex[:8]
     start_ts = time.perf_counter()
+    server_instance_id = app.state.server_instance_id
+    session_mode = ws.query_params.get("session_mode", "new")
+    requested_session_id = ws.query_params.get("session_id")
+    known_server_instance_id = ws.query_params.get("server_instance_id")
+
+    session_id = resolve_session_id(
+        session_mode=session_mode,
+        requested_session_id=requested_session_id,
+        known_server_instance_id=known_server_instance_id,
+        server_instance_id=server_instance_id,
+    )
 
     await ws.accept()
-    logger.info("[%s] WebSocket connected", session_id)
+    logger.info(
+        "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
+        connection_id,
+        session_id,
+        session_mode,
+    )
+    await ws.send_text(json.dumps({
+        "type": "session_init",
+        "server_instance_id": server_instance_id,
+        "session_id": session_id,
+    }))
 
-    orchestrator = build_orchestrator()
-    logger.debug("[%s] Orchestrator created", session_id)
+    orchestrator = app.state.orchestrator
+    orchestrator.set_session(session_id)
+    logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     try:
         while True:
@@ -173,10 +296,10 @@ async def websocket_endpoint(ws: WebSocket):
 
             logger.info(
                 "[%s] Received user input (len=%d)",
-                session_id,
+                connection_id,
                 len(user_text),
             )
-            logger.debug("[%s] User input text: %r", session_id, user_text)
+            logger.debug("[%s] User input text: %r", connection_id, user_text)
 
             # Buffer for sentence-based TTS
             text_buffer = ""
@@ -188,7 +311,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if isinstance(event, AssistantStateEvent):
                     logger.debug(
                         "[%s] Assistant state -> %s",
-                        session_id,
+                        connection_id,
                         event.state,
                     )
                     await ws.send_text(json.dumps({
@@ -210,19 +333,23 @@ async def websocket_endpoint(ws: WebSocket):
                         sentences, text_buffer = split_sentences(text_buffer)
 
                         for sentence in sentences:
+                            tts_text = _prepare_tts_text(sentence)
+                            if not tts_text:
+                                continue
+
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                             logger.debug(
                                 "[%s] TTS synth sentence (%d chars)",
-                                session_id,
-                                len(sentence),
+                                connection_id,
+                                len(tts_text),
                             )
 
                             await synthesize_async(
-                                text=sentence,
+                                text=tts_text,
                                 output_path=audio_path,
-                                session_id=session_id,
+                                session_id=connection_id,
                             )
 
                             await ws.send_text(json.dumps({
@@ -231,20 +358,21 @@ async def websocket_endpoint(ws: WebSocket):
                             }))
 
                     else:
-                        if text_buffer.strip():
+                        tts_text = _prepare_tts_text(text_buffer)
+                        if tts_text:
                             audio_id = uuid.uuid4().hex
                             audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                             logger.debug(
                                 "[%s] TTS final fragment (%d chars)",
-                                session_id,
-                                len(text_buffer),
+                                connection_id,
+                                len(tts_text),
                             )
 
                             await synthesize_async(
-                                text=text_buffer,
+                                text=tts_text,
                                 output_path=audio_path,
-                                session_id=session_id,
+                                session_id=connection_id,
                             )
 
                             await ws.send_text(json.dumps({
@@ -259,21 +387,21 @@ async def websocket_endpoint(ws: WebSocket):
 
                         logger.info(
                             "[%s] Assistant turn completed",
-                            session_id,
+                            connection_id,
                         )
 
     except WebSocketDisconnect:
         logger.info(
             "[%s] WebSocket disconnected (uptime=%.2f s)",
-            session_id,
+            connection_id,
             time.perf_counter() - start_ts,
         )
 
     except Exception:
-        logger.exception("[%s] WebSocket handler crashed", session_id)
+        logger.exception("[%s] WebSocket handler crashed", connection_id)
 
     finally:
-        logger.debug("[%s] WebSocket cleanup complete", session_id)
+        logger.debug("[%s] WebSocket cleanup complete", connection_id)
 
 
 @app.get("/")

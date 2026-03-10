@@ -1,5 +1,6 @@
 import requests
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,13 @@ class SearXNGClient:
         self,
         base_url: str = "http://localhost:8080",
         timeout: float = 10.0,
+        max_retries: int = 2,
+        retry_backoff_s: float = 0.25,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_s = retry_backoff_s
         self.is_available: bool = False
 
     def probe(self) -> bool:
@@ -49,10 +54,9 @@ class SearXNGClient:
             "format": "json",
         }
 
-        response = requests.get(
+        response = self._get_with_retry(
             f"{self.base_url}/search",
             params=params,
-            timeout=self.timeout,
         )
         response.raise_for_status()
 
@@ -69,6 +73,48 @@ class SearXNGClient:
             )
 
         return results
+
+    def _get_with_retry(self, url: str, params: dict):
+        attempts = self.max_retries + 1
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response
+
+            except requests.RequestException as exc:
+                retryable = self._is_retryable(exc)
+                is_last = attempt == attempts
+
+                if is_last or not retryable:
+                    raise
+
+                backoff = self.retry_backoff_s * (2 ** (attempt - 1))
+                logger.warning(
+                    "Web search request failed (attempt %d/%d): %s. Retrying in %.2fs",
+                    attempt,
+                    attempts,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
+
+        raise RuntimeError("unreachable")
+
+    def _is_retryable(self, exc: requests.RequestException) -> bool:
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            return True
+
+        if isinstance(exc, requests.HTTPError):
+            status_code = getattr(exc.response, "status_code", None)
+            return status_code is not None and status_code >= 500
+
+        return False
 
 
 class WebSearchTool:

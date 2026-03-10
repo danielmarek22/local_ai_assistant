@@ -49,6 +49,20 @@ class Orchestrator:
             summary_trigger,
         )
 
+    def set_session(self, session_id: str):
+        if self.session_id == session_id:
+            return
+
+        previous_session_id = self.session_id
+        self.session_id = session_id
+        self.perception = PerceptionState()
+
+        logger.info(
+            "[%s] Session activated (previous=%s)",
+            self.session_id,
+            previous_session_id,
+        )
+
     # ============================================================
     # Public entry point
     # ============================================================
@@ -185,70 +199,6 @@ class Orchestrator:
     # ============================================================
     # Action execution
     # ============================================================
-
-    def _run_tool_action(
-        self,
-        action: Action,
-        user_text: str,
-    ) -> Generator[AssistantStateEvent, None, Optional[str]]:
-
-        tool = self.tools.get(action.type)
-
-        if not tool:
-            logger.warning(
-                "[%s] Tool '%s' not registered, skipping",
-                self.session_id,
-                action.type,
-            )
-            return None
-
-        if not tool.is_available:
-            logger.warning(
-                "[%s] Tool '%s' unavailable, skipping",
-                self.session_id,
-                action.type,
-            )
-            return None
-
-        yield AssistantStateEvent(state=AssistantState.SEARCHING)
-
-        logger.info("[%s] Running tool '%s'", self.session_id, action.type)
-
-        start_ts = time.perf_counter()
-
-        try:
-            query = (action.payload or {}).get("query") or user_text
-            logger.debug("[%s] Tool '%s' query: %r", self.session_id, action.type, query)
-
-            context = tool.run(query)
-
-            logger.info(
-                "[%s] Tool '%s' completed (duration=%.2f ms)",
-                self.session_id,
-                action.type,
-                (time.perf_counter() - start_ts) * 1000,
-            )
-
-            if context:
-                logger.debug(
-                    "[%s] Tool '%s' returned context (%d chars)",
-                    self.session_id,
-                    action.type,
-                    len(context),
-                )
-            else:
-                logger.debug("[%s] Tool '%s' returned no context", self.session_id, action.type)
-
-            return context
-
-        except Exception:
-            logger.exception(
-                "[%s] Tool '%s' failed, falling back",
-                self.session_id,
-                action.type,
-            )
-            return None
-
     def _run_memory_action(self, action: Action):
         logger.debug("[%s] Processing memory action", self.session_id)
 

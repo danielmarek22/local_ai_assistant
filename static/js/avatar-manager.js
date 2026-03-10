@@ -4,6 +4,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { CONFIG } from './config.js';
 
+// Import the Mixamo loader helper 
+import { loadMixamoAnimation } from './loadMixamoAnimation.js'; 
+
 export class AvatarManager {
     constructor(containerId, getAudioLevelCallback) {
         this.container = document.getElementById(containerId);
@@ -11,11 +14,29 @@ export class AvatarManager {
         
         this.currentVrm = null;
         this.currentState = "idle";
-        this.poseTarget = CONFIG.AVATAR.POSES.idle;
+        
+        // Animation Mixer & Storage
+        this.mixer = null;
+        this.animations = {}; 
+        this.currentAction = null;
+        this.stateAnimations = {}; 
+        
+        // Blink State Management
+        this.blinkState = 'open'; 
+        this.blinkTimer = 0;
+        this.nextBlinkTime = Math.random() * 3 + 2; 
+
+        // --- NEW: Eye Tracking State Management ---
+        this.lookAtTarget = new THREE.Object3D(); 
+        this.lookAtOffset = new THREE.Vector3(0, 0, 0); // How far away from the camera to look
+        this.eyeTimer = 0;
+        this.nextEyeMoveTime = Math.random() * 3 + 2;
+        this.isLookingAtCamera = true;
+
+        this.clock = new THREE.Clock();
         
         this.initScene();
         this.initLoader();
-        this.clock = new THREE.Clock();
         
         this.animate = this.animate.bind(this);
         this.animate();
@@ -29,17 +50,26 @@ export class AvatarManager {
 
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(30.0, window.innerWidth / window.innerHeight, 0.1, 20.0);
-        this.camera.position.set(1.0, 1.0, 4.0); 
+        
+        // --- UPDATED: Move the camera HIGHER, near head-level (1.8) ---
+        this.camera.position.set(0.0, 1.6, 3.2); 
 
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
-        this.controls.target.set(0.0, 0.9, 0.0);
+        
+        // --- UPDATED: Keep the look-target LOWER, near waist-level (0.8) ---
+        // This forces the camera to angle downward.
+        this.controls.target.set(0.0, 0.8, 0.0); 
         this.controls.update();
+
+        // --- NEW: Add the invisible eye target to the scene ---
+        this.scene.add(this.lookAtTarget);
 
         const light = new THREE.DirectionalLight(0xffffff, 1.0);
         light.position.set(1.0, 1.0, 1.0).normalize();
         this.scene.add(light);
+        
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
         this.scene.add(ambientLight);
     }
@@ -54,73 +84,198 @@ export class AvatarManager {
                 const vrm = gltf.userData.vrm;
                 VRMUtils.removeUnnecessaryVertices(gltf.scene);
                 VRMUtils.removeUnnecessaryJoints(gltf.scene);
+                
                 this.currentVrm = vrm;
                 this.scene.add(vrm.scene);
                 
-                // Initial Arm Pose (Tuck arms down)
-                vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = -1.2; 
-                vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = 1.2;
+                // --- NEW: Assign the lookAt target to the VRM ---
+                if (this.currentVrm.lookAt) {
+                    this.currentVrm.lookAt.target = this.lookAtTarget;
+                }
+                
+                // Initialize the Animation Mixer tied to the VRM scene
+                this.mixer = new THREE.AnimationMixer(vrm.scene);
+
+                // Listen for animation loops to trigger variety
+                this.mixer.addEventListener('loop', (e) => {
+                    if (Math.random() < 0.3) {
+                        this.playRandomVariant(this.currentState);
+                    }
+                });
+
+                // Load all animations dynamically
+                Object.keys(CONFIG.AVATAR.ANIMATIONS).forEach(state => {
+                    const paths = CONFIG.AVATAR.ANIMATIONS[state];
+                    this.stateAnimations[state] = []; 
+                    
+                    paths.forEach((path, index) => {
+                        const animKey = `${state}_${index}`; 
+                        this.stateAnimations[state].push(animKey);
+                        
+                        const playImmediately = (state === 'idle' && index === 0);
+                        this.loadAnimation(path, animKey, playImmediately);
+                    });
+                });
             },
             (progress) => {},
             (error) => console.error("Error loading VRM:", error)
         );
     }
 
+    // --- Mixamo FBX Loader Method ---
+    loadAnimation(url, name, playImmediately = false) {
+        loadMixamoAnimation(url, this.currentVrm)
+            .then((clip) => {
+                if (clip) {
+                    const action = this.mixer.clipAction(clip);
+                    this.animations[name] = action;
+
+                    if (playImmediately) {
+                        this.fadeToAction(name, 0.0); 
+                    }
+                }
+            })
+            .catch((error) => console.error(`Failed to load Mixamo animation "${name}":`, error));
+    }
+
+    // --- Crossfade Logic ---
+    fadeToAction(name, duration = 0.5) {
+        const nextAction = this.animations[name];
+        if (!nextAction || this.currentAction === nextAction) return;
+
+        nextAction.reset();
+        nextAction.play();
+
+        if (this.currentAction) {
+            nextAction.crossFadeFrom(this.currentAction, duration, true);
+        }
+
+        this.currentAction = nextAction;
+    }
+
+    // --- Random Variant Selector ---
+    playRandomVariant(state) {
+        const availableAnimations = this.stateAnimations[state];
+        
+        if (availableAnimations && availableAnimations.length > 0) {
+            let selectedAnimKey;
+            if (availableAnimations.length > 1 && this.currentAction) {
+                do {
+                    const randomIndex = Math.floor(Math.random() * availableAnimations.length);
+                    selectedAnimKey = availableAnimations[randomIndex];
+                } while (this.animations[selectedAnimKey] === this.currentAction);
+            } else {
+                selectedAnimKey = availableAnimations[0];
+            }
+            this.fadeToAction(selectedAnimKey, 0.8);
+        }
+    }
+
     setState(state) {
+        if (this.currentState === state) return;
         this.currentState = state;
-        // Look up pose in config, default to idle if not found
-        this.poseTarget = CONFIG.AVATAR.POSES[state] || CONFIG.AVATAR.POSES.idle;
+        this.playRandomVariant(state);
     }
 
     animate() {
         requestAnimationFrame(this.animate);
+        
         const deltaTime = this.clock.getDelta();
-        const time = this.clock.elapsedTime;
         this.controls.update(); 
 
         if (this.currentVrm) {
-            this.currentVrm.update(deltaTime);
+            // --- Update procedural features BEFORE updating the VRM ---
+            this.updateEyes(deltaTime);
+            this.updateBlinking(deltaTime);
             
-            // --- LIP SYNC ---
+            // Apply Audio Lip Sync
             const targetMouthOpen = this.getAudioLevel();
             const currentMouth = this.currentVrm.expressionManager.getValue('aa');
-            const smoothedMouth = THREE.MathUtils.lerp(
-                currentMouth, 
-                targetMouthOpen, 
-                CONFIG.AUDIO.LIP_SYNC_SMOOTHING
-            );
+            const smoothedMouth = THREE.MathUtils.lerp(currentMouth, targetMouthOpen, CONFIG.AUDIO.LIP_SYNC_SMOOTHING);
             this.currentVrm.expressionManager.setValue('aa', smoothedMouth);
 
-            // --- ANIMATIONS ---
-            this.processIdleAnimations(time);
+            // Update the Animation Mixer (bones)
+            if (this.mixer) this.mixer.update(deltaTime);
+
+            // Finally, update the VRM to apply everything to the model
+            this.currentVrm.update(deltaTime);
         }
+        
         this.renderer.render(this.scene, this.camera);
     }
 
-    processIdleAnimations(time) {
-        const neck = this.currentVrm.humanoid.getNormalizedBoneNode('neck');
-        const chest = this.currentVrm.humanoid.getNormalizedBoneNode('chest');
-        const spine = this.currentVrm.humanoid.getNormalizedBoneNode('spine');
+    // --- NEW: Eye Tracking Logic ---
+    updateEyes(deltaTime) {
+        this.eyeTimer += deltaTime;
 
-        // Breathing
-        chest.rotation.x = Math.sin(time * 1.0) * 0.03;
-
-        // Pose Smoothing
-        const lerpFactor = CONFIG.AVATAR.POSE_LERP_FACTOR;
-        neck.rotation.x = THREE.MathUtils.lerp(neck.rotation.x, this.poseTarget.neckX, lerpFactor);
-        neck.rotation.y = THREE.MathUtils.lerp(neck.rotation.y, this.poseTarget.neckY, lerpFactor);
-        spine.rotation.y = THREE.MathUtils.lerp(spine.rotation.y, this.poseTarget.spineY, lerpFactor);
-
-        // Sway
-        neck.rotation.y += Math.sin(time * 0.5) * 0.02;
-        
-        // Blink logic based on state
-        const isIdle = (this.currentState === 'idle');
-        const blinkChance = isIdle ? CONFIG.AVATAR.BLINK_CHANCE_IDLE : CONFIG.AVATAR.BLINK_CHANCE_ACTIVE;
-        
-        if (Math.random() < blinkChance) {
-            this.currentVrm.expressionManager.setValue('blink', 1.0);
-            setTimeout(() => this.currentVrm?.expressionManager.setValue('blink', 0.0), 150);
+        // Time to change where we are looking?
+        if (this.eyeTimer >= this.nextEyeMoveTime) {
+            this.eyeTimer = 0;
+            this.isLookingAtCamera = !this.isLookingAtCamera; // Toggle state
+            
+            if (this.isLookingAtCamera) {
+                // Stare at the camera for a longer period (3 to 8 seconds)
+                this.nextEyeMoveTime = Math.random() * 5.0 + 3.0;
+                this.lookAtOffset.set(0, 0, 0);
+            } else {
+                // Dart eyes away for a shorter period (0.5 to 2 seconds)
+                this.nextEyeMoveTime = Math.random() * 1.5 + 0.5;
+                
+                // Pick a random spot near the camera to look at
+                const xOffset = (Math.random() - 0.5) * 5.0; // Left or right
+                const yOffset = (Math.random() - 0.5) * 2.0; // Up or down
+                this.lookAtOffset.set(xOffset, yOffset, 0);
+            }
         }
+
+        // Calculate the exact 3D position we want the eyes to aim at
+        // (Camera position + our random offset)
+        const targetPos = this.camera.position.clone().add(this.lookAtOffset);
+        
+        // Smoothly move our invisible target object to that position
+        // A lerp factor of 10.0 gives a nice, quick "eye dart" feel
+        this.lookAtTarget.position.lerp(targetPos, 10.0 * deltaTime);
+    }
+
+    updateBlinking(deltaTime) {
+        const blinkSpeed = 15.0; 
+        let currentBlink = this.currentVrm.expressionManager.getValue('blink');
+
+        switch (this.blinkState) {
+            case 'open':
+                this.blinkTimer += deltaTime;
+                if (this.blinkTimer >= this.nextBlinkTime) {
+                    this.blinkState = 'closing';
+                    this.blinkTimer = 0;
+                }
+                break;
+            case 'closing':
+                currentBlink += blinkSpeed * deltaTime;
+                if (currentBlink >= 1.0) {
+                    currentBlink = 1.0;
+                    this.blinkState = 'closed';
+                }
+                break;
+            case 'closed':
+                this.blinkTimer += deltaTime;
+                if (this.blinkTimer >= 0.1) {
+                    this.blinkState = 'opening';
+                    this.blinkTimer = 0;
+                }
+                break;
+            case 'opening':
+                currentBlink -= blinkSpeed * deltaTime;
+                if (currentBlink <= 0.0) {
+                    currentBlink = 0.0;
+                    this.blinkState = 'open';
+                    
+                    const isIdle = (this.currentState === 'idle');
+                    const baseTime = isIdle ? 3.0 : 1.5;
+                    this.nextBlinkTime = Math.random() * 2.0 + baseTime; 
+                }
+                break;
+        }
+
+        this.currentVrm.expressionManager.setValue('blink', currentBlink);
     }
 }
