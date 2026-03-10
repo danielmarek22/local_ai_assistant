@@ -6,18 +6,26 @@ export const CONFIG = {
     },
     AVATAR: {
         MODEL_PATH: '/static/avatar.vrm',
-        // Movement smoothing (lower is slower/smoother)
-        POSE_LERP_FACTOR: 0.05,
-        // Blink probabilities per frame
-        BLINK_CHANCE_IDLE: 0.005,
-        BLINK_CHANCE_ACTIVE: 0.002, // thinking/searching
         
-        // Define new states here without touching logic code
-        POSES: {
-            idle:       { neckX: 0,     neckY: 0,    spineY: 0 },
-            thinking:   { neckX: -0.25, neckY: 0.35, spineY: 0.05 },
-            searching:  { neckX: -0.15, neckY: -0.4, spineY: -0.05 },
-            responding: { neckX: 0.05,  neckY: 0,    spineY: 0 }
+        // --- UPDATED: Animation Arrays ---
+        ANIMATIONS: {
+            // Add multiple paths to the arrays
+            idle:       [
+                '/static/animations/Idle_1.fbx', 
+                '/static/animations/Idle_2.fbx',
+                // '/static/animations/Idle_3.fbx'
+            ],
+            thinking:   [
+                '/static/animations/Thinking_1.fbx' // Arrays work even with just one item!
+            ],
+            searching:  [
+                '/static/animations/Typing_Or_Searching.fbx'
+            ],
+            responding: [
+                '/static/animations/Talking_1.fbx', 
+                // '/static/animations/Talking_2.fbx',
+                // '/static/animations/Explaining.fbx'
+            ]
         }
     },
     AUDIO: {
