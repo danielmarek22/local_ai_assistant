@@ -20,7 +20,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10.2' # Change this to the Python version you are using
+        python-version: '3.10' # Change this to the Python version you are using
 
     # 3. Install your project dependencies (if any)
     - name: Install dependencies
