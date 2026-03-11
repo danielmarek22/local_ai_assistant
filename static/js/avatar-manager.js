@@ -147,15 +147,22 @@ export class AvatarManager {
             .catch((error) => console.error(`Failed to load Mixamo animation "${name}":`, error));
     }
 
-    // --- Crossfade Logic ---
     fadeToAction(name, duration = 0.5) {
         const nextAction = this.animations[name];
         if (!nextAction || this.currentAction === nextAction) return;
 
         nextAction.reset();
+        // --- NEW: Ensure the incoming animation isn't paused ---
+        nextAction.paused = false; 
         nextAction.play();
 
         if (this.currentAction) {
+            // --- NEW: Unpause the outgoing animation ---
+            // This is the secret sauce. By unpausing the thinking animation right as 
+            // the crossfade begins, her arm naturally starts moving down while simultaneously 
+            // blending into her talking gesture. It looks incredibly fluid!
+            this.currentAction.paused = false; 
+            
             nextAction.crossFadeFrom(this.currentAction, duration, true);
         }
 
@@ -223,6 +230,17 @@ export class AvatarManager {
             const smoothedMouth = THREE.MathUtils.lerp(currentMouth, targetMouthOpen, CONFIG.AUDIO.LIP_SYNC_SMOOTHING);
             this.currentVrm.expressionManager.setValue('aa', smoothedMouth);
 
+            // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
+            if (this.currentAction && this.currentState === 'thinking') {
+                const duration = this.currentAction.getClip().duration;
+                
+                // Freeze at the 50% mark. Tweak this 0.5 value if her hand hasn't 
+                // fully reached her chin yet (e.g., try 0.6 or 0.7).
+                if (this.currentAction.time >= duration * 0.5) {
+                    this.currentAction.paused = true;
+                }
+            }
+
             // Update the Animation Mixer (bones)
             if (this.mixer) this.mixer.update(deltaTime);
 
@@ -231,7 +249,7 @@ export class AvatarManager {
         }
         
         this.renderer.render(this.scene, this.camera);
-        }
+    }
     // --- NEW: Eye Tracking Logic ---
     updateEyes(deltaTime) {
         this.eyeTimer += deltaTime;

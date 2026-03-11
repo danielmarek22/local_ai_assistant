@@ -22,8 +22,8 @@ export const CONFIG = {
             thinking:   [
                 '/static/animations/Thinking/Thinking_1.fbx',
                 '/static/animations/Thinking/Thinking_2.fbx',
-                '/static/animations/Thinking/Thinking_3.fbx',
-                '/static/animations/Thinking/Thinking_4.fbx'
+                // '/static/animations/Thinking/Thinking_3.fbx',
+                // '/static/animations/Thinking/Thinking_4.fbx'
             ],
             searching:  [
                 '/static/animations/Typing_Or_Searching.fbx'
