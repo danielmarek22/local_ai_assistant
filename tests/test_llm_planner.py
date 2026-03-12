@@ -1,7 +1,8 @@
 import unittest
 import time
+from pydantic import ValidationError
 
-from app.planners.llm_planner import LLMPlanner
+from app.planners.llm_planner import LLMPlanner, PlannerOutput
 
 
 class FakeLLM:
@@ -25,6 +26,23 @@ class SlowLLM:
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_default_timeout_is_15_seconds(self):
+        planner = LLMPlanner(FakeLLM('{"actions":[{"type":"respond"}]}'))
+
+        self.assertEqual(planner.timeout_ms, 15000)
+
+    def test_schema_rejects_extra_fields(self):
+        with self.assertRaises(ValidationError):
+            PlannerOutput.model_validate(
+                {"actions": [{"type": "respond", "text": "hello"}]}
+            )
+
+    def test_schema_rejects_respond_with_content(self):
+        with self.assertRaises(ValidationError):
+            PlannerOutput.model_validate(
+                {"actions": [{"type": "respond", "content": "hello"}]}
+            )
+
     def test_valid_json_produces_actions(self):
         llm = FakeLLM(
             '{"actions":[{"type":"web_search","query":"python"},{"type":"respond"}]}'
@@ -58,13 +76,14 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.actions), 1)
         self.assertEqual(plan.actions[0].type, "respond")
 
-    def test_missing_required_action_fields_are_skipped(self):
+    def test_invalid_action_schema_falls_back_to_respond(self):
         llm = FakeLLM('{"actions":[{"type":"web_search"},{"type":"respond"}]}')
         planner = LLMPlanner(llm)
 
         plan = planner.decide("hello", {})
 
-        self.assertEqual([a.type for a in plan.actions], ["respond"])
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].type, "respond")
 
     def test_timeout_falls_back_to_respond(self):
         llm = SlowLLM(

@@ -4,7 +4,7 @@ import logging
 import concurrent.futures
 from typing import Optional, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from app.core.actions import Action
 from app.core.plan import Plan
@@ -17,13 +17,40 @@ class PlannerActionSpec(BaseModel):
     query: Optional[str] = None
     content: Optional[str] = None
 
+    class Config:
+        extra = "forbid"
+
+    @model_validator(mode="after")
+    def validate_fields_for_type(self):
+        if self.type == "web_search":
+            if not self.query:
+                raise ValueError("web_search actions MUST include a query")
+            if self.content is not None:
+                raise ValueError("web_search actions must not include content")
+            
+        elif self.type == "write_memory":
+            if not self.content:
+                raise ValueError("write_memory actions MUST include content")
+            if self.query is not None:
+                raise ValueError("write_memory actions must not include query")
+            
+        elif self.type == "respond":
+            if self.query is not None or self.content is not None:
+                raise ValueError("respond actions must not include query or content")
+
+        return self
+
 
 class PlannerOutput(BaseModel):
     actions: list[PlannerActionSpec]
 
+    class Config:
+        extra = "forbid"
+
 
 class LLMPlanner:
-    def __init__(self, llm, timeout_ms: int = 4000):
+    # Increased default timeout to 15 seconds to give the LLM time to generate JSON
+    def __init__(self, llm, timeout_ms: int = 15000):
         self.llm = llm
         self.timeout_ms = timeout_ms
 
@@ -43,6 +70,7 @@ class LLMPlanner:
 
         perception_text = self._format_perception(perception)
 
+        # Updated prompt with clear JSON examples instead of union syntax
         prompt = [
             {
                 "role": "system",
@@ -50,15 +78,24 @@ class LLMPlanner:
                     "You are a planner for an AI assistant.\n"
                     "Decide what actions to take.\n"
                     "Use the current environment context if helpful.\n"
-                    "Output ONLY valid JSON.\n\n"
+                    "Output ONLY a valid JSON object matching the examples below.\n\n"
                     "Current perception:\n"
                     f"{perception_text}\n\n"
-                    "Schema:\n"
+                    "Valid Action Types:\n"
+                    "- web_search (requires 'query')\n"
+                    "- write_memory (requires 'content')\n"
+                    "- respond (no extra fields allowed)\n\n"
+                    "Example 1 (Multiple actions):\n"
                     "{\n"
                     '  "actions": [\n'
-                    '    { "type": "web_search", "query": string } | '
-                    '{ "type": "respond" } |\n'
-                    '    { "type": "write_memory", "content": string }\n'
+                    '    { "type": "web_search", "query": "weather in Tokyo" },\n'
+                    '    { "type": "write_memory", "content": "User asked about Tokyo" }\n'
+                    "  ]\n"
+                    "}\n\n"
+                    "Example 2 (Respond only):\n"
+                    "{\n"
+                    '  "actions": [\n'
+                    '    { "type": "respond" }\n'
                     "  ]\n"
                     "}"
                 ),
@@ -86,32 +123,23 @@ class LLMPlanner:
             parsed = self._validate_output(data)
             actions = []
 
+            # Cleaned up action mapping since Pydantic now guarantees required fields
             for item in parsed.actions:
-                action_type = item.type
-
-                if action_type == "web_search":
-                    if not item.query:
-                        logger.warning("Skipping web_search action with empty query")
-                        continue
+                if item.type == "web_search":
                     actions.append(
                         Action(
                             type="web_search",
                             payload={"query": item.query},
                         )
                     )
-
-                elif action_type == "write_memory":
-                    if not item.content:
-                        logger.warning("Skipping write_memory action with empty content")
-                        continue
+                elif item.type == "write_memory":
                     actions.append(
                         Action(
                             type="write_memory",
                             payload={"content": item.content},
                         )
                     )
-
-                elif action_type == "respond":
+                elif item.type == "respond":
                     actions.append(Action(type="respond"))
 
             if actions:
@@ -141,13 +169,15 @@ class LLMPlanner:
         return Plan(actions=[Action(type="respond")])
 
     def _call_llm_with_timeout(self, prompt: list[dict]) -> Optional[str]:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.llm.chat, prompt, False)
-            try:
-                return future.result(timeout=self.timeout_ms / 1000)
-            except concurrent.futures.TimeoutError:
-                future.cancel()
-                return None
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self.llm.chat, prompt, False)
+        try:
+            return future.result(timeout=self.timeout_ms / 1000)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _validate_output(self, data: dict) -> PlannerOutput:
         try:
