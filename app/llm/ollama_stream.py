@@ -13,43 +13,74 @@ class OllamaClient(LLMClient):
         model: str,
         host: str,
         options: dict | None = None,
+        thinking_enabled: bool = False,
+        thinking_level: str | None = None,
         timeout_s: float = 30.0,
         max_retries: int = 2,
         retry_backoff_s: float = 0.25,
     ):
         self.model = model
-        self.url = f"{host}/v1/chat/completions"
+        self.url = f"{host}/api/chat"
         self.options = options or {}
+        self.thinking_enabled = thinking_enabled
+        self.thinking_level = thinking_level
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
 
-    def chat(self, messages) -> str:
+    def chat(self, messages, think_override=None) -> str:
         """
         Non-streaming chat call.
         Used for planners, summarizers, and other structured outputs.
         """
+        think_value = self._resolve_think_value(think_override)
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "options": self.options,
+            "think": think_value,
         }
+
+        logger.info(
+            "Ollama chat request (stream=%s, think=%r, messages=%d)",
+            False,
+            think_value,
+            len(messages),
+        )
 
         r = self._post_with_retry(payload, stream=False)
         r.raise_for_status()
 
         data = r.json()
+        message = data.get("message", {})
+        logger.info(
+            "Ollama chat raw output: content=%r thinking=%r",
+            message.get("content"),
+            message.get("thinking"),
+        )
 
-        return data["choices"][0]["message"]["content"]
+        return message["content"]
 
-    def stream_chat(self, messages):
+    def stream_chat(self, messages, think_override=None):
+        think_value = self._resolve_think_value(think_override)
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": True,
             "options": self.options,
+            "think": think_value,
         }
+
+        logger.info(
+            "Ollama chat request (stream=%s, think=%r, messages=%d)",
+            True,
+            think_value,
+            len(messages),
+        )
+
+        collected_content = []
+        collected_thinking = []
 
         with self._post_with_retry(payload, stream=True) as r:
             r.raise_for_status()
@@ -58,20 +89,26 @@ class OllamaClient(LLMClient):
                 if not line:
                     continue
 
-                line = line.decode("utf-8")
+                chunk = json.loads(line.decode("utf-8"))
+                message = chunk.get("message", {})
+                content = message.get("content")
+                thinking = message.get("thinking")
 
-                if not line.startswith("data:"):
-                    continue
+                if content:
+                    collected_content.append(content)
+                    yield content
 
-                data = line.removeprefix("data: ").strip()
+                if thinking:
+                    collected_thinking.append(thinking)
 
-                if data == "[DONE]":
+                if chunk.get("done"):
                     break
 
-                chunk = json.loads(data)
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    yield delta["content"]
+        logger.info(
+            "Ollama stream raw output: content=%r thinking=%r",
+            "".join(collected_content),
+            "".join(collected_thinking) or None,
+        )
 
     def _post_with_retry(self, payload: dict, stream: bool):
         attempts = self.max_retries + 1
@@ -105,6 +142,18 @@ class OllamaClient(LLMClient):
                 time.sleep(backoff)
 
         raise RuntimeError("unreachable")
+
+    def _resolve_think_value(self, think_override):
+        if think_override is not None:
+            return think_override
+
+        if not self.thinking_enabled:
+            return False
+
+        if self.thinking_level:
+            return self.thinking_level
+
+        return True
 
     def _is_retryable(self, exc: requests.RequestException) -> bool:
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):

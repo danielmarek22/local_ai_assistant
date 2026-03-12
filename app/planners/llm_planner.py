@@ -142,7 +142,7 @@ class LLMPlanner:
 
     def _call_llm_with_timeout(self, prompt: list[dict]) -> Optional[str]:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.llm.chat, prompt)
+            future = executor.submit(self.llm.chat, prompt, False)
             try:
                 return future.result(timeout=self.timeout_ms / 1000)
             except concurrent.futures.TimeoutError:

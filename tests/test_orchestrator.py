@@ -67,8 +67,8 @@ class FakeLLM:
         self.chunks = chunks
         self.calls = []
 
-    def stream_chat(self, messages):
-        self.calls.append(messages)
+    def stream_chat(self, messages, think_override=None):
+        self.calls.append((messages, think_override))
         for chunk in self.chunks:
             yield chunk
 

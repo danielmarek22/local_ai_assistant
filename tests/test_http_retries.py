@@ -28,7 +28,7 @@ class HttpRetryTests(unittest.TestCase):
         post_mock.side_effect = [
             requests.Timeout("timeout"),
             _FakeResponse(
-                data={"choices": [{"message": {"content": "ok"}}]},
+                data={"message": {"content": "ok"}},
             ),
         ]
 
@@ -44,6 +44,7 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(post_mock.call_count, 2)
+        self.assertFalse(post_mock.call_args.kwargs["json"]["think"])
 
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.post")
@@ -64,6 +65,23 @@ class HttpRetryTests(unittest.TestCase):
             client.chat([{"role": "user", "content": "hello"}])
 
         self.assertEqual(post_mock.call_count, 1)
+
+    @patch("app.llm.ollama_stream.requests.post")
+    def test_ollama_stream_uses_configured_thinking_level(self, post_mock):
+        post_mock.return_value = _FakeResponse(
+            data={"message": {"content": "ok"}},
+        )
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            thinking_enabled=True,
+            thinking_level="medium",
+        )
+
+        client.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(post_mock.call_args.kwargs["json"]["think"], "medium")
 
     @patch("app.tools.web_search.time.sleep", return_value=None)
     @patch("app.tools.web_search.requests.get")
