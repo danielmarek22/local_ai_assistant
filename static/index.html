@@ -44,6 +44,30 @@
                         placeholder="Type a message..." 
                         rows="1"
                     ></textarea>
+                    <div id="composer-menu" class="composer-menu">
+                        <button
+                            id="composer-menu-btn"
+                            class="composer-menu-btn"
+                            type="button"
+                            aria-expanded="false"
+                            aria-haspopup="true"
+                            title="Message options"
+                        >
+                            +
+                        </button>
+                        <div id="composer-menu-popover" class="composer-menu-popover hidden" role="menu">
+                            <button
+                                id="reasoning-toggle"
+                                class="composer-menu-item"
+                                type="button"
+                                role="menuitemcheckbox"
+                                aria-checked="false"
+                            >
+                                <span class="composer-menu-check" aria-hidden="true"></span>
+                                <span class="composer-menu-label">Enable reasoning</span>
+                            </button>
+                        </div>
+                    </div>
                     <button id="send-btn">Send</button>
                 </div>
             </section>

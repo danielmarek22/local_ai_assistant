@@ -113,12 +113,12 @@ if (storedSessionContext?.sessionId && storedSessionContext?.serverInstanceId) {
 }
 
 // 5. Handle User Input
-uiManager.onSend((text) => {
+uiManager.onSend((text, options) => {
     // Browsers require user interaction to start AudioContext
     audioManager.init();
     
     uiManager.appendUserMessage(text);
-    client.sendMessage(text);
+    client.sendMessage(text, options);
 });
 
 async function refreshHistory() {

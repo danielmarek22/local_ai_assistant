@@ -79,7 +79,7 @@ class Orchestrator:
     # Public entry point
     # ============================================================
 
-    def handle_user_input(self, user_text: str):
+    def handle_user_input(self, user_text: str, think_override=None):
         start_ts = time.perf_counter()
 
         logger.info(
@@ -163,7 +163,10 @@ class Orchestrator:
         # --------------------------------------------------------
         # 6. LLM streaming response
         # --------------------------------------------------------
-        response = yield from self._stream_response(messages)
+        response = yield from self._stream_response(
+            messages,
+            think_override=think_override,
+        )
 
         # --------------------------------------------------------
         # 7. Persist assistant response
@@ -254,7 +257,7 @@ class Orchestrator:
         )
         return messages
 
-    def _stream_response(self, messages):
+    def _stream_response(self, messages, think_override=None):
         logger.info("[%s] Calling LLM (streaming)", self.session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
@@ -263,7 +266,7 @@ class Orchestrator:
         expression_initialized = False
         start_ts = time.perf_counter()
 
-        for chunk in self.llm.stream_chat(messages):
+        for chunk in self.llm.stream_chat(messages, think_override=think_override):
             stream_buffer += chunk
 
             events, stream_buffer = self._extract_expression_events(stream_buffer)

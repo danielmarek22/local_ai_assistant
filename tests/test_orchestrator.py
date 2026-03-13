@@ -383,6 +383,25 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[-1], "Hello there")
         self.assertEqual(history.records[1][2], "Hello there")
 
+    def test_turn_can_override_reasoning_for_single_message(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        list(orch.handle_user_input("hello", think_override=True))
+
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIs(llm.calls[0][1], True)
+
 
 if __name__ == "__main__":
     unittest.main()

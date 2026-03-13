@@ -138,6 +138,20 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertNotEqual(session_id, "session-a")
 
+    def test_parse_user_message_supports_structured_reasoning_override(self):
+        text, reasoning = server_module.parse_user_message(
+            '{"type":"user_message","text":"hello","reasoning":true}'
+        )
+
+        self.assertEqual(text, "hello")
+        self.assertIs(reasoning, True)
+
+    def test_parse_user_message_keeps_plain_text_backward_compatible(self):
+        text, reasoning = server_module.parse_user_message("hello")
+
+        self.assertEqual(text, "hello")
+        self.assertIsNone(reasoning)
+
 
 if __name__ == "__main__":
     unittest.main()

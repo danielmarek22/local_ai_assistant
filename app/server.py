@@ -86,6 +86,33 @@ def resolve_session_id(
     return uuid.uuid4().hex[:8]
 
 
+def parse_user_message(raw_text: str) -> tuple[str, bool | None]:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text, None
+
+    if not isinstance(payload, dict):
+        return raw_text, None
+
+    if payload.get("type") != "user_message":
+        return raw_text, None
+
+    text = payload.get("text")
+    if not isinstance(text, str):
+        raise ValueError("User message payload is missing text")
+
+    reasoning = payload.get("reasoning")
+    if reasoning is None:
+        reasoning_override = None
+    elif isinstance(reasoning, bool):
+        reasoning_override = reasoning
+    else:
+        raise ValueError("User message reasoning flag must be boolean")
+
+    return text, reasoning_override
+
+
 @dataclass
 class TTSJob:
     text: str
@@ -296,12 +323,14 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            user_text = await ws.receive_text()
+            raw_message = await ws.receive_text()
+            user_text, reasoning_override = parse_user_message(raw_message)
 
             logger.info(
-                "[%s] Received user input (len=%d)",
+                "[%s] Received user input (len=%d, reasoning_override=%r)",
                 connection_id,
                 len(user_text),
+                reasoning_override,
             )
             logger.debug("[%s] User input text: %r", connection_id, user_text)
 
@@ -309,7 +338,10 @@ async def websocket_endpoint(ws: WebSocket):
             text_buffer = ""
 
             async for event in run_generator(
-                orchestrator.handle_user_input(user_text)
+                orchestrator.handle_user_input(
+                    user_text,
+                    think_override=reasoning_override,
+                )
             ):
                 # --- STATE EVENTS ---
                 if isinstance(event, AssistantStateEvent):

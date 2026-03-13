@@ -114,9 +114,13 @@ export class NetworkClient {
         this.connect(options);
     }
 
-    sendMessage(text) {
+    sendMessage(text, options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(text);
+            this.ws.send(JSON.stringify({
+                type: 'user_message',
+                text,
+                reasoning: Boolean(options.reasoning),
+            }));
         } else {
             console.warn("Cannot send message: WebSocket is not open.");
         }
