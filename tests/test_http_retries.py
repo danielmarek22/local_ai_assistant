@@ -117,7 +117,10 @@ class HttpRetryTests(unittest.TestCase):
 
         chunks = list(client.stream_chat([{"role": "user", "content": "hello"}], think_override=True))
 
-        self.assertEqual(chunks, ["Thinking Process:\n\n1. Hello"])
+        self.assertEqual(
+            chunks,
+            ["<think>\n", "Thinking Process:\n\n1. Hello", "\n</think>\n\n"],
+        )
 
     @patch("app.tools.web_search.time.sleep", return_value=None)
     @patch("app.tools.web_search.requests.get")
