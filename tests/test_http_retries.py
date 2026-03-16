@@ -21,6 +21,22 @@ class _FakeResponse:
         return self._data
 
 
+class _FakeStreamResponse(_FakeResponse):
+    def __init__(self, lines, status_code=200, http_error=None):
+        super().__init__(data=None, status_code=status_code, http_error=http_error)
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_lines(self):
+        for line in self._lines:
+            yield line
+
+
 class HttpRetryTests(unittest.TestCase):
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.post")
@@ -28,7 +44,7 @@ class HttpRetryTests(unittest.TestCase):
         post_mock.side_effect = [
             requests.Timeout("timeout"),
             _FakeResponse(
-                data={"choices": [{"message": {"content": "ok"}}]},
+                data={"message": {"content": "ok"}},
             ),
         ]
 
@@ -44,6 +60,7 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(post_mock.call_count, 2)
+        self.assertFalse(post_mock.call_args.kwargs["json"]["think"])
 
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.post")
@@ -64,6 +81,46 @@ class HttpRetryTests(unittest.TestCase):
             client.chat([{"role": "user", "content": "hello"}])
 
         self.assertEqual(post_mock.call_count, 1)
+
+    @patch("app.llm.ollama_stream.requests.post")
+    def test_ollama_stream_uses_configured_thinking_level(self, post_mock):
+        post_mock.return_value = _FakeResponse(
+            data={"message": {"content": "ok"}},
+        )
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            thinking_enabled=True,
+            thinking_level="medium",
+        )
+
+        client.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(post_mock.call_args.kwargs["json"]["think"], "medium")
+
+    @patch("app.llm.ollama_stream.requests.post")
+    def test_ollama_stream_surfaces_thinking_when_content_is_empty(self, post_mock):
+        post_mock.return_value = _FakeStreamResponse(
+            lines=[
+                (
+                    b'{"message":{"thinking":"Thinking Process:\\n\\n1. Hello"},"done":false}'
+                ),
+                b'{"message":{},"done":true}',
+            ]
+        )
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        chunks = list(client.stream_chat([{"role": "user", "content": "hello"}], think_override=True))
+
+        self.assertEqual(
+            chunks,
+            ["<think>\n", "Thinking Process:\n\n1. Hello", "\n</think>\n\n"],
+        )
 
     @patch("app.tools.web_search.time.sleep", return_value=None)
     @patch("app.tools.web_search.requests.get")

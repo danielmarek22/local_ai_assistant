@@ -13,6 +13,10 @@ export class UIManager {
         this.statusText = document.getElementById('status-text');
         this.chatHistory = document.getElementById('chat-history');
         this.userInput = document.getElementById('user-input');
+        this.composerMenu = document.getElementById('composer-menu');
+        this.composerMenuBtn = document.getElementById('composer-menu-btn');
+        this.composerMenuPopover = document.getElementById('composer-menu-popover');
+        this.reasoningToggle = document.getElementById('reasoning-toggle');
         this.sendBtn = document.getElementById('send-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
@@ -26,11 +30,13 @@ export class UIManager {
         this.currentAiMessageDiv = null;
         this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
+        this.reasoningEnabledForNextSend = false;
         this.defaultMessages = this.serializeChatHistory();
         this.initAutoResize();
         this.initPanelControls();
         this.initTabs();
         this.initHistoryControls();
+        this.initComposerControls();
     }
 
     initAutoResize() {
@@ -110,6 +116,44 @@ export class UIManager {
                 this.onHistoryDeleteHandler(sessionId);
             }
         });
+    }
+
+    initComposerControls() {
+        this.composerMenuBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            this.toggleComposerMenu();
+        });
+
+        this.reasoningToggle.addEventListener('click', () => {
+            this.reasoningEnabledForNextSend = !this.reasoningEnabledForNextSend;
+            this.syncReasoningToggle();
+            this.closeComposerMenu();
+        });
+
+        document.addEventListener('click', (event) => {
+            if (this.composerMenu.contains(event.target)) {
+                return;
+            }
+
+            this.closeComposerMenu();
+        });
+    }
+
+    syncReasoningToggle() {
+        this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend);
+        this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend);
+        this.reasoningToggle.setAttribute('aria-checked', String(this.reasoningEnabledForNextSend));
+    }
+
+    toggleComposerMenu() {
+        const shouldOpen = this.composerMenuPopover.classList.contains('hidden');
+        this.composerMenuPopover.classList.toggle('hidden', !shouldOpen);
+        this.composerMenuBtn.setAttribute('aria-expanded', String(shouldOpen));
+    }
+
+    closeComposerMenu() {
+        this.composerMenuPopover.classList.add('hidden');
+        this.composerMenuBtn.setAttribute('aria-expanded', 'false');
     }
 
     updateStatus(state) {
@@ -372,7 +416,15 @@ export class UIManager {
                 const text = this.userInput.value.trim();
                 if (!text) return;
                 
-                callback(text);
+                const sendOptions = {
+                    reasoning: this.reasoningEnabledForNextSend,
+                };
+
+                callback(text, sendOptions);
+
+                this.reasoningEnabledForNextSend = false;
+                this.syncReasoningToggle();
+                this.closeComposerMenu();
                 
                 this.userInput.value = "";
                 this.userInput.style.height = 'auto'; // Reset height after sending

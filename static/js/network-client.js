@@ -2,7 +2,7 @@ import { CONFIG } from './config.js';
 
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onSessionInit, onState, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -65,6 +65,9 @@ export class NetworkClient {
                 else if (data.type === "assistant_state" && this.handlers.onState) {
                     this.handlers.onState(data.state);
                 } 
+                else if (data.type === "assistant_expression" && this.handlers.onExpression) {
+                    this.handlers.onExpression(data.expression);
+                }
                 else if (data.type === "assistant_chunk" && this.handlers.onChunk) {
                     this.handlers.onChunk(data.content);
                 }
@@ -111,9 +114,13 @@ export class NetworkClient {
         this.connect(options);
     }
 
-    sendMessage(text) {
+    sendMessage(text, options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(text);
+            this.ws.send(JSON.stringify({
+                type: 'user_message',
+                text,
+                reasoning: Boolean(options.reasoning),
+            }));
         } else {
             console.warn("Cannot send message: WebSocket is not open.");
         }

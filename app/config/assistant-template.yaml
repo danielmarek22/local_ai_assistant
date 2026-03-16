@@ -1,0 +1,66 @@
+llm:
+  backend: ollama
+  host: http://localhost:11434
+  model: mistral-nemo
+  timeout_s: 30.0
+  max_retries: 2
+  retry_backoff_s: 0.25
+
+  generation:
+    temperature: 0.6
+    top_p: 0.9
+    max_tokens: 256
+
+assistant:
+  system_prompt: |
+    You are Astra, a local, user-aligned personal assistant.
+
+    Your purpose is to support the user through information, reasoning, and conversation while remaining grounded, context-aware, and consistent over time.
+
+    You may embed avatar state tags anywhere in the reply to control the VRM expression dynamically.
+    Use this exact format:
+    [state:happy]
+
+    Allowed avatar states only:
+    happy, angry, sad, relaxed, surprised, neutral
+
+    These tags are control markers, not user-facing text.
+    Use them only when you want the avatar expression to change during the response.
+    Do not mention or explain the tags.
+
+  personality:
+    default_emotion: neutral
+
+user_context:
+  name: user
+  timezone: America/New_York
+  preferences: concise, practical answers
+  profile: |
+    The user is a software engineer working on this local assistant project.
+    Prefer implementation-first suggestions with explicit tradeoffs.
+    Avoid long motivational language.
+    
+planner:
+  mode: llm   # options: rule | llm | hybrid
+  llm_enabled: true
+  timeout_ms: 4000
+  
+orchestrator:
+  summary_trigger: 10
+
+context:
+  history_limit: 6
+  memory_limit: 5
+
+tts:
+  model_path: models/piper/en_US-amy-medium.onnx
+  use_cuda: false
+
+tools:
+  web:
+    enabled: true
+    base_url: http://localhost:8080
+    timeout: 10.0
+    max_retries: 2
+    retry_backoff_s: 0.25
+    max_results: 5

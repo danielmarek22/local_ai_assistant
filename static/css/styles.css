@@ -455,6 +455,95 @@ body {
 
 #user-input:focus { border-color: #00ff99; }
 
+.composer-menu {
+    position: relative;
+}
+
+.composer-menu-btn {
+    height: 44px;
+    min-width: 44px;
+    padding: 0 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #dfe7ee;
+    font-weight: 600;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+}
+
+.composer-menu-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.composer-menu-btn.active {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.7);
+    color: #8fffd0;
+}
+
+.composer-menu-btn:active {
+    transform: scale(0.97);
+}
+
+.composer-menu-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    min-width: 220px;
+    padding: 8px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(10, 14, 18, 0.96);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(12px);
+}
+
+.composer-menu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: #dfe7ee;
+    text-align: left;
+    cursor: pointer;
+}
+
+.composer-menu-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.composer-menu-item.active {
+    background: rgba(0, 255, 153, 0.12);
+    border-color: rgba(0, 255, 153, 0.24);
+}
+
+.composer-menu-check {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.04);
+    flex-shrink: 0;
+}
+
+.composer-menu-item.active .composer-menu-check {
+    background: #00ff99;
+    border-color: #00ff99;
+    box-shadow: inset 0 0 0 3px rgba(8, 15, 12, 0.9);
+}
+
+.composer-menu-label {
+    font-size: 14px;
+    font-weight: 600;
+}
+
 #send-btn {
     /* Height needs to match single-line input visually or auto-adjust */
     height: 44px; /* Fixed height to align with single line of text */

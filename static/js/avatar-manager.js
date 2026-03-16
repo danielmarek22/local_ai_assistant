@@ -14,6 +14,7 @@ export class AvatarManager {
         
         this.currentVrm = null;
         this.currentState = "idle";
+        this.currentExpression = "neutral";
         
         // Animation Mixer & Storage
         this.mixer = null;
@@ -98,7 +99,15 @@ export class AvatarManager {
 
                 // Listen for animation loops to trigger variety
                 this.mixer.addEventListener('loop', (e) => {
-                    if (Math.random() < 0.3) {
+                    // Default 30% chance to switch for idle, thinking, etc.
+                    let switchChance = 0.3; 
+                    
+                    // If talking, increase the chance to 85% for dynamic hand gestures
+                    if (this.currentState === 'responding') {
+                        switchChance = 0.85; 
+                    }
+
+                    if (Math.random() < switchChance) {
                         this.playRandomVariant(this.currentState);
                     }
                 });
@@ -138,15 +147,22 @@ export class AvatarManager {
             .catch((error) => console.error(`Failed to load Mixamo animation "${name}":`, error));
     }
 
-    // --- Crossfade Logic ---
     fadeToAction(name, duration = 0.5) {
         const nextAction = this.animations[name];
         if (!nextAction || this.currentAction === nextAction) return;
 
         nextAction.reset();
+        // --- NEW: Ensure the incoming animation isn't paused ---
+        nextAction.paused = false; 
         nextAction.play();
 
         if (this.currentAction) {
+            // --- NEW: Unpause the outgoing animation ---
+            // This is the secret sauce. By unpausing the thinking animation right as 
+            // the crossfade begins, her arm naturally starts moving down while simultaneously 
+            // blending into her talking gesture. It looks incredibly fluid!
+            this.currentAction.paused = false; 
+            
             nextAction.crossFadeFrom(this.currentAction, duration, true);
         }
 
@@ -177,6 +193,14 @@ export class AvatarManager {
         this.playRandomVariant(state);
     }
 
+    setExpression(expression) {
+        if (!CONFIG.AVATAR.EXPRESSIONS.includes(expression)) {
+            expression = 'neutral';
+        }
+
+        this.currentExpression = expression;
+    }
+
     animate() {
         requestAnimationFrame(this.animate);
         
@@ -187,12 +211,35 @@ export class AvatarManager {
             // --- Update procedural features BEFORE updating the VRM ---
             this.updateEyes(deltaTime);
             this.updateBlinking(deltaTime);
+            this.updateExpression(deltaTime);
             
-            // Apply Audio Lip Sync
-            const targetMouthOpen = this.getAudioLevel();
+            // --- UPDATED: Dynamic Audio Lip Sync ---
+            let targetMouthOpen = this.getAudioLevel();
+
+            // Prevent blendshape clashing by dampening lip-sync during strong expressions
+            if (this.currentExpression !== 'neutral' && this.currentVrm.expressionManager) {
+                const activeExpWeight = this.currentVrm.expressionManager.getValue(this.currentExpression) || 0;
+                
+                // If expression is at 1.0, reduce lip-sync by 60%. 
+                // You can tweak this 0.6 value based on how extreme your specific VRM's expressions are.
+                const dampeningFactor = 1.0 - (activeExpWeight * 0.6); 
+                targetMouthOpen *= dampeningFactor;
+            }
+
             const currentMouth = this.currentVrm.expressionManager.getValue('aa');
             const smoothedMouth = THREE.MathUtils.lerp(currentMouth, targetMouthOpen, CONFIG.AUDIO.LIP_SYNC_SMOOTHING);
             this.currentVrm.expressionManager.setValue('aa', smoothedMouth);
+
+            // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
+            if (this.currentAction && this.currentState === 'thinking') {
+                const duration = this.currentAction.getClip().duration;
+                
+                // Freeze at the 50% mark. Tweak this 0.5 value if her hand hasn't 
+                // fully reached her chin yet (e.g., try 0.6 or 0.7).
+                if (this.currentAction.time >= duration * 0.5) {
+                    this.currentAction.paused = true;
+                }
+            }
 
             // Update the Animation Mixer (bones)
             if (this.mixer) this.mixer.update(deltaTime);
@@ -203,7 +250,6 @@ export class AvatarManager {
         
         this.renderer.render(this.scene, this.camera);
     }
-
     // --- NEW: Eye Tracking Logic ---
     updateEyes(deltaTime) {
         this.eyeTimer += deltaTime;
@@ -235,6 +281,21 @@ export class AvatarManager {
         // Smoothly move our invisible target object to that position
         // A lerp factor of 10.0 gives a nice, quick "eye dart" feel
         this.lookAtTarget.position.lerp(targetPos, 10.0 * deltaTime);
+    }
+
+    updateExpression(deltaTime) {
+        if (!this.currentVrm?.expressionManager) return;
+
+        const blendSpeed = Math.min(1, deltaTime * 6);
+
+        for (const expression of CONFIG.AVATAR.EXPRESSIONS) {
+            if (expression === 'neutral') continue;
+
+            const targetValue = this.currentExpression === expression ? 1 : 0;
+            const currentValue = this.currentVrm.expressionManager.getValue(expression) || 0;
+            const nextValue = THREE.MathUtils.lerp(currentValue, targetValue, blendSpeed);
+            this.currentVrm.expressionManager.setValue(expression, nextValue);
+        }
     }
 
     updateBlinking(deltaTime) {

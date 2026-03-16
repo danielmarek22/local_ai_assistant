@@ -28,7 +28,11 @@ jobs:
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-    # 4. Run your tests using the command you provided
+    # 4. Create the assistant file from the example template
+    - name: Create config from example
+      run: cp app/config/assistant-template.yaml app/config/assistant.yaml
+
+    # 5. Run your tests using the command you provided
     - name: Run tests
       run: |
         python -m unittest discover -s tests -v

@@ -8,3 +8,7 @@ class AssistantSpeechEvent(BaseModel):
 
 class AssistantStateEvent(BaseModel):
     state: str
+
+
+class AvatarExpressionEvent(BaseModel):
+    expression: str
