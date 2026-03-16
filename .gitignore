@@ -16,3 +16,5 @@ models/
 static/audio/
 logs/
 app/config/assistant.yaml
+static/avatar.vrm
+static/animations/*
