@@ -4,6 +4,7 @@ from app.config import Config
 from app.llm.ollama_stream import OllamaClient
 from app.core.orchestrator import Orchestrator
 from app.storage.database import Database
+from app.storage.vector_store import VectorStore  # NEW: Import the vector store
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
@@ -69,11 +70,14 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database()
-    history_store = ChatHistoryStore(db)
-    memory_store = MemoryStore(db)
+    vector_store = VectorStore()  # NEW: Initialize ChromaDB (CPU based)
+    
+    # UPDATED: Pass vector_store to the memory and history stores
+    history_store = ChatHistoryStore(db, vector_store)
+    memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
 
-    logger.debug("Storage initialized: history, memory, summary")
+    logger.debug("Storage initialized: database, vector_store, history, memory, summary")
 
     # --------------------------------------------------
     # Planner
@@ -142,27 +146,24 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
 
+    # UPDATED: Removed memory_store and memory_limit since Orchestrator handles retrieval now
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
         user_context=config.user_context,
         history_store=history_store,
-        memory_store=memory_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
-        memory_limit=config.context["memory_limit"],
     )
 
     logger.debug(
-        "Context builder configured (history_limit=%d, memory_limit=%d)",
+        "Context builder configured (history_limit=%d)",
         config.context["history_limit"],
-        config.context["memory_limit"],
     )
 
     # --------------------------------------------------
     # Orchestrator
     # --------------------------------------------------
     logger.info("Initializing orchestrator")
-
 
     orchestrator = Orchestrator(
         llm=llm,

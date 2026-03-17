@@ -51,7 +51,7 @@ class Planner:
         # 1. Explicit memory command
         # --------------------------------------------------
         memory_content = self._extract_memory_content(user_text)
-        if memory_content is not None:
+        if memory_content:  # <--- Changed this line
             logger.info("Memory command detected")
 
             actions = [

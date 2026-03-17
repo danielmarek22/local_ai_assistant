@@ -10,7 +10,7 @@ class FakeLLM:
         self.response = response
         self.calls = []
 
-    def chat(self, messages, think_override=None):
+    def chat(self, messages, think_override=None, **kwargs): # <-- added **kwargs
         self.calls.append((messages, think_override))
         return self.response
 
@@ -20,16 +20,16 @@ class SlowLLM:
         self.delay_s = delay_s
         self.response = response
 
-    def chat(self, _messages, think_override=None):
+    def chat(self, _messages, think_override=None, **kwargs): # <-- added **kwargs
         time.sleep(self.delay_s)
         return self.response
 
 
 class LLMPlannerTests(unittest.TestCase):
-    def test_default_timeout_is_15_seconds(self):
+    def test_default_timeout_is_6_seconds(self):
         planner = LLMPlanner(FakeLLM('{"actions":[{"type":"respond"}]}'))
 
-        self.assertEqual(planner.timeout_ms, 15000)
+        self.assertEqual(planner.timeout_ms, 6000)
 
     def test_schema_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):

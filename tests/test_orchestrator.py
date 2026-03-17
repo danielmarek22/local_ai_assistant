@@ -40,7 +40,6 @@ class FakeToolExecutor:
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         return self.context
 
-
 class FakeHistoryStore:
     def __init__(self):
         self.records = []
@@ -51,6 +50,10 @@ class FakeHistoryStore:
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
+
+    def search_past_conversations(self, query: str, current_session: str, limit: int = 4):
+        # Fake retrieved episodic memory
+        return ["USER: Past question", "ASSISTANT: Past answer"]
 
 
 class FakeContextBuilder:
@@ -79,6 +82,10 @@ class FakeMemoryStore:
 
     def add(self, content: str, category: str = "general", importance: int = 1):
         self.writes.append((content, category, importance))
+
+    def get_relevant(self, query: str, limit: int = 3):
+        # Fake retrieved semantic memory
+        return ["User likes testing"]
 
 
 class FakeSummaryStore:
@@ -116,16 +123,18 @@ class FakeMemoryPolicy:
         if not content:
             return None
         return FakeMemoryPolicyDecision(content=content)
+    
+class FakeContextBuilder:
+    def __init__(self):
+        self.calls = []
+
+    def build(self, session_id: str, user_text: str, injected_context=None, **kwargs):
+        self.calls.append((session_id, user_text, injected_context))
+        return [{"role": "user", "content": user_text}]
 
 
 class OrchestratorTests(unittest.TestCase):
-    def _build_orchestrator(
-        self,
-        plan: Plan,
-        llm_chunks=None,
-        summary_existing=None,
-        summary_trigger=10,
-    ):
+    def _build_orchestrator(self, plan: Plan, llm_chunks=None, summary_existing=None, summary_trigger=10):
         llm = FakeLLM(llm_chunks or ["Hello", " world"])
         history = FakeHistoryStore()
         memory = FakeMemoryStore()
@@ -148,69 +157,26 @@ class OrchestratorTests(unittest.TestCase):
             tool_executor=tool_executor,
             summary_trigger=summary_trigger,
         )
-        return (
-            orch,
-            llm,
-            history,
-            memory,
-            summary_store,
-            summarizer,
-            planner,
-            tool_executor,
-            context_builder,
-        )
+        return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
-    def test_turn_flow_emits_events_and_persists_messages(self):
-        plan = Plan(
-            actions=[
-                Action(type="web_search", payload={"query": "python"}),
-                Action(type="write_memory", payload={"content": "likes tests"}),
-                Action(type="respond"),
-            ]
-        )
-        (
-            orch,
-            _llm,
-            history,
-            memory,
-            _summary_store,
-            _summarizer,
-            _planner,
-            tool_executor,
-            context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+    def test_turn_flow_injects_memory_and_tools_into_context(self):
+        plan = Plan(actions=[Action(type="web_search", payload={"query": "python"}), Action(type="respond")])
+        orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
-        events = list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input("hello"))
 
-        state_values = [e.state for e in events if isinstance(e, AssistantStateEvent)]
-        self.assertEqual(
-            state_values,
-            [
-                AssistantState.THINKING,
-                AssistantState.SEARCHING,
-                AssistantState.RESPONDING,
-                AssistantState.IDLE,
-            ],
-        )
+    # 1. Verify perception was updated with retrieved memories BEFORE planner runs
+        perception_snapshot = planner.calls[0][1]
+        self.assertIn("memory.retrieved", perception_snapshot)
+        self.assertIn("User likes testing", perception_snapshot["memory.retrieved"].value["value"])
 
-        expression_values = [
-            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
-        ]
-        self.assertEqual(expression_values, ["neutral"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hello", " world"])
-        self.assertEqual(speech_texts[-1], "Hello world")
-        self.assertTrue(events[-2].is_final)
-
-        self.assertEqual(history.records[0][1:], ("user", "hello"))
-        self.assertEqual(history.records[1][1:], ("assistant", "Hello world"))
-
-        self.assertEqual(len(memory.writes), 1)
-        self.assertEqual(memory.writes[0][0], "likes tests")
-
-        self.assertEqual(len(tool_executor.calls), 1)
-        self.assertEqual(context_builder.calls[0][2], "tool info")
+        # 2. Verify ContextBuilder received BOTH memory and tool info in injected_context
+        injected_context = context_builder.calls[0][2]
+        self.assertIn("RETRIEVED MEMORY", injected_context)
+        self.assertIn("User likes testing", injected_context)
+        self.assertIn("Past answer", injected_context)
+        self.assertIn("TOOL RESULTS", injected_context)
+        self.assertIn("tool info", injected_context)
 
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type="respond")])

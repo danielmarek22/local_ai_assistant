@@ -2,6 +2,7 @@ import uuid
 import logging
 import re
 import time
+import os
 from typing import Generator, Optional, Dict
 
 from app.core.events import (
@@ -24,6 +25,8 @@ _AVATAR_EXPRESSION_PATTERN = re.compile(
 )
 _DEFAULT_AVATAR_EXPRESSION = "neutral"
 _EXPRESSION_TAG_PREFIX_PATTERN = re.compile(r"\[\s*state\s*:\s*", re.IGNORECASE)
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # FATAL errors only
 
 
 class Orchestrator:
@@ -51,7 +54,7 @@ class Orchestrator:
         self.summary_trigger = summary_trigger
         self.memory_policy = memory_policy
 
-        self.perception = PerceptionState()  # NEW
+        self.perception = PerceptionState()
 
         self.session_id = str(uuid.uuid4())[:8]
 
@@ -82,94 +85,100 @@ class Orchestrator:
     def handle_user_input(self, user_text: str, think_override=None):
         start_ts = time.perf_counter()
 
-        logger.info(
-            "[%s] User input received (len=%d)",
-            self.session_id,
-            len(user_text),
-        )
+        logger.info("[%s] User input received (len=%d)", self.session_id, len(user_text))
         logger.debug("[%s] User input text: %r", self.session_id, user_text)
 
         yield AssistantStateEvent(state=AssistantState.THINKING)
 
         # --------------------------------------------------------
-        # 1. Update perception (NEW)
+        # 1. Update perception with raw input
         # --------------------------------------------------------
         self.perception.update(
             "user.input",
             {
                 "text": user_text,
-                "source": "keyboard",  # later: voice
+                "source": "keyboard",
             },
         )
 
         # --------------------------------------------------------
-        # 2. Persist user input
+        # 2. Vector Retrieval (Semantic + Episodic)
+        # --------------------------------------------------------
+        logger.debug("[%s] Querying vector DB for memories", self.session_id)
+        semantic_memories = self.memory.get_relevant(user_text, limit=3)
+        episodic_memories = self.history.search_past_conversations(user_text, self.session_id, limit=3)
+
+        memory_blocks = []
+        if semantic_memories:
+            memory_blocks.append("Relevant Facts:\n" + "\n".join(f"- {m}" for m in semantic_memories))
+        if episodic_memories:
+            memory_blocks.append("Past Conversations:\n" + "\n".join(f"- {m}" for m in episodic_memories))
+
+        memory_context = "\n\n".join(memory_blocks) if memory_blocks else None
+
+        # Inject memories into perception so the Planner can read them
+        if memory_context:
+            self.perception.update("memory.retrieved", {"value": f"\n{memory_context}\n"})
+        else:
+            self.perception.update("memory.retrieved", {"value": "No relevant past memories found."})
+
+        # --------------------------------------------------------
+        # 3. Persist user input (to SQLite + Vector Store)
         # --------------------------------------------------------
         self.history.add(self.session_id, "user", user_text)
         logger.debug("[%s] User input persisted to history", self.session_id)
 
         # --------------------------------------------------------
-        # 3. Planning (decide actions)
+        # 4. Planning (decide actions)
         # --------------------------------------------------------
-        perception_snapshot = self.perception.snapshot()  # NEW
-        plan = self._plan(user_text, perception_snapshot)  # NEW
+        perception_snapshot = self.perception.snapshot()
+        plan = self._plan(user_text, perception_snapshot)
 
-        logger.debug(
-            "[%s] Plan actions: %s",
-            self.session_id,
-            [action.type for action in plan.actions],
-        )
+        logger.debug("[%s] Plan actions: %s", self.session_id, [action.type for action in plan.actions])
 
         tool_context: Optional[str] = None
 
         # --------------------------------------------------------
-        # 4. Execute actions
+        # 5. Execute actions
         # --------------------------------------------------------
         for action in plan.actions:
-            logger.info(
-                "[%s] Executing action '%s'",
-                self.session_id,
-                action.type,
-            )
+            logger.info("[%s] Executing action '%s'", self.session_id, action.type)
 
             if action.type == "web_search":
-                    tool_context = yield from self.tool_executor.execute(
-                        action,
-                        user_text,
-                    )
+                tool_context = yield from self.tool_executor.execute(action, user_text)
 
             elif action.type == "write_memory":
                 self._run_memory_action(action)
 
             elif action.type == "respond":
-                logger.debug(
-                    "[%s] Respond action reached, stopping action loop",
-                    self.session_id,
-                )
+                logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
                 break
 
             else:
-                logger.warning(
-                    "[%s] Unknown action '%s', skipping",
-                    self.session_id,
-                    action.type,
-                )
+                logger.warning("[%s] Unknown action '%s', skipping", self.session_id, action.type)
 
         # --------------------------------------------------------
-        # 5. Context construction
+        # 6. Context construction (Merge Memory & Tools)
         # --------------------------------------------------------
-        messages = self._build_context(user_text, tool_context)
+        # We combine retrieved memory and tool outputs so the context_builder 
+        # doesn't need its signature changed.
+        combined_context_parts = []
+        if memory_context:
+            combined_context_parts.append(f"--- RETRIEVED MEMORY ---\n{memory_context}")
+        if tool_context:
+            combined_context_parts.append(f"--- TOOL RESULTS ---\n{tool_context}")
+
+        final_injected_context = "\n\n".join(combined_context_parts) if combined_context_parts else None
+
+        messages = self._build_context(user_text, final_injected_context)
 
         # --------------------------------------------------------
-        # 6. LLM streaming response
+        # 7. LLM streaming response
         # --------------------------------------------------------
-        response = yield from self._stream_response(
-            messages,
-            think_override=think_override,
-        )
+        response = yield from self._stream_response(messages, think_override=think_override)
 
         # --------------------------------------------------------
-        # 7. Persist assistant response
+        # 8. Persist assistant response (to SQLite + Vector Store)
         # --------------------------------------------------------
         self.history.add(self.session_id, "assistant", response)
         logger.debug("[%s] Assistant response persisted to history", self.session_id)
@@ -178,7 +187,7 @@ class Orchestrator:
         yield AssistantStateEvent(state=AssistantState.IDLE)
 
         # --------------------------------------------------------
-        # 8. Post-processing (summarization)
+        # 9. Post-processing (summarization)
         # --------------------------------------------------------
         self._maybe_summarize()
 
@@ -192,28 +201,25 @@ class Orchestrator:
     # Planning
     # ============================================================
 
-    def _plan(self, user_text: str, perception: dict) -> Plan:  # NEW
+    def _plan(self, user_text: str, perception: dict) -> Plan:
         logger.info("[%s] Running planner", self.session_id)
 
         try:
             plan = self.planner.decide(
                 user_text=user_text,
-                perception=perception,  # NEW
+                perception=perception,
             )
         except Exception:
             logger.exception("[%s] Planner failed", self.session_id)
             raise
 
-        logger.info(
-            "[%s] Planner produced %d actions",
-            self.session_id,
-            len(plan.actions),
-        )
+        logger.info("[%s] Planner produced %d actions", self.session_id, len(plan.actions))
         return plan
 
     # ============================================================
     # Action execution
     # ============================================================
+    
     def _run_memory_action(self, action: Action):
         logger.debug("[%s] Processing memory action", self.session_id)
 
@@ -246,7 +252,7 @@ class Orchestrator:
         messages = self.context_builder.build(
             session_id=self.session_id,
             user_text=user_text,
-            tool_context=tool_context,
+            injected_context=tool_context, 
         )
 
         logger.debug(
@@ -284,11 +290,7 @@ class Orchestrator:
         )
 
         if not expression_initialized:
-            logger.info(
-                "[%s] Model selected avatar expression '%s'",
-                self.session_id,
-                _DEFAULT_AVATAR_EXPRESSION,
-            )
+            logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
             yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
@@ -308,11 +310,7 @@ class Orchestrator:
         for event_type, value in events:
             if event_type == "expression":
                 expression_initialized = True
-                logger.info(
-                    "[%s] Model selected avatar expression '%s'",
-                    self.session_id,
-                    value,
-                )
+                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, value)
                 yield AvatarExpressionEvent(expression=value)
                 continue
 
@@ -321,11 +319,7 @@ class Orchestrator:
 
             if not expression_initialized:
                 expression_initialized = True
-                logger.info(
-                    "[%s] Model selected avatar expression '%s'",
-                    self.session_id,
-                    _DEFAULT_AVATAR_EXPRESSION,
-                )
+                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
                 yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
             visible_buffer += value
@@ -396,12 +390,6 @@ class Orchestrator:
         )
 
         if len(history) < self.summary_trigger:
-            logger.debug(
-                "[%s] History length (%d) below trigger (%d)",
-                self.session_id,
-                len(history),
-                self.summary_trigger,
-            )
             return
 
         logger.info("[%s] Summarizing conversation history", self.session_id)
@@ -419,8 +407,4 @@ class Orchestrator:
 
         self.summary_store.set(self.session_id, summary)
 
-        logger.info(
-            "[%s] History summarized (%d chars)",
-            self.session_id,
-            len(summary),
-        )
+        logger.info("[%s] History summarized (%d chars)", self.session_id, len(summary))

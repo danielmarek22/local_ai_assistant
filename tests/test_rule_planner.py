@@ -35,6 +35,13 @@ class RulePlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.actions), 1)
         self.assertEqual(plan.actions[0].type, "respond")
 
+    def test_empty_memory_command_falls_back_to_respond(self):
+        # "Remember this" with no trailing context used to crash or save empty strings
+        plan = self.planner.decide("Remember this", {})
+
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].type, "respond")
+
 
 if __name__ == "__main__":
     unittest.main()

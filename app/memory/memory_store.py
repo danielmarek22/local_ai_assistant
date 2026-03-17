@@ -1,36 +1,35 @@
+import uuid
 from app.storage.database import Database
-import re
-
+from app.storage.vector_store import VectorStore
 
 class MemoryStore:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, vector_store: VectorStore):
         self.db = db
+        self.vector_store = vector_store
+        self.collection = self.vector_store.semantic_collection
 
-    # --------------------------------------------------
-    # Write
-    # --------------------------------------------------
-
-    def add(
-        self,
-        content: str,
-        category: str = "general",
-        importance: int = 1,
-    ) -> None:
+    def add(self, content: str, category: str = "general", importance: int = 1) -> None:
+        mem_id = str(uuid.uuid4())
+        
+        # 1. Save to SQLite (for easy viewing/backups in the frontend)
         cursor = self.db.conn.cursor()
         cursor.execute(
-            """
-            INSERT INTO memory (category, content, importance)
-            VALUES (?, ?, ?)
-            """,
+            "INSERT INTO memory (category, content, importance) VALUES (?, ?, ?)",
             (category, content, importance),
         )
         self.db.conn.commit()
 
-    # --------------------------------------------------
-    # Read (bulk)
-    # --------------------------------------------------
+        # 2. Save to Vector Store (for AI semantic retrieval)
+        self.collection.add(
+            ids=[mem_id],
+            documents=[content],
+            metadatas=[{"category": category, "importance": importance}]
+        )
 
     def get_all(self, limit: int = 20) -> list[str]:
+        """
+        Retrieves recent memories for the UI/frontend, sorted by importance and recency.
+        """
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -43,46 +42,17 @@ class MemoryStore:
         )
         return [row["content"] for row in cursor.fetchall()]
 
-    # --------------------------------------------------
-    # Read (relevance-ranked)
-    # --------------------------------------------------
-
-    def get_relevant(self, query: str, limit: int = 5) -> list[str]:
+    def get_relevant(self, query: str, limit: int = 3) -> list[str]:
         """
-        Return memories ranked by simple lexical relevance + importance.
+        True semantic search using CPU embeddings for the Orchestrator.
         """
-        query_terms = self._tokenize(query)
-
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT content, importance
-            FROM memory
-            """
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=limit
         )
-
-        scored: list[tuple[float, str]] = []
-
-        for row in cursor.fetchall():
-            content = row["content"]
-            importance = row["importance"]
-
-            memory_terms = self._tokenize(content)
-            overlap = len(query_terms & memory_terms)
-
-            # Require actual lexical overlap OR high importance
-            if overlap == 0 and importance < 2:
-                continue
-
-            score = overlap + importance * 0.3
-            scored.append((score, content))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [content for _, content in scored[:limit]]
-
-    # --------------------------------------------------
-    # Helpers
-    # --------------------------------------------------
-
-    def _tokenize(self, text: str) -> set[str]:
-        return set(re.findall(r"\b\w+\b", text.lower()))
+        
+        # Chroma returns a list of lists for documents
+        if not results["documents"] or not results["documents"][0]:
+            return []
+            
+        return results["documents"][0]

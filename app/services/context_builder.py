@@ -10,23 +10,19 @@ class ContextBuilder:
         system_prompt: str,
         user_context,
         history_store,
-        memory_store,
+        # memory_store and memory_limit removed! Orchestrator handles this now.
         history_limit: int = 6,
-        memory_limit: int = 5,
         summary_store=None,
     ):
         self.system_prompt = system_prompt
         self.user_context = user_context or {}
         self.history_store = history_store
-        self.memory_store = memory_store
         self.history_limit = history_limit
-        self.memory_limit = memory_limit
         self.summary_store = summary_store
 
         logger.info(
-            "ContextBuilder initialized (history_limit=%d, memory_limit=%d, summary=%s)",
+            "ContextBuilder initialized (history_limit=%d, summary=%s)",
             history_limit,
-            memory_limit,
             summary_store is not None,
         )
 
@@ -34,7 +30,7 @@ class ContextBuilder:
         self,
         session_id: str,
         user_text: str,
-        tool_context: str | None = None,
+        injected_context: str | None = None,
     ) -> list[dict]:
         logger.info("[%s] Building context", session_id)
         logger.debug("[%s] User input len=%d", session_id, len(user_text))
@@ -56,15 +52,12 @@ class ContextBuilder:
         now_local = datetime.now().astimezone()
         messages.append({
             "role": "system",
-            "content": (
-                "Current system datetime (local): "
-                f"{now_local.isoformat()}"
-            ),
+            "content": f"Current system datetime (local): {now_local.isoformat()}",
         })
         logger.debug("[%s] Added current system datetime context", session_id)
 
         # --------------------------------------------------
-        # 3. Static user profile/context from config (optional)
+        # 3. Static user profile/context from config
         # --------------------------------------------------
         if self.user_context:
             user_lines = []
@@ -82,84 +75,37 @@ class ContextBuilder:
             if user_lines:
                 messages.append({
                     "role": "system",
-                    "content": (
-                        "User profile/context (configured):\n"
-                        + "\n".join(user_lines)
-                    ),
+                    "content": "User profile/context (configured):\n" + "\n".join(user_lines),
                 })
-                logger.info(
-                    "[%s] Added configured user context (%d fields)",
-                    session_id,
-                    len(user_lines),
-                )
 
         # --------------------------------------------------
-        # 4. Tool-provided context (optional, system-level)
+        # 4. Injected Context (Memories & Tool Outputs)
         # --------------------------------------------------
-        if tool_context:
+        if injected_context:
             messages.append({
                 "role": "system",
-                "content": tool_context,
+                "content": (
+                    "BACKGROUND CONTEXT (Retrieved Memories & Tool Results):\n"
+                    f"{injected_context}\n\n"
+                    "Use the above background context to inform your response. "
+                    "Blend this information naturally into the conversation. "
+                    "Do not explicitly announce that you are reading from a database or memory log."
+                ),
             })
-            logger.info(
-                "[%s] Added tool context (len=%d)",
-                session_id,
-                len(tool_context),
-            )
-        else:
-            logger.debug("[%s] No tool context provided", session_id)
+            logger.info("[%s] Added injected context (len=%d)", session_id, len(injected_context))
 
         # --------------------------------------------------
-        # 5. Relevant long-term memory
-        # --------------------------------------------------
-        memories = self.memory_store.get_relevant(
-            query=user_text,
-            limit=self.memory_limit,
-        )
-
-        if memories:
-            logger.info(
-                "[%s] Retrieved %d relevant memories",
-                session_id,
-                len(memories),
-            )
-
-            memory_block = (
-                "The following information is known about the user "
-                "and should be considered when responding:\n"
-            )
-            for m in memories:
-                memory_block += f"- {m}\n"
-
-            messages.append({
-                "role": "system",
-                "content": memory_block.strip(),
-            })
-        else:
-            logger.debug("[%s] No relevant memories found", session_id)
-
-        # --------------------------------------------------
-        # 6. Conversation summary (if present)
+        # 5. Conversation summary
         # --------------------------------------------------
         summary = self.summary_store.get(session_id) if self.summary_store else None
         if summary:
             messages.append({
                 "role": "system",
-                "content": (
-                    "Summary of previous conversation:\n"
-                    f"{summary}"
-                ),
+                "content": f"Summary of previous conversation:\n{summary}",
             })
-            logger.info(
-                "[%s] Added conversation summary (len=%d)",
-                session_id,
-                len(summary),
-            )
-        else:
-            logger.debug("[%s] No conversation summary available", session_id)
 
         # --------------------------------------------------
-        # 7. Recent conversation history (deduplicated)
+        # 6. Recent conversation history (deduplicated)
         # --------------------------------------------------
         history_limit = 2 if summary else self.history_limit
 
@@ -182,11 +128,9 @@ class ContextBuilder:
 
             key = (role, content)
             if key in seen:
-                logger.debug("[%s] Skipping duplicate history entry", session_id)
                 continue
 
             if role == "user" and content == user_text.strip():
-                logger.debug("[%s] Skipping current input from history", session_id)
                 continue
 
             seen.add(key)
@@ -197,27 +141,14 @@ class ContextBuilder:
                 "content": content,
             })
 
-        logger.info(
-            "[%s] Added %d history messages (limit=%d)",
-            session_id,
-            added_history,
-            history_limit,
-        )
-
         # --------------------------------------------------
-        # 8. Current user input (always last)
+        # 7. Current user input (always last)
         # --------------------------------------------------
         messages.append({
             "role": "user",
             "content": user_text,
         })
 
-        logger.debug(
-            "[%s] Final context built (total_messages=%d)",
-            session_id,
-            len(messages),
-        )
-
-        print(messages)
+        logger.debug("[%s] Final context built (total_messages=%d)", session_id, len(messages))
 
         return messages

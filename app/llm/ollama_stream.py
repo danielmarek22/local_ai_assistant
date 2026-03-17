@@ -28,17 +28,23 @@ class OllamaClient(LLMClient):
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
 
-    def chat(self, messages, think_override=None) -> str:
+    def chat(self, messages, think_override=None, options_override=None) -> str:
         """
         Non-streaming chat call.
         Used for planners, summarizers, and other structured outputs.
         """
         think_value = self._resolve_think_value(think_override)
+        
+        # Merge default instance options with specific request overrides
+        request_options = self.options.copy()
+        if options_override:
+            request_options.update(options_override)
+
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": self.options,
+            "options": request_options,
             "think": think_value,
         }
 

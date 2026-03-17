@@ -55,11 +55,22 @@ class FakeOrchestrator:
         self.session_id = session_id
         self.session_switches.append(session_id)
 
+class FakeCollection:
+    def __init__(self): self.docs = []
+    def add(self, *args, **kwargs): pass
+    def query(self, *args, **kwargs): return {"documents": [[]]}
+
+class FakeVectorStore:
+    def __init__(self):
+        self.semantic_collection = FakeCollection()
+        self.episodic_collection = FakeCollection()
+
 
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
         self.db = Database(path=":memory:")
-        self.history = ChatHistoryStore(self.db)
+        self.vector_store = FakeVectorStore() # NEW
+        self.history = ChatHistoryStore(self.db, self.vector_store) # UPDATED
         self.summary_store = SummaryStore(self.db)
 
         self.history.add("session-a", "user", "First chat")
