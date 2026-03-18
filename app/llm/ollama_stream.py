@@ -28,7 +28,12 @@ class OllamaClient(LLMClient):
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
 
-    def chat(self, messages, think_override=None, options_override=None) -> str:
+    def chat(
+        self,
+        messages,
+        think_override=None,
+        options_override: dict | None = None,
+    ) -> str:
         """
         Non-streaming chat call.
         Used for planners, summarizers, and other structured outputs.
