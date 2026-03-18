@@ -112,4 +112,9 @@ class ChatHistoryStore:
             (session_id,)
         )
         self.db.conn.commit()
+
+        # Keep episodic retrieval consistent with SQLite by deleting the
+        # corresponding vector entries for the session as well.
+        self.collection.delete(where={"session_id": session_id})
+
         return cursor.rowcount

@@ -56,9 +56,18 @@ class FakeOrchestrator:
         self.session_switches.append(session_id)
 
 class FakeCollection:
-    def __init__(self): self.docs = []
-    def add(self, *args, **kwargs): pass
-    def query(self, *args, **kwargs): return {"documents": [[]]}
+    def __init__(self):
+        self.docs = []
+        self.deleted_wheres = []
+
+    def add(self, *args, **kwargs):
+        pass
+
+    def query(self, *args, **kwargs):
+        return {"documents": [[]]}
+
+    def delete(self, where=None):
+        self.deleted_wheres.append(where)
 
 class FakeVectorStore:
     def __init__(self):
@@ -116,6 +125,10 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(response["deleted"], True)
         self.assertEqual(self.history.get_all("session-b"), [])
         self.assertIsNone(self.summary_store.get("session-b"))
+        self.assertIn(
+            {"session_id": "session-b"},
+            self.vector_store.episodic_collection.deleted_wheres,
+        )
         self.assertEqual(len(self.fake_orchestrator.session_switches), 1)
         self.assertNotEqual(self.fake_orchestrator.session_switches[0], "session-b")
 
