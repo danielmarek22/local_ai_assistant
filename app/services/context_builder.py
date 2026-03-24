@@ -150,5 +150,5 @@ class ContextBuilder:
         })
 
         logger.debug("[%s] Final context built (total_messages=%d)", session_id, len(messages))
-
+        print(messages)
         return messages

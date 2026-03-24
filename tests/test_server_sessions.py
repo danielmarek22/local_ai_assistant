@@ -13,29 +13,41 @@ def _load_server_module():
     if "app.server" in sys.modules:
         return sys.modules["app.server"]
 
-    fake_piper_module = types.ModuleType("piper")
-    fake_piper_config_module = types.ModuleType("piper.config")
+    fake_qwen_module = types.ModuleType("qwen_tts")
+    fake_soundfile_module = types.ModuleType("soundfile")
+    fake_torch_module = types.ModuleType("torch")
 
-    class FakePiperVoice:
+    class FakeQwen3TTSModel:
         @staticmethod
-        def load(_model_path, use_cuda=True):
-            return FakePiperVoice()
+        def from_pretrained(*args, **kwargs):
+            return FakeQwen3TTSModel()
 
-        def synthesize_wav(self, text, wav_file, syn_config=None):
-            return None
+        def create_voice_clone_prompt(self, **kwargs):
+            return {"prompt": "ok"}
 
-    class FakeSynthesisConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def generate_voice_clone(self, **kwargs):
+            return [[0.0]], 24000
 
-    fake_piper_module.PiperVoice = FakePiperVoice
-    fake_piper_config_module.SynthesisConfig = FakeSynthesisConfig
+        def generate_custom_voice(self, **kwargs):
+            return [[0.0]], 24000
+
+    def fake_sf_read(_path):
+        return [0.0], 24000
+
+    def fake_sf_write(_path, _audio, _sr):
+        return None
+
+    fake_qwen_module.Qwen3TTSModel = FakeQwen3TTSModel
+    fake_soundfile_module.read = fake_sf_read
+    fake_soundfile_module.write = fake_sf_write
+    fake_torch_module.bfloat16 = object()
 
     with patch.dict(
         sys.modules,
         {
-            "piper": fake_piper_module,
-            "piper.config": fake_piper_config_module,
+            "qwen_tts": fake_qwen_module,
+            "soundfile": fake_soundfile_module,
+            "torch": fake_torch_module,
         },
     ):
         return importlib.import_module("app.server")

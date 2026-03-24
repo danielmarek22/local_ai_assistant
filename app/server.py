@@ -20,7 +20,7 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.logging import setup_logging
-from app.tts.piper_tts import PiperTTS
+from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 
 setup_logging()
@@ -36,10 +36,7 @@ logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
 config = Config()
 
-tts = PiperTTS(
-    model_path=Path(config.tts["model_path"]),
-    use_cuda=config.tts["use_cuda"],
-)
+tts = build_tts_engine(config.tts)
 
 logger.info("Starting FastAPI server")
 

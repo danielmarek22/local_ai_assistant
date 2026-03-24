@@ -6,5 +6,8 @@ fastapi
 uvicorn[standard]
 piper-tts
 onnxruntime-gpu
+qwen-tts
+torch
+soundfile
 chromadb
 sentence-transformers

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 import yaml
 
@@ -43,13 +44,7 @@ class Config:
         )
 
         # TTS
-        self.tts = self.raw.get(
-            "tts",
-            {
-                "model_path": "models/piper/en_US-amy-medium.onnx",
-                "use_cuda": False,
-            },
-        )
+        self.tts = self._load_tts_config(self.raw.get("tts"))
 
         # Logging
         self.logging = self.raw.get(
@@ -59,3 +54,78 @@ class Config:
                 "dir": "logs",
             },
         )
+
+    @staticmethod
+    def _default_tts_config() -> dict:
+        return {
+            "engine": "qwen3",
+            "gpt_sovits": {
+                "api_url": "http://127.0.0.1:9880/tts",
+                "ref_audio_path": "",
+                "prompt_text": "",
+                "text_lang": "en",
+                "prompt_lang": "en",
+            },
+            "qwen3": {
+                "model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                "device": "cuda:0",
+                "speaker": "Ryan",
+                "language": "English",
+                "ref_audio_path": "app/tts/sample.wav",
+                "ref_text": (
+                    "Early in my career, I worked at a small restaurant in the "
+                    "Vasari Passage. One day, entirely out of the blue, Lady "
+                    "Furina decided to dine at our restaurant after a performance. "
+                    "As I was scrambling around the back, a customer asked to meet "
+                    "the head chef. So, I rushed out to their table, knife still in "
+                    "hand, and completely froze. Because there I was, standing "
+                    "face-to-face with Lady Furina of all people. I knew I had to "
+                    "make something special, and it was like my instincts took over. "
+                    "I came up with a Lily sugar-glazed opera cake, and Lady Furina "
+                    "actually liked it and said she would remember me. I barely slept "
+                    "a wink that night, and the very next day, there was a position "
+                    "waiting for me at the Palais Mermonia."
+                ),
+            },
+            "piper": {
+                "model_path": "models/piper/en_US-amy-medium.onnx",
+                "use_cuda": False,
+            },
+        }
+
+    def _load_tts_config(self, raw_tts: dict | None) -> dict:
+        config = deepcopy(self._default_tts_config())
+        if not isinstance(raw_tts, dict) or not raw_tts:
+            return config
+
+        engine = raw_tts.get("engine") or raw_tts.get("provider") or raw_tts.get("backend")
+
+        if any(
+            key in raw_tts
+            for key in ("gpt_sovits", "qwen3", "piper", "engine", "provider", "backend")
+        ):
+            if engine:
+                config["engine"] = str(engine)
+
+            for key in ("gpt_sovits", "qwen3", "piper"):
+                engine_config = raw_tts.get(key)
+                if isinstance(engine_config, dict):
+                    config[key].update(engine_config)
+            return config
+
+        if any(
+            key in raw_tts
+            for key in ("api_url", "ref_audio_path", "prompt_text", "text_lang", "prompt_lang")
+        ):
+            config["engine"] = str(engine or "gpt_sovits")
+            config["gpt_sovits"].update(raw_tts)
+            return config
+
+        if any(key in raw_tts for key in ("model_path", "use_cuda")):
+            config["engine"] = str(engine or "piper")
+            config["piper"].update(raw_tts)
+            return config
+
+        config["engine"] = str(engine or "qwen3")
+        config["qwen3"].update(raw_tts)
+        return config
