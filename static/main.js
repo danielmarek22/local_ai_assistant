@@ -44,7 +44,7 @@ function clearSessionContext() {
 // 2. Initialize Avatar
 const avatarManager = new AvatarManager(
     'canvas-container', 
-    () => audioManager.getLipSyncValue() 
+    () => audioManager.getVisemeData() 
 );
 
 function syncAssistantPresentation() {
@@ -63,6 +63,10 @@ audioManager.setPlaybackHandlers({
     }
 });
 
+uiManager.onVolumeChange((volume) => {
+    audioManager.setVolume(volume);
+});
+
 // 3. Define Network Handlers
 const handlers = {
     onSessionInit: ({ serverInstanceId, sessionId }) => {
@@ -74,17 +78,12 @@ const handlers = {
     onState: (state) => {
         assistantState = state;
         syncAssistantPresentation();
-        if (state === "responding") {
-            uiManager.startAiMessage();
-        }
     },
     onExpression: (expression) => {
         assistantExpression = expression;
         syncAssistantPresentation();
     },
     onChunk: (content) => {
-        assistantState = 'responding';
-        syncAssistantPresentation();
         uiManager.appendToAiMessage(content);
     },
     onAudio: (url) => {

@@ -39,6 +39,7 @@ export const CONFIG = {
         }
     },
     AUDIO: {
+        DEFAULT_VOLUME: 1,
         // Lower = mouth opens more easily
         LIP_SYNC_SENSITIVITY: 60, 
         // 0.0 = no smoothing, 1.0 = no movement
@@ -48,7 +49,8 @@ export const CONFIG = {
     UI: {
         STORAGE_KEYS: {
             CHAT_HISTORY: 'astra-chat-history',
-            CURRENT_SESSION: 'astra-current-session'
+            CURRENT_SESSION: 'astra-current-session',
+            AUDIO_VOLUME: 'astra-audio-volume'
         },
         STATUS_TEXT: {
             idle:       "Astra is Idle",

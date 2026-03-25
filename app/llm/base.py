@@ -4,10 +4,17 @@ from typing import Iterator, List, Dict
 
 class LLMClient(ABC):
     @abstractmethod
-    def chat(self, messages: List[Dict], think_override=None) -> str:
+    def chat(
+        self,
+        messages: List[Dict],
+        think_override=None,
+        options_override: Dict | None = None,
+    ) -> str:
         """
         Blocking, non-streaming call.
         Must return the full assistant message.
+        `options_override` allows a caller to supply per-request generation
+        options without mutating the client's default configuration.
         Used for planners, summarizers, classifiers, etc.
         """
         raise NotImplementedError

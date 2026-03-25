@@ -17,6 +17,8 @@ export class UIManager {
         this.composerMenuBtn = document.getElementById('composer-menu-btn');
         this.composerMenuPopover = document.getElementById('composer-menu-popover');
         this.reasoningToggle = document.getElementById('reasoning-toggle');
+        this.playbackVolumeInput = document.getElementById('playback-volume');
+        this.playbackVolumeValue = document.getElementById('playback-volume-value');
         this.sendBtn = document.getElementById('send-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
@@ -31,12 +33,14 @@ export class UIManager {
         this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
+        this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.defaultMessages = this.serializeChatHistory();
         this.initAutoResize();
         this.initPanelControls();
         this.initTabs();
         this.initHistoryControls();
         this.initComposerControls();
+        this.initConfigControls();
     }
 
     initAutoResize() {
@@ -139,6 +143,73 @@ export class UIManager {
         });
     }
 
+    initConfigControls() {
+        if (!this.playbackVolumeInput || !this.playbackVolumeValue) {
+            return;
+        }
+
+        this.setPlaybackVolume(this.readStoredPlaybackVolume(), { persist: false, notify: false });
+
+        this.playbackVolumeInput.addEventListener('input', () => {
+            const nextVolume = Number(this.playbackVolumeInput.value) / 100;
+            this.setPlaybackVolume(nextVolume, { persist: true, notify: true });
+        });
+    }
+
+    readStoredPlaybackVolume() {
+        try {
+            const rawValue = localStorage.getItem(this.volumeStorageKey);
+            if (rawValue === null) {
+                return CONFIG.AUDIO.DEFAULT_VOLUME;
+            }
+
+            const parsedValue = Number(rawValue);
+            if (Number.isFinite(parsedValue) && parsedValue >= 0 && parsedValue <= 1) {
+                return parsedValue;
+            }
+
+            localStorage.removeItem(this.volumeStorageKey);
+        } catch (error) {
+            console.warn('Failed to restore playback volume:', error);
+        }
+
+        return CONFIG.AUDIO.DEFAULT_VOLUME;
+    }
+
+    setPlaybackVolume(volume, { persist = true, notify = true } = {}) {
+        const nextVolume = Number.isFinite(volume)
+            ? Math.min(1, Math.max(0, volume))
+            : CONFIG.AUDIO.DEFAULT_VOLUME;
+        const percentage = Math.round(nextVolume * 100);
+
+        if (this.playbackVolumeInput) {
+            this.playbackVolumeInput.value = String(percentage);
+        }
+        if (this.playbackVolumeValue) {
+            this.playbackVolumeValue.textContent = `${percentage}%`;
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.volumeStorageKey, String(nextVolume));
+            } catch (error) {
+                console.warn('Failed to persist playback volume:', error);
+            }
+        }
+
+        if (notify && this.onVolumeChangeHandler) {
+            this.onVolumeChangeHandler(nextVolume);
+        }
+    }
+
+    getPlaybackVolume() {
+        if (!this.playbackVolumeInput) {
+            return CONFIG.AUDIO.DEFAULT_VOLUME;
+        }
+
+        return Number(this.playbackVolumeInput.value) / 100;
+    }
+
     syncReasoningToggle() {
         this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend);
         this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend);
@@ -184,6 +255,10 @@ export class UIManager {
     }
 
     finalizeAiMessage(text) {
+        if (!this.currentAiMessageDiv && text) {
+            this.currentAiMessageDiv = this.createMessageDiv('astra', '');
+        }
+
         if (this.currentAiMessageDiv) {
             this.setMessageContent(this.currentAiMessageDiv, text);
             this.persistChatHistory();
@@ -400,6 +475,11 @@ export class UIManager {
 
     onHistoryNewChat(callback) {
         this.onHistoryNewChatHandler = callback;
+    }
+
+    onVolumeChange(callback) {
+        this.onVolumeChangeHandler = callback;
+        callback(this.getPlaybackVolume());
     }
 
     scrollToBottom() {

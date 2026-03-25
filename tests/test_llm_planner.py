@@ -10,8 +10,8 @@ class FakeLLM:
         self.response = response
         self.calls = []
 
-    def chat(self, messages, think_override=None):
-        self.calls.append((messages, think_override))
+    def chat(self, messages, think_override=None, options_override=None, **kwargs):
+        self.calls.append((messages, think_override, options_override))
         return self.response
 
 
@@ -20,16 +20,16 @@ class SlowLLM:
         self.delay_s = delay_s
         self.response = response
 
-    def chat(self, _messages, think_override=None):
+    def chat(self, messages, think_override=None, options_override=None, **kwargs):
         time.sleep(self.delay_s)
         return self.response
 
 
 class LLMPlannerTests(unittest.TestCase):
-    def test_default_timeout_is_15_seconds(self):
+    def test_default_timeout_is_6_seconds(self):
         planner = LLMPlanner(FakeLLM('{"actions":[{"type":"respond"}]}'))
 
-        self.assertEqual(planner.timeout_ms, 15000)
+        self.assertEqual(planner.timeout_ms, 6000)
 
     def test_schema_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):
@@ -54,6 +54,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual([a.type for a in plan.actions], ["web_search", "respond"])
         self.assertEqual(plan.actions[0].payload, {"query": "python"})
         self.assertEqual(llm.calls[0][1], False)
+        
+        # Optional: We can also verify that the planner is passing the strict options
+        self.assertEqual(llm.calls[0][2], {"temperature": 0.0, "num_predict": 150})
 
     def test_extra_text_around_json_still_parses(self):
         llm = FakeLLM(

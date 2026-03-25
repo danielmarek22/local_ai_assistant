@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -13,29 +14,41 @@ def _load_server_module():
     if "app.server" in sys.modules:
         return sys.modules["app.server"]
 
-    fake_piper_module = types.ModuleType("piper")
-    fake_piper_config_module = types.ModuleType("piper.config")
+    fake_qwen_module = types.ModuleType("qwen_tts")
+    fake_soundfile_module = types.ModuleType("soundfile")
+    fake_torch_module = types.ModuleType("torch")
 
-    class FakePiperVoice:
+    class FakeQwen3TTSModel:
         @staticmethod
-        def load(_model_path, use_cuda=True):
-            return FakePiperVoice()
+        def from_pretrained(*args, **kwargs):
+            return FakeQwen3TTSModel()
 
-        def synthesize_wav(self, text, wav_file, syn_config=None):
-            return None
+        def create_voice_clone_prompt(self, **kwargs):
+            return {"prompt": "ok"}
 
-    class FakeSynthesisConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def generate_voice_clone(self, **kwargs):
+            return [[0.0]], 24000
 
-    fake_piper_module.PiperVoice = FakePiperVoice
-    fake_piper_config_module.SynthesisConfig = FakeSynthesisConfig
+        def generate_custom_voice(self, **kwargs):
+            return [[0.0]], 24000
+
+    def fake_sf_read(_path):
+        return [0.0], 24000
+
+    def fake_sf_write(_path, _audio, _sr):
+        return None
+
+    fake_qwen_module.Qwen3TTSModel = FakeQwen3TTSModel
+    fake_soundfile_module.read = fake_sf_read
+    fake_soundfile_module.write = fake_sf_write
+    fake_torch_module.bfloat16 = object()
 
     with patch.dict(
         sys.modules,
         {
-            "piper": fake_piper_module,
-            "piper.config": fake_piper_config_module,
+            "qwen_tts": fake_qwen_module,
+            "soundfile": fake_soundfile_module,
+            "torch": fake_torch_module,
         },
     ):
         return importlib.import_module("app.server")
@@ -55,11 +68,39 @@ class FakeOrchestrator:
         self.session_id = session_id
         self.session_switches.append(session_id)
 
+class FakeCollection:
+    def __init__(self):
+        self.docs = []
+        self.deleted_wheres = []
+
+    def add(self, *args, **kwargs):
+        pass
+
+    def query(self, *args, **kwargs):
+        return {"documents": [[]]}
+
+    def delete(self, where=None):
+        self.deleted_wheres.append(where)
+
+class FakeVectorStore:
+    def __init__(self):
+        self.semantic_collection = FakeCollection()
+        self.episodic_collection = FakeCollection()
+
+
+class FakeWebSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send_text(self, payload: str):
+        self.messages.append(json.loads(payload))
+
 
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
         self.db = Database(path=":memory:")
-        self.history = ChatHistoryStore(self.db)
+        self.vector_store = FakeVectorStore() # NEW
+        self.history = ChatHistoryStore(self.db, self.vector_store) # UPDATED
         self.summary_store = SummaryStore(self.db)
 
         self.history.add("session-a", "user", "First chat")
@@ -105,6 +146,10 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(response["deleted"], True)
         self.assertEqual(self.history.get_all("session-b"), [])
         self.assertIsNone(self.summary_store.get("session-b"))
+        self.assertIn(
+            {"session_id": "session-b"},
+            self.vector_store.episodic_collection.deleted_wheres,
+        )
         self.assertEqual(len(self.fake_orchestrator.session_switches), 1)
         self.assertNotEqual(self.fake_orchestrator.session_switches[0], "session-b")
 
@@ -151,6 +196,25 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+
+    def test_should_forward_state_holds_responding_until_audio(self):
+        self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
+        self.assertTrue(server_module._should_forward_state(server_module.AssistantState.THINKING))
+
+    def test_flush_pending_chunks_sends_buffered_text_in_order(self):
+        ws = FakeWebSocket()
+        pending_chunks = ["Hello", " world"]
+
+        server_module.asyncio.run(server_module._flush_pending_chunks(ws, pending_chunks))
+
+        self.assertEqual(
+            ws.messages,
+            [
+                {"type": "assistant_chunk", "content": "Hello"},
+                {"type": "assistant_chunk", "content": " world"},
+            ],
+        )
+        self.assertEqual(pending_chunks, [])
 
 
 if __name__ == "__main__":

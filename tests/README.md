@@ -14,16 +14,40 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - LLM planner JSON parsing behavior
   - Handling extra text around JSON payloads
   - Fallback behavior when LLM output is invalid
+  - Planner-specific non-streaming LLM option overrides
 
 - `test_context_builder.py`
   - Prompt/context assembly order
-  - Tool context injection
-  - Memory and summary inclusion behavior
+  - Injected background context behavior
+  - Summary inclusion behavior
   - Deduplication and filtering of recent history
 
 - `test_memory_store.py`
-  - Relevance ranking logic for memory retrieval
-  - Importance handling when lexical overlap is low
+  - SQLite + vector-store dual writes
+  - Semantic retrieval through the memory collection
+
+- `test_orchestrator.py`
+  - Turn lifecycle and event emission
+  - Memory/tool context injection into prompts
+  - Avatar expression tag parsing
+  - Summarization trigger behavior
+
+- `test_tool_executor.py`
+  - Tool lookup and availability behavior
+  - Error handling and fallback behavior
+
+- `test_server_sessions.py`
+  - Session listing/open/delete behavior
+  - Session summary access
+  - Local session switching semantics
+
+- `test_http_retries.py`
+  - LLM retry behavior
+  - Web search retry behavior
+  - Thinking-mode handling for Ollama
+
+- `test_sentence_splitter.py`
+  - Sentence chunking for streaming/TTS
 
 ## Running the Suite
 
@@ -49,7 +73,7 @@ python -m unittest tests.test_rule_planner.RulePlannerTests.test_default_falls_b
 
 - The suite uses Python's built-in `unittest` framework to keep dependencies minimal.
 - Most tests use lightweight fakes/mocks to isolate behavior.
-- `MemoryStore` tests use an in-memory SQLite database (`:memory:`) for fast, repeatable runs.
+- Memory-related tests use in-memory SQLite plus fake vector-store collections for fast, repeatable runs.
 
 ## Adding New Tests
 
@@ -61,7 +85,6 @@ When adding tests, prefer:
 
 Suggested next additions:
 
-- `Orchestrator` turn lifecycle tests (state events, action execution order).
-- `ToolExecutor` behavior tests (unavailable tools, failures, fallback paths).
-- `sentence_splitter` edge-case tests.
 - Websocket-level tests for streaming and TTS event sequencing.
+- End-to-end tests for vector-store deletion and retrieval consistency.
+- Tests around summarizer prompt structure and summary replacement behavior.

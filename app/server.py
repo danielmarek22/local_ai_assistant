@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from contextlib import suppress
 from app.config import Config
 
+from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.events import (
     AssistantSpeechEvent,
@@ -20,7 +21,7 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.logging import setup_logging
-from app.tts.piper_tts import PiperTTS
+from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 
 setup_logging()
@@ -36,10 +37,7 @@ logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
 config = Config()
 
-tts = PiperTTS(
-    model_path=Path(config.tts["model_path"]),
-    use_cuda=config.tts["use_cuda"],
-)
+tts = build_tts_engine(config.tts)
 
 logger.info("Starting FastAPI server")
 
@@ -206,6 +204,23 @@ async def synthesize_async(text: str, output_path: Path, session_id: str):
     await result_future
 
 
+async def _send_ws_payload(ws: WebSocket, payload: dict) -> None:
+    await ws.send_text(json.dumps(payload))
+
+
+async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> None:
+    for chunk in pending_chunks:
+        await _send_ws_payload(ws, {
+            "type": "assistant_chunk",
+            "content": chunk,
+        })
+    pending_chunks.clear()
+
+
+def _should_forward_state(state: str) -> bool:
+    return state != AssistantState.RESPONDING
+
+
 @app.on_event("startup")
 async def startup_event():
     app.state.server_instance_id = uuid.uuid4().hex[:8]
@@ -336,6 +351,9 @@ async def websocket_endpoint(ws: WebSocket):
 
             # Buffer for sentence-based TTS
             text_buffer = ""
+            pending_chunks: list[str] = []
+            text_released = False
+            tts_enabled = True
 
             async for event in run_generator(
                 orchestrator.handle_user_input(
@@ -345,15 +363,22 @@ async def websocket_endpoint(ws: WebSocket):
             ):
                 # --- STATE EVENTS ---
                 if isinstance(event, AssistantStateEvent):
+                    if not _should_forward_state(event.state):
+                        logger.debug(
+                            "[%s] Holding assistant state at thinking until audio is ready",
+                            connection_id,
+                        )
+                        continue
+
                     logger.debug(
                         "[%s] Assistant state -> %s",
                         connection_id,
                         event.state,
                     )
-                    await ws.send_text(json.dumps({
+                    await _send_ws_payload(ws, {
                         "type": "assistant_state",
                         "state": event.state,
-                    }))
+                    })
                     continue
 
                 if isinstance(event, AvatarExpressionEvent):
@@ -362,10 +387,10 @@ async def websocket_endpoint(ws: WebSocket):
                         connection_id,
                         event.expression,
                     )
-                    await ws.send_text(json.dumps({
+                    await _send_ws_payload(ws, {
                         "type": "assistant_expression",
                         "expression": event.expression,
-                    }))
+                    })
                     continue
 
                 # --- SPEECH EVENTS ---
@@ -373,12 +398,18 @@ async def websocket_endpoint(ws: WebSocket):
                     if not event.is_final:
                         text_buffer += event.text
 
-                        await ws.send_text(json.dumps({
-                            "type": "assistant_chunk",
-                            "content": event.text,
-                        }))
+                        if text_released:
+                            await _send_ws_payload(ws, {
+                                "type": "assistant_chunk",
+                                "content": event.text,
+                            })
+                        else:
+                            pending_chunks.append(event.text)
 
                         sentences, text_buffer = split_sentences(text_buffer)
+
+                        if not tts_enabled:
+                            continue
 
                         for sentence in sentences:
                             tts_text = _prepare_tts_text(sentence)
@@ -394,44 +425,71 @@ async def websocket_endpoint(ws: WebSocket):
                                 len(tts_text),
                             )
 
-                            await synthesize_async(
-                                text=tts_text,
-                                output_path=audio_path,
-                                session_id=connection_id,
-                            )
+                            try:
+                                await synthesize_async(
+                                    text=tts_text,
+                                    output_path=audio_path,
+                                    session_id=connection_id,
+                                )
+                            except Exception:
+                                tts_enabled = False
+                                logger.warning(
+                                    "[%s] TTS failed mid-turn; falling back to text-only streaming",
+                                    connection_id,
+                                )
+                                if not text_released:
+                                    await _flush_pending_chunks(ws, pending_chunks)
+                                    text_released = True
+                                break
 
-                            await ws.send_text(json.dumps({
+                            await _send_ws_payload(ws, {
                                 "type": "assistant_audio",
                                 "url": f"/static/audio/{audio_id}.wav",
-                            }))
+                            })
+
+                            if not text_released:
+                                await _flush_pending_chunks(ws, pending_chunks)
+                                text_released = True
 
                     else:
-                        tts_text = _prepare_tts_text(text_buffer)
-                        if tts_text:
-                            audio_id = uuid.uuid4().hex
-                            audio_path = AUDIO_DIR / f"{audio_id}.wav"
+                        if tts_enabled:
+                            tts_text = _prepare_tts_text(text_buffer)
+                            if tts_text:
+                                audio_id = uuid.uuid4().hex
+                                audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
-                            logger.debug(
-                                "[%s] TTS final fragment (%d chars)",
-                                connection_id,
-                                len(tts_text),
-                            )
+                                logger.debug(
+                                    "[%s] TTS final fragment (%d chars)",
+                                    connection_id,
+                                    len(tts_text),
+                                )
 
-                            await synthesize_async(
-                                text=tts_text,
-                                output_path=audio_path,
-                                session_id=connection_id,
-                            )
+                                try:
+                                    await synthesize_async(
+                                        text=tts_text,
+                                        output_path=audio_path,
+                                        session_id=connection_id,
+                                    )
+                                except Exception:
+                                    tts_enabled = False
+                                    logger.warning(
+                                        "[%s] TTS failed for final fragment; sending text without audio",
+                                        connection_id,
+                                    )
+                                else:
+                                    await _send_ws_payload(ws, {
+                                        "type": "assistant_audio",
+                                        "url": f"/static/audio/{audio_id}.wav",
+                                    })
 
-                            await ws.send_text(json.dumps({
-                                "type": "assistant_audio",
-                                "url": f"/static/audio/{audio_id}.wav",
-                            }))
+                        if not text_released:
+                            await _flush_pending_chunks(ws, pending_chunks)
+                            text_released = True
 
-                        await ws.send_text(json.dumps({
+                        await _send_ws_payload(ws, {
                             "type": "assistant_end",
                             "content": event.text,
-                        }))
+                        })
 
                         logger.info(
                             "[%s] Assistant turn completed",

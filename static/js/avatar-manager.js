@@ -213,22 +213,24 @@ export class AvatarManager {
             this.updateBlinking(deltaTime);
             this.updateExpression(deltaTime);
             
-            // --- UPDATED: Dynamic Audio Lip Sync ---
-            let targetMouthOpen = this.getAudioLevel();
+            const visemes = this.getAudioLevel(); // rename callback to getVisemeData
 
-            // Prevent blendshape clashing by dampening lip-sync during strong expressions
+            const VISEME_KEYS = ['aa', 'ih', 'ou', 'ee', 'oh'];
+            const SMOOTHING = CONFIG.AUDIO.LIP_SYNC_SMOOTHING; // reuse existing value
+
+            // Expression dampening factor (your existing logic)
+            let dampen = 1.0;
             if (this.currentExpression !== 'neutral' && this.currentVrm.expressionManager) {
-                const activeExpWeight = this.currentVrm.expressionManager.getValue(this.currentExpression) || 0;
-                
-                // If expression is at 1.0, reduce lip-sync by 60%. 
-                // You can tweak this 0.6 value based on how extreme your specific VRM's expressions are.
-                const dampeningFactor = 1.0 - (activeExpWeight * 0.6); 
-                targetMouthOpen *= dampeningFactor;
+                const w = this.currentVrm.expressionManager.getValue(this.currentExpression) || 0;
+                dampen = 1.0 - (w * 0.6);
             }
 
-            const currentMouth = this.currentVrm.expressionManager.getValue('aa');
-            const smoothedMouth = THREE.MathUtils.lerp(currentMouth, targetMouthOpen, CONFIG.AUDIO.LIP_SYNC_SMOOTHING);
-            this.currentVrm.expressionManager.setValue('aa', smoothedMouth);
+            for (const key of VISEME_KEYS) {
+                const target = (visemes[key] ?? 0) * dampen;
+                const current = this.currentVrm.expressionManager.getValue(key) || 0;
+                const next = THREE.MathUtils.lerp(current, target, SMOOTHING);
+                this.currentVrm.expressionManager.setValue(key, next);
+            }
 
             // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
             if (this.currentAction && this.currentState === 'thinking') {

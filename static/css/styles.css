@@ -202,7 +202,75 @@ body {
     line-height: 1.5;
 }
 
-.history-panel {
+
+.config-panel h2 {
+    margin: 0 0 6px;
+    font-size: 18px;
+}
+
+.config-panel p {
+    margin: 0;
+    color: #aab4bd;
+    line-height: 1.4;
+    font-size: 13px;
+}
+
+.config-list {
+    padding: 0 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.config-control {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.config-control-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.config-control-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f4f7fa;
+}
+
+.config-control-description {
+    font-size: 13px;
+    line-height: 1.4;
+    color: #aab4bd;
+}
+
+.config-control-input {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.config-control-input input[type="range"] {
+    flex: 1;
+    accent-color: #00ff99;
+}
+
+.config-control-input span {
+    min-width: 48px;
+    text-align: right;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: #dfe7ee;
+}
+
+.history-panel,
+.config-panel {
     flex: 1;
     min-height: 0;
     display: flex;
