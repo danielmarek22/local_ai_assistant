@@ -73,9 +73,25 @@
             </section>
 
             <section id="config-view" class="tab-panel" role="tabpanel" aria-hidden="true">
-                <div class="panel-placeholder">
-                    <h2>Config</h2>
-                    <p>Configuration controls will go here.</p>
+                <div class="config-panel">
+                    <div class="panel-section-header">
+                        <div>
+                            <h2>Config</h2>
+                            <p>Frontend-only playback settings for this browser.</p>
+                        </div>
+                    </div>
+                    <div class="config-list">
+                        <label class="config-control" for="playback-volume">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Voice volume</span>
+                                <span class="config-control-description">Adjust assistant playback volume locally while audio is playing.</span>
+                            </div>
+                            <div class="config-control-input">
+                                <input id="playback-volume" type="range" min="0" max="100" step="1" value="100">
+                                <span id="playback-volume-value">100%</span>
+                            </div>
+                        </label>
+                    </div>
                 </div>
             </section>
 

@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -85,6 +86,14 @@ class FakeVectorStore:
     def __init__(self):
         self.semantic_collection = FakeCollection()
         self.episodic_collection = FakeCollection()
+
+
+class FakeWebSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send_text(self, payload: str):
+        self.messages.append(json.loads(payload))
 
 
 class ServerSessionTests(unittest.TestCase):
@@ -187,6 +196,25 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+
+    def test_should_forward_state_holds_responding_until_audio(self):
+        self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
+        self.assertTrue(server_module._should_forward_state(server_module.AssistantState.THINKING))
+
+    def test_flush_pending_chunks_sends_buffered_text_in_order(self):
+        ws = FakeWebSocket()
+        pending_chunks = ["Hello", " world"]
+
+        server_module.asyncio.run(server_module._flush_pending_chunks(ws, pending_chunks))
+
+        self.assertEqual(
+            ws.messages,
+            [
+                {"type": "assistant_chunk", "content": "Hello"},
+                {"type": "assistant_chunk", "content": " world"},
+            ],
+        )
+        self.assertEqual(pending_chunks, [])
 
 
 if __name__ == "__main__":

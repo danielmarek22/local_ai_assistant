@@ -14,6 +14,8 @@ export class AudioManager {
         
         this.audioEl = new Audio();
         this.audioEl.crossOrigin = "anonymous";
+        this.volume = CONFIG.AUDIO.DEFAULT_VOLUME;
+        this.audioEl.volume = this.volume;
 
         this.audioEl.onplaying = () => {
             this.updateSpeechActivity();
@@ -48,6 +50,18 @@ export class AudioManager {
     queueAudio(url) {
         this.audioQueue.push(url);
         this.playNext();
+    }
+
+    setVolume(volume) {
+        const nextVolume = Number.isFinite(volume)
+            ? Math.min(1, Math.max(0, volume))
+            : CONFIG.AUDIO.DEFAULT_VOLUME;
+        this.volume = nextVolume;
+        this.audioEl.volume = nextVolume;
+    }
+
+    getVolume() {
+        return this.volume;
     }
 
     setPlaybackHandlers({ onSpeechStart, onSpeechEnd } = {}) {
