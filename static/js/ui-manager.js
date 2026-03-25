@@ -1,6 +1,7 @@
 import { CONFIG } from './config.js';
 import { marked } from 'https://cdn.jsdelivr.net/npm/marked@13.0.2/lib/marked.esm.js';
 import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.1.6/+esm';
+import { extractBase64Payload, extractImageFilesFromDataTransfer, insertTextAtCursor, isImageFile } from './attachment-utils.mjs';
 
 marked.setOptions({
     gfm: true,
@@ -145,6 +146,10 @@ export class UIManager {
             event.target.value = '';
         });
 
+        this.userInput.addEventListener('paste', (event) => {
+            void this.handlePasteEvent(event);
+        });
+
         this.attachmentPreview?.addEventListener('click', (event) => {
             const removeButton = event.target.closest('[data-attachment-remove]');
             if (!removeButton) return;
@@ -167,11 +172,28 @@ export class UIManager {
         });
     }
 
+    async handlePasteEvent(event) {
+        const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
+        if (!imageFiles.length) {
+            return;
+        }
+
+        const pastedText = event.clipboardData?.getData('text/plain') || '';
+        event.preventDefault();
+
+        if (pastedText) {
+            insertTextAtCursor(this.userInput, pastedText);
+            this.userInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        await this.addPendingAttachments(imageFiles);
+    }
+
     async addPendingAttachments(files) {
         const nextAttachments = [];
 
         for (const file of files) {
-            if (!file.type || !file.type.startsWith('image/')) {
+            if (!isImageFile(file)) {
                 continue;
             }
 
@@ -194,7 +216,7 @@ export class UIManager {
 
             reader.onload = () => {
                 const result = typeof reader.result === 'string' ? reader.result : '';
-                const base64Data = result.includes(',') ? result.split(',', 2)[1] : result;
+                const base64Data = extractBase64Payload(result);
                 if (!base64Data) {
                     reject(new Error('Image did not produce base64 data'));
                     return;

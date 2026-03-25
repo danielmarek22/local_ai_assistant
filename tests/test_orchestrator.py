@@ -9,6 +9,7 @@ from app.core.events import (
 )
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
+from app.perception.state import ImageAttachment
 
 
 def consume_generator(gen):
@@ -129,7 +130,12 @@ class FakeContextBuilder:
         self.calls = []
 
     def build(self, session_id: str, user_text: str, injected_context=None, **kwargs):
-        self.calls.append((session_id, user_text, injected_context))
+        self.calls.append({
+            "session_id": session_id,
+            "user_text": user_text,
+            "injected_context": injected_context,
+            "attachments": kwargs.get("attachments", []),
+        })
         return [{"role": "user", "content": user_text}]
 
 
@@ -171,7 +177,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("User likes testing", perception_snapshot["memory.retrieved"].value["value"])
 
         # 2. Verify ContextBuilder received BOTH memory and tool info in injected_context
-        injected_context = context_builder.calls[0][2]
+        injected_context = context_builder.calls[0]["injected_context"]
         self.assertIn("RETRIEVED MEMORY", injected_context)
         self.assertIn("User likes testing", injected_context)
         self.assertIn("Past answer", injected_context)
@@ -378,6 +384,39 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[:-1], ["Nice."])
         self.assertEqual(speech_texts[-1], "Nice.")
         self.assertEqual(history.records[1][2], "Nice.")
+
+    def test_image_only_turn_updates_perception_history_and_context(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            planner,
+            _tool_executor,
+            context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        attachment = ImageAttachment(
+            name="clipboard.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        list(orch.handle_user_input("", attachments=[attachment]))
+
+        self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
+        perception_snapshot = planner.calls[0][1]
+        self.assertEqual(perception_snapshot["user.input"].value["image_count"], 1)
+        self.assertEqual(
+            perception_snapshot["user.input"].value["attachments"][0]["name"],
+            "clipboard.png",
+        )
+        self.assertEqual(history.records[0][2], "[User attached 1 image]")
+        self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
 
     def test_turn_can_override_reasoning_for_single_message(self):
         plan = Plan(actions=[Action(type="respond")])

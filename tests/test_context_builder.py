@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 
+from app.perception.state import ImageAttachment
 from app.services.context_builder import ContextBuilder
 
 
@@ -72,6 +73,35 @@ class ContextBuilderTests(unittest.TestCase):
         all_assistant_contents = [m["content"] for m in messages if m["role"] == "assistant"]
         self.assertEqual(all_user_contents.count("First user msg"), 1)
         self.assertIn("Older assistant reply", all_assistant_contents)
+
+    def test_build_attaches_images_to_current_user_message(self):
+        history = FakeHistoryStore([])
+        summary = FakeSummaryStore(None)
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            user_context={},
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+        )
+
+        attachment = ImageAttachment(
+            name="cat.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="What is in this image?",
+            attachments=[attachment],
+        )
+
+        self.assertEqual(messages[-1]["role"], "user")
+        self.assertEqual(messages[-1]["content"], "What is in this image?")
+        self.assertEqual(messages[-1]["images"], ["aGVsbG8="])
 
     def test_build_includes_configured_user_context(self):
         history = FakeHistoryStore([])

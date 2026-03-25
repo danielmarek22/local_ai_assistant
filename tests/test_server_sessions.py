@@ -184,18 +184,38 @@ class ServerSessionTests(unittest.TestCase):
         self.assertNotEqual(session_id, "session-a")
 
     def test_parse_user_message_supports_structured_reasoning_override(self):
-        text, reasoning = server_module.parse_user_message(
+        text, reasoning, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
         )
 
         self.assertEqual(text, "hello")
         self.assertIs(reasoning, True)
+        self.assertEqual(attachments, [])
+
+    def test_parse_user_message_parses_base64_image_attachments(self):
+        text, reasoning, attachments = server_module.parse_user_message(
+            '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":5}]}'
+        )
+
+        self.assertEqual(text, "look")
+        self.assertIsNone(reasoning)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].name, "cat.png")
+        self.assertEqual(attachments[0].mime_type, "image/png")
+        self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
+
+    def test_parse_user_message_rejects_empty_payload_without_text_or_images(self):
+        with self.assertRaises(ValueError):
+            server_module.parse_user_message(
+                '{"type":"user_message","text":"   ","attachments":[]}'
+            )
 
     def test_parse_user_message_keeps_plain_text_backward_compatible(self):
-        text, reasoning = server_module.parse_user_message("hello")
+        text, reasoning, attachments = server_module.parse_user_message("hello")
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+        self.assertEqual(attachments, [])
 
     def test_should_forward_state_holds_responding_until_audio(self):
         self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
