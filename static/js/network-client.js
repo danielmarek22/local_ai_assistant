@@ -12,7 +12,7 @@ export class NetworkClient {
     connect(options = this.connectionOptions) {
         this.isExplicitlyClosed = false;
         this.connectionOptions = { ...options };
-        
+
         try {
             const wsUrl = new URL(CONFIG.SYSTEM.WS_URL, window.location.href);
             if (this.connectionOptions.sessionId) {
@@ -28,59 +28,58 @@ export class NetworkClient {
             console.log(`Connecting to ${wsUrl.toString()}...`);
             const socket = new WebSocket(wsUrl.toString());
             this.ws = socket;
-            
+
             socket.onopen = () => {
                 if (this.ws !== socket) return;
-                console.log("WS Connected");
-                // Clear any pending reconnects
+                console.log('WS Connected');
                 if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                
-                if(this.handlers.onState) this.handlers.onState('idle');
+
+                if (this.handlers.onState) this.handlers.onState('idle');
             };
 
             socket.onclose = (event) => {
                 if (this.ws !== socket) return;
                 if (this.isExplicitlyClosed) return;
-                
+
                 console.warn(`WS Closed (Code: ${event.code}). Reconnecting in ${CONFIG.SYSTEM.RECONNECT_INTERVAL_MS}ms...`);
                 this.scheduleReconnect();
             };
 
             socket.onerror = (err) => {
                 if (this.ws !== socket) return;
-                console.error("WS Error encountered. Closing socket to trigger reconnect.", err);
+                console.error('WS Error encountered. Closing socket to trigger reconnect.', err);
                 socket.close();
             };
 
             socket.onmessage = (event) => {
                 if (this.ws !== socket) return;
                 const data = JSON.parse(event.data);
-                
-                if (data.type === "session_init" && this.handlers.onSessionInit) {
+
+                if (data.type === 'session_init' && this.handlers.onSessionInit) {
                     this.handlers.onSessionInit({
                         serverInstanceId: data.server_instance_id,
                         sessionId: data.session_id,
                     });
                 }
-                else if (data.type === "assistant_state" && this.handlers.onState) {
+                else if (data.type === 'assistant_state' && this.handlers.onState) {
                     this.handlers.onState(data.state);
-                } 
-                else if (data.type === "assistant_expression" && this.handlers.onExpression) {
+                }
+                else if (data.type === 'assistant_expression' && this.handlers.onExpression) {
                     this.handlers.onExpression(data.expression);
                 }
-                else if (data.type === "assistant_chunk" && this.handlers.onChunk) {
+                else if (data.type === 'assistant_chunk' && this.handlers.onChunk) {
                     this.handlers.onChunk(data.content);
                 }
-                else if (data.type === "assistant_audio" && this.handlers.onAudio) {
+                else if (data.type === 'assistant_audio' && this.handlers.onAudio) {
                     this.handlers.onAudio(data.url);
                 }
-                else if (data.type === "assistant_end" && this.handlers.onEnd) {
+                else if (data.type === 'assistant_end' && this.handlers.onEnd) {
                     this.handlers.onEnd(data.content);
                 }
             };
 
         } catch (e) {
-            console.error("WS Connection Setup Failed:", e);
+            console.error('WS Connection Setup Failed:', e);
             this.scheduleReconnect();
         }
     }
@@ -116,13 +115,32 @@ export class NetworkClient {
 
     sendMessage(text, options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const attachments = Array.isArray(options.attachments)
+                ? options.attachments
+                    .filter((attachment) => attachment && typeof attachment.data === 'string')
+                    .map((attachment) => {
+                        const payload = {
+                            name: attachment.name || 'image',
+                            mime_type: attachment.mimeType || attachment.mime_type || 'image/png',
+                            data: attachment.data,
+                        };
+
+                        if (Number.isFinite(attachment.size)) {
+                            payload.size_bytes = attachment.size;
+                        }
+
+                        return payload;
+                    })
+                : [];
+
             this.ws.send(JSON.stringify({
                 type: 'user_message',
                 text,
                 reasoning: Boolean(options.reasoning),
+                attachments,
             }));
         } else {
-            console.warn("Cannot send message: WebSocket is not open.");
+            console.warn('Cannot send message: WebSocket is not open.');
         }
     }
 

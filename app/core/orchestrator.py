@@ -13,7 +13,7 @@ from app.core.events import (
 from app.core.assistant_state import AssistantState
 from app.core.actions import Action
 from app.core.plan import Plan
-from app.perception.state import PerceptionState
+from app.perception.state import ImageAttachment, PerceptionState
 from app.services.tool_executor import ToolExecutor
 
 
@@ -82,10 +82,23 @@ class Orchestrator:
     # Public entry point
     # ============================================================
 
-    def handle_user_input(self, user_text: str, think_override=None):
+    def handle_user_input(
+        self,
+        user_text: str,
+        think_override=None,
+        attachments: list[ImageAttachment] | None = None,
+    ):
         start_ts = time.perf_counter()
+        attachments = attachments or []
+        retrieval_text = self._build_retrieval_text(user_text, attachments)
+        history_text = self._build_history_text(user_text, attachments)
 
-        logger.info("[%s] User input received (len=%d)", self.session_id, len(user_text))
+        logger.info(
+            "[%s] User input received (len=%d, images=%d)",
+            self.session_id,
+            len(user_text),
+            len(attachments),
+        )
         logger.debug("[%s] User input text: %r", self.session_id, user_text)
 
         yield AssistantStateEvent(state=AssistantState.THINKING)
@@ -98,6 +111,8 @@ class Orchestrator:
             {
                 "text": user_text,
                 "source": "keyboard",
+                "image_count": len(attachments),
+                "attachments": [attachment.to_perception_payload() for attachment in attachments],
             },
         )
 
@@ -105,8 +120,16 @@ class Orchestrator:
         # 2. Vector Retrieval (Semantic + Episodic)
         # --------------------------------------------------------
         logger.debug("[%s] Querying vector DB for memories", self.session_id)
-        semantic_memories = self.memory.get_relevant(user_text, limit=3)
-        episodic_memories = self.history.search_past_conversations(user_text, self.session_id, limit=3)
+        if retrieval_text:
+            semantic_memories = self.memory.get_relevant(retrieval_text, limit=3)
+            episodic_memories = self.history.search_past_conversations(
+                retrieval_text,
+                self.session_id,
+                limit=3,
+            )
+        else:
+            semantic_memories = []
+            episodic_memories = []
 
         memory_blocks = []
         if semantic_memories:
@@ -125,14 +148,14 @@ class Orchestrator:
         # --------------------------------------------------------
         # 3. Persist user input (to SQLite + Vector Store)
         # --------------------------------------------------------
-        self.history.add(self.session_id, "user", user_text)
+        self.history.add(self.session_id, "user", history_text)
         logger.debug("[%s] User input persisted to history", self.session_id)
 
         # --------------------------------------------------------
         # 4. Planning (decide actions)
         # --------------------------------------------------------
         perception_snapshot = self.perception.snapshot()
-        plan = self._plan(user_text, perception_snapshot)
+        plan = self._plan(retrieval_text or user_text, perception_snapshot)
 
         logger.debug("[%s] Plan actions: %s", self.session_id, [action.type for action in plan.actions])
 
@@ -170,7 +193,7 @@ class Orchestrator:
 
         final_injected_context = "\n\n".join(combined_context_parts) if combined_context_parts else None
 
-        messages = self._build_context(user_text, final_injected_context)
+        messages = self._build_context(user_text, final_injected_context, attachments)
 
         # --------------------------------------------------------
         # 7. LLM streaming response
@@ -246,13 +269,19 @@ class Orchestrator:
     # Context & response
     # ============================================================
 
-    def _build_context(self, user_text: str, tool_context: Optional[str]):
+    def _build_context(
+        self,
+        user_text: str,
+        tool_context: Optional[str],
+        attachments: list[ImageAttachment] | None = None,
+    ):
         logger.info("[%s] Building context", self.session_id)
 
         messages = self.context_builder.build(
             session_id=self.session_id,
             user_text=user_text,
-            injected_context=tool_context, 
+            injected_context=tool_context,
+            attachments=attachments or [],
         )
 
         logger.debug(
@@ -262,6 +291,45 @@ class Orchestrator:
             bool(tool_context),
         )
         return messages
+
+    def _build_retrieval_text(
+        self,
+        user_text: str,
+        attachments: list[ImageAttachment],
+    ) -> str:
+        text = user_text.strip()
+        if text:
+            return text
+
+        if not attachments:
+            return ""
+
+        names = ", ".join(
+            attachment.name
+            for attachment in attachments[:3]
+            if attachment.name
+        )
+        if names:
+            return f"user shared image attachments: {names}"
+        return "user shared image attachments"
+
+    def _build_history_text(
+        self,
+        user_text: str,
+        attachments: list[ImageAttachment],
+    ) -> str:
+        text = user_text.strip()
+        if not attachments:
+            return text
+
+        suffix = f"User attached {len(attachments)} image"
+        if len(attachments) != 1:
+            suffix += "s"
+
+        if text:
+            return f"{text}\n\n[{suffix}]"
+
+        return f"[{suffix}]"
 
     def _stream_response(self, messages, think_override=None):
         logger.info("[%s] Calling LLM (streaming)", self.session_id)

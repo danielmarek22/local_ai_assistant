@@ -21,6 +21,7 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.logging import setup_logging
+from app.perception.state import ImageAttachment
 from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 
@@ -84,21 +85,32 @@ def resolve_session_id(
     return uuid.uuid4().hex[:8]
 
 
-def parse_user_message(raw_text: str) -> tuple[str, bool | None]:
+def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[ImageAttachment]]:
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
-        return raw_text, None
+        return raw_text, None, []
 
     if not isinstance(payload, dict):
-        return raw_text, None
+        return raw_text, None, []
 
     if payload.get("type") != "user_message":
-        return raw_text, None
+        return raw_text, None, []
 
     text = payload.get("text")
     if not isinstance(text, str):
         raise ValueError("User message payload is missing text")
+
+    attachments_payload = payload.get("attachments")
+    if attachments_payload is None:
+        attachments: list[ImageAttachment] = []
+    elif isinstance(attachments_payload, list):
+        attachments = [ImageAttachment.from_payload(item) for item in attachments_payload]
+    else:
+        raise ValueError("User message attachments must be a list")
+
+    if not text.strip() and not attachments:
+        raise ValueError("User message must include text or at least one image attachment")
 
     reasoning = payload.get("reasoning")
     if reasoning is None:
@@ -108,7 +120,7 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None]:
     else:
         raise ValueError("User message reasoning flag must be boolean")
 
-    return text, reasoning_override
+    return text, reasoning_override, attachments
 
 
 @dataclass
@@ -339,12 +351,13 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             raw_message = await ws.receive_text()
-            user_text, reasoning_override = parse_user_message(raw_message)
+            user_text, reasoning_override, attachments = parse_user_message(raw_message)
 
             logger.info(
-                "[%s] Received user input (len=%d, reasoning_override=%r)",
+                "[%s] Received user input (len=%d, images=%d, reasoning_override=%r)",
                 connection_id,
                 len(user_text),
+                len(attachments),
                 reasoning_override,
             )
             logger.debug("[%s] User input text: %r", connection_id, user_text)
@@ -359,6 +372,7 @@ async def websocket_endpoint(ws: WebSocket):
                 orchestrator.handle_user_input(
                     user_text,
                     think_override=reasoning_override,
+                    attachments=attachments,
                 )
             ):
                 # --- STATE EVENTS ---

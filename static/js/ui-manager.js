@@ -13,9 +13,12 @@ export class UIManager {
         this.statusText = document.getElementById('status-text');
         this.chatHistory = document.getElementById('chat-history');
         this.userInput = document.getElementById('user-input');
+        this.imageInput = document.getElementById('image-input');
+        this.attachmentPreview = document.getElementById('attachment-preview');
         this.composerMenu = document.getElementById('composer-menu');
         this.composerMenuBtn = document.getElementById('composer-menu-btn');
         this.composerMenuPopover = document.getElementById('composer-menu-popover');
+        this.imageAttachBtn = document.getElementById('image-attach-btn');
         this.reasoningToggle = document.getElementById('reasoning-toggle');
         this.playbackVolumeInput = document.getElementById('playback-volume');
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
@@ -28,11 +31,12 @@ export class UIManager {
         this.historyStatus = document.getElementById('history-status');
         this.historyRefreshBtn = document.getElementById('history-refresh-btn');
         this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
-        
+
         this.currentAiMessageDiv = null;
         this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
+        this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.defaultMessages = this.serializeChatHistory();
         this.initAutoResize();
@@ -45,7 +49,7 @@ export class UIManager {
 
     initAutoResize() {
         this.userInput.addEventListener('input', () => {
-            this.userInput.style.height = 'auto'; // Reset to calculate shrink
+            this.userInput.style.height = 'auto';
             this.userInput.style.height = this.userInput.scrollHeight + 'px';
         });
     }
@@ -128,6 +132,26 @@ export class UIManager {
             this.toggleComposerMenu();
         });
 
+        this.imageAttachBtn?.addEventListener('click', () => {
+            this.closeComposerMenu();
+            this.imageInput?.click();
+        });
+
+        this.imageInput?.addEventListener('change', async (event) => {
+            const files = Array.from(event.target.files || []);
+            if (!files.length) return;
+
+            await this.addPendingAttachments(files);
+            event.target.value = '';
+        });
+
+        this.attachmentPreview?.addEventListener('click', (event) => {
+            const removeButton = event.target.closest('[data-attachment-remove]');
+            if (!removeButton) return;
+
+            this.removePendingAttachment(removeButton.dataset.attachmentRemove);
+        });
+
         this.reasoningToggle.addEventListener('click', () => {
             this.reasoningEnabledForNextSend = !this.reasoningEnabledForNextSend;
             this.syncReasoningToggle();
@@ -141,6 +165,91 @@ export class UIManager {
 
             this.closeComposerMenu();
         });
+    }
+
+    async addPendingAttachments(files) {
+        const nextAttachments = [];
+
+        for (const file of files) {
+            if (!file.type || !file.type.startsWith('image/')) {
+                continue;
+            }
+
+            try {
+                nextAttachments.push(await this.readImageFile(file));
+            } catch (error) {
+                console.warn(`Failed to read image ${file.name}:`, error);
+            }
+        }
+
+        if (!nextAttachments.length) return;
+
+        this.pendingAttachments.push(...nextAttachments);
+        this.renderPendingAttachments();
+    }
+
+    readImageFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+
+            reader.onload = () => {
+                const result = typeof reader.result === 'string' ? reader.result : '';
+                const base64Data = result.includes(',') ? result.split(',', 2)[1] : result;
+                if (!base64Data) {
+                    reject(new Error('Image did not produce base64 data'));
+                    return;
+                }
+
+                resolve({
+                    id: this.createAttachmentId(),
+                    name: file.name,
+                    mimeType: file.type,
+                    size: file.size,
+                    data: base64Data,
+                });
+            };
+
+            reader.onerror = () => {
+                reject(reader.error || new Error('FileReader failed'));
+            };
+
+            reader.readAsDataURL(file);
+        });
+    }
+
+    createAttachmentId() {
+        if (window.crypto?.randomUUID) {
+            return window.crypto.randomUUID();
+        }
+
+        return `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    removePendingAttachment(attachmentId) {
+        if (!attachmentId) return;
+
+        this.pendingAttachments = this.pendingAttachments.filter((attachment) => attachment.id !== attachmentId);
+        this.renderPendingAttachments();
+    }
+
+    clearPendingAttachments() {
+        this.pendingAttachments = [];
+        this.renderPendingAttachments();
+        if (this.imageInput) {
+            this.imageInput.value = '';
+        }
+    }
+
+    renderPendingAttachments() {
+        if (!this.attachmentPreview) return;
+
+        this.attachmentPreview.replaceChildren();
+        this.attachmentPreview.classList.toggle('hidden', this.pendingAttachments.length === 0);
+
+        for (const attachment of this.pendingAttachments) {
+            const chip = this.createAttachmentNode(attachment, { removable: true });
+            this.attachmentPreview.appendChild(chip);
+        }
     }
 
     initConfigControls() {
@@ -228,16 +337,15 @@ export class UIManager {
     }
 
     updateStatus(state) {
-        // Remove all potential status classes
-        this.chatPanel.classList.remove(...Object.keys(CONFIG.UI.STATUS_TEXT).map(s => `status-${s}`));
+        this.chatPanel.classList.remove(...Object.keys(CONFIG.UI.STATUS_TEXT).map((status) => `status-${status}`));
         this.chatPanel.classList.add(`status-${state}`);
 
-        const text = CONFIG.UI.STATUS_TEXT[state] || CONFIG.UI.STATUS_TEXT['idle'];
+        const text = CONFIG.UI.STATUS_TEXT[state] || CONFIG.UI.STATUS_TEXT.idle;
         this.statusText.innerText = text;
     }
 
-    appendUserMessage(text) {
-        this.createMessageDiv('user', text);
+    appendUserMessage(text, attachments = []) {
+        this.createMessageDiv('user', text, attachments);
     }
 
     startAiMessage() {
@@ -266,18 +374,30 @@ export class UIManager {
         }
     }
 
-    createMessageDiv(sender, text) {
+    createMessageDiv(sender, text, attachments = []) {
         const msgDiv = document.createElement('div');
         msgDiv.classList.add('message', sender);
-        this.setMessageContent(msgDiv, text);
+        this.setMessageContent(msgDiv, text, attachments);
         this.chatHistory.appendChild(msgDiv);
         this.persistChatHistory();
         this.scrollToBottom();
         return msgDiv;
     }
 
-    setMessageContent(msgDiv, text) {
+    setMessageContent(msgDiv, text, attachments = []) {
+        const normalizedAttachments = this.normalizeAttachments(attachments);
         msgDiv.dataset.rawText = text;
+
+        if (normalizedAttachments.length) {
+            msgDiv.dataset.attachments = JSON.stringify(normalizedAttachments.map((attachment) => ({
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                data: attachment.data,
+                size: attachment.size,
+            })));
+        } else {
+            delete msgDiv.dataset.attachments;
+        }
 
         if (msgDiv.classList.contains('astra')) {
             const unsafeHtml = marked.parse(text);
@@ -293,7 +413,109 @@ export class UIManager {
             return;
         }
 
-        msgDiv.innerText = text;
+        msgDiv.replaceChildren();
+
+        if (text) {
+            const body = document.createElement('div');
+            body.className = 'message-body';
+            body.innerText = text;
+            msgDiv.appendChild(body);
+        }
+
+        if (normalizedAttachments.length) {
+            const gallery = document.createElement('div');
+            gallery.className = 'message-attachments';
+
+            for (const attachment of normalizedAttachments) {
+                gallery.appendChild(this.createAttachmentNode(attachment));
+            }
+
+            msgDiv.appendChild(gallery);
+        }
+    }
+
+    normalizeAttachments(attachments) {
+        if (!Array.isArray(attachments)) {
+            return [];
+        }
+
+        return attachments
+            .map((attachment) => this.normalizeAttachment(attachment))
+            .filter(Boolean);
+    }
+
+    normalizeAttachment(attachment) {
+        if (!attachment || typeof attachment !== 'object') {
+            return null;
+        }
+
+        const data = typeof attachment.data === 'string' ? attachment.data.trim() : '';
+        if (!data) {
+            return null;
+        }
+
+        const mimeType = typeof attachment.mimeType === 'string'
+            ? attachment.mimeType
+            : typeof attachment.mime_type === 'string'
+                ? attachment.mime_type
+                : 'image/png';
+        if (!mimeType.startsWith('image/')) {
+            return null;
+        }
+
+        const size = Number.isFinite(attachment.size)
+            ? attachment.size
+            : Number.isFinite(attachment.size_bytes)
+                ? attachment.size_bytes
+                : null;
+
+        return {
+            id: typeof attachment.id === 'string' && attachment.id ? attachment.id : this.createAttachmentId(),
+            name: typeof attachment.name === 'string' && attachment.name.trim() ? attachment.name.trim() : 'image',
+            mimeType,
+            data,
+            size,
+        };
+    }
+
+    createAttachmentNode(attachment, { removable = false } = {}) {
+        const node = document.createElement('figure');
+        node.className = removable ? 'attachment-chip' : 'message-attachment';
+
+        const image = document.createElement('img');
+        image.className = removable ? 'attachment-chip-image' : 'message-attachment-image';
+        image.src = this.buildAttachmentSrc(attachment);
+        image.alt = attachment.name;
+        node.appendChild(image);
+
+        const caption = document.createElement('figcaption');
+        caption.className = removable ? 'attachment-chip-meta' : 'message-attachment-meta';
+        caption.textContent = this.formatAttachmentLabel(attachment.name, removable ? 18 : 28);
+        node.appendChild(caption);
+
+        if (removable) {
+            const removeButton = document.createElement('button');
+            removeButton.type = 'button';
+            removeButton.className = 'attachment-chip-remove';
+            removeButton.dataset.attachmentRemove = attachment.id;
+            removeButton.setAttribute('aria-label', `Remove ${attachment.name}`);
+            removeButton.textContent = 'x';
+            node.appendChild(removeButton);
+        }
+
+        return node;
+    }
+
+    buildAttachmentSrc(attachment) {
+        return `data:${attachment.mimeType};base64,${attachment.data}`;
+    }
+
+    formatAttachmentLabel(name, limit = 24) {
+        if (name.length <= limit) {
+            return name;
+        }
+
+        return `${name.slice(0, Math.max(0, limit - 1))}…`;
     }
 
     setSessionScope(serverInstanceId, sessionId) {
@@ -335,7 +557,11 @@ export class UIManager {
     persistChatHistory() {
         if (!this.chatHistoryStorageKey) return;
 
-        sessionStorage.setItem(this.chatHistoryStorageKey, JSON.stringify(this.serializeChatHistory()));
+        try {
+            sessionStorage.setItem(this.chatHistoryStorageKey, JSON.stringify(this.serializeChatHistory()));
+        } catch (error) {
+            console.warn('Failed to persist chat history:', error);
+        }
     }
 
     serializeChatHistory() {
@@ -343,9 +569,29 @@ export class UIManager {
             const sender = Array.from(message.classList).find((className) => className !== 'message') || 'astra';
             return {
                 sender,
-                text: message.dataset.rawText || ''
+                text: message.dataset.rawText || '',
+                attachments: this.readStoredAttachments(message.dataset.attachments),
             };
         });
+    }
+
+    readStoredAttachments(rawValue) {
+        if (!rawValue) {
+            return [];
+        }
+
+        try {
+            const parsed = JSON.parse(rawValue);
+            return this.normalizeAttachments(parsed).map((attachment) => ({
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                data: attachment.data,
+                size: attachment.size,
+            }));
+        } catch (error) {
+            console.warn('Failed to parse stored attachments:', error);
+            return [];
+        }
     }
 
     renderMessages(messages) {
@@ -358,7 +604,7 @@ export class UIManager {
 
             const msgDiv = document.createElement('div');
             msgDiv.classList.add('message', message.sender);
-            this.setMessageContent(msgDiv, message.text);
+            this.setMessageContent(msgDiv, message.text, message.attachments || []);
             this.chatHistory.appendChild(msgDiv);
         }
 
@@ -369,6 +615,7 @@ export class UIManager {
         const messages = sessionData.messages.map((message) => ({
             sender: message.role === 'assistant' ? 'astra' : message.role,
             text: message.content,
+            attachments: [],
         }));
 
         this.currentAiMessageDiv = null;
@@ -378,6 +625,7 @@ export class UIManager {
 
     resetChatToDefault() {
         this.currentAiMessageDiv = null;
+        this.clearPendingAttachments();
         this.renderMessages(this.defaultMessages);
         this.persistChatHistory();
     }
@@ -487,35 +735,43 @@ export class UIManager {
     }
 
     onSend(callback) {
-            const handler = (e) => {
-                // If it's a keypress (Enter), prevent default newline
-                if (e && e.type === 'keypress') {
-                    e.preventDefault();
-                }
+        const handler = (event) => {
+            if (event && event.type === 'keypress') {
+                event.preventDefault();
+            }
 
-                const text = this.userInput.value.trim();
-                if (!text) return;
-                
-                const sendOptions = {
-                    reasoning: this.reasoningEnabledForNextSend,
-                };
+            const text = this.userInput.value.trim();
+            const attachments = this.pendingAttachments.map((attachment) => ({
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                data: attachment.data,
+                size: attachment.size,
+            }));
+            if (!text && attachments.length === 0) return;
 
-                callback(text, sendOptions);
-
-                this.reasoningEnabledForNextSend = false;
-                this.syncReasoningToggle();
-                this.closeComposerMenu();
-                
-                this.userInput.value = "";
-                this.userInput.style.height = 'auto'; // Reset height after sending
+            const sendOptions = {
+                reasoning: this.reasoningEnabledForNextSend,
+                attachments,
             };
 
-            this.sendBtn.addEventListener('click', () => handler());
-            
-            this.userInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    handler(e);
-                }
-            });
+            callback(text, sendOptions);
+
+            this.reasoningEnabledForNextSend = false;
+            this.syncReasoningToggle();
+            this.closeComposerMenu();
+            this.clearPendingAttachments();
+
+            this.userInput.value = '';
+            this.userInput.style.height = 'auto';
+            this.userInput.focus();
+        };
+
+        this.sendBtn.addEventListener('click', () => handler());
+
+        this.userInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                handler(event);
+            }
+        });
     }
 }
