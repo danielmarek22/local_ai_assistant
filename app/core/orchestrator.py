@@ -20,11 +20,11 @@ from app.services.tool_executor import ToolExecutor
 logger = logging.getLogger("orchestrator")
 
 _AVATAR_EXPRESSION_PATTERN = re.compile(
-    r"\[\s*state\s*:\s*(happy|angry|sad|relaxed|surprised|neutral)\s*\]",
+    r"\[\s*(?:state|expression)\s*:\s*(happy|angry|sad|relaxed|surprised|neutral)\s*\]",
     re.IGNORECASE,
 )
 _DEFAULT_AVATAR_EXPRESSION = "neutral"
-_EXPRESSION_TAG_PREFIX_PATTERN = re.compile(r"\[\s*state\s*:\s*", re.IGNORECASE)
+_EXPRESSION_TAG_PREFIX_PATTERN = re.compile(r"\[\s*(?:state|expression)\s*:\s*", re.IGNORECASE)
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # FATAL errors only
 
@@ -365,7 +365,7 @@ class Orchestrator:
         candidate = text[last_bracket:]
         normalized = re.sub(r"\s+", "", candidate.lower())
 
-        if "[state:".startswith(normalized):
+        if "[state:".startswith(normalized) or "[expression:".startswith(normalized):
             return last_bracket
 
         if _EXPRESSION_TAG_PREFIX_PATTERN.match(candidate) and "]" not in candidate:

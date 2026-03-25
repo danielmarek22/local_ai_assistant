@@ -349,6 +349,36 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[-1], "Hello there")
         self.assertEqual(history.records[1][2], "Hello there")
 
+    def test_response_expression_alias_tag_is_supported(self):
+        plan = Plan(actions=[Action(type="respond")])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["[expression:happy]Nice."],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input("hello"))
+
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["happy"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Nice."])
+        self.assertEqual(speech_texts[-1], "Nice.")
+        self.assertEqual(history.records[1][2], "Nice.")
+
     def test_turn_can_override_reasoning_for_single_message(self):
         plan = Plan(actions=[Action(type="respond")])
         (
