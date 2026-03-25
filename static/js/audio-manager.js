@@ -126,18 +126,36 @@ export class AudioManager {
         });
     }
 
-    getLipSyncValue() {
-        if (!this.analyser || this.audioEl.paused) return 0;
+    getVisemeData() {
+        if (!this.analyser || this.audioEl.paused) {
+            return { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0, intensity: 0 };
+        }
 
         this.analyser.getByteFrequencyData(this.dataArray);
-        
-        let sum = 0;
-        for (let i = 0; i < this.dataArray.length; i++) {
-            sum += this.dataArray[i];
-        }
-        const average = sum / this.dataArray.length;
-        
-        // Map volume to mouth open
-        return Math.min(1.0, average / CONFIG.AUDIO.LIP_SYNC_SENSITIVITY);
+
+        const binCount = this.dataArray.length;
+        const sampleRate = this.audioContext.sampleRate;
+        const binHz = sampleRate / this.analyser.fftSize;
+
+        const bandEnergy = (minHz, maxHz) => {
+            const minBin = Math.floor(minHz / binHz);
+            const maxBin = Math.min(Math.ceil(maxHz / binHz), binCount - 1);
+            let sum = 0;
+            for (let i = minBin; i <= maxBin; i++) sum += this.dataArray[i];
+            return sum / ((maxBin - minBin + 1) * 255);
+        };
+
+        const intensity = bandEnergy(80, 4000);
+        // Replace the hard gate with a smooth ramp
+        const gate = Math.min(1, Math.max(0, (intensity - 0.05) / 0.1));
+
+        return {
+            aa:  Math.min(1, bandEnergy(700,  1200) * 0.8) * gate,
+            ih:  Math.min(1, bandEnergy(300,   700) * 0.6) * gate,
+            ou:  Math.min(1, bandEnergy(300,   800) * 0.5) * gate,
+            ee:  Math.min(1, bandEnergy(2000, 3500) * 1.0) * gate,
+            oh:  Math.min(1, bandEnergy(500,   900) * 0.6) * gate,
+            intensity,
+        };
     }
 }

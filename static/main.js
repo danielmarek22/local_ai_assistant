@@ -44,7 +44,7 @@ function clearSessionContext() {
 // 2. Initialize Avatar
 const avatarManager = new AvatarManager(
     'canvas-container', 
-    () => audioManager.getLipSyncValue() 
+    () => audioManager.getVisemeData() 
 );
 
 function syncAssistantPresentation() {
