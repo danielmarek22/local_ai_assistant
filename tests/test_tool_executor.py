@@ -1,6 +1,6 @@
 import unittest
 
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import AssistantStateEvent
 from app.services.tool_executor import ToolExecutor
@@ -32,7 +32,7 @@ class FakeTool:
 class ToolExecutorTests(unittest.TestCase):
     def test_unregistered_tool_returns_none_without_events(self):
         executor = ToolExecutor(tools={})
-        action = Action(type="web_search", payload={"query": "q"})
+        action = Action(type=ActionType.WEB_SEARCH, payload={"query": "q"})
 
         events, result = consume_generator(executor.execute(action, "user text"))
 
@@ -42,7 +42,7 @@ class ToolExecutorTests(unittest.TestCase):
     def test_unavailable_tool_returns_none_without_events(self):
         tool = FakeTool(is_available=False)
         executor = ToolExecutor(tools={"web_search": tool})
-        action = Action(type="web_search", payload={"query": "q"})
+        action = Action(type=ActionType.WEB_SEARCH, payload={"query": "q"})
 
         events, result = consume_generator(executor.execute(action, "user text"))
 
@@ -52,7 +52,7 @@ class ToolExecutorTests(unittest.TestCase):
     def test_available_tool_yields_search_state_and_returns_context(self):
         tool = FakeTool(is_available=True, result="context")
         executor = ToolExecutor(tools={"web_search": tool})
-        action = Action(type="web_search", payload={"query": "my query"})
+        action = Action(type=ActionType.WEB_SEARCH, payload={"query": "my query"})
 
         events, result = consume_generator(executor.execute(action, "user text"))
 
@@ -65,7 +65,7 @@ class ToolExecutorTests(unittest.TestCase):
     def test_uses_user_text_when_query_missing(self):
         tool = FakeTool(is_available=True, result="context")
         executor = ToolExecutor(tools={"web_search": tool})
-        action = Action(type="web_search", payload={})
+        action = Action(type=ActionType.WEB_SEARCH, payload={})
 
         _events, _result = consume_generator(executor.execute(action, "fallback query"))
 
@@ -74,7 +74,7 @@ class ToolExecutorTests(unittest.TestCase):
     def test_tool_error_returns_none_after_search_state(self):
         tool = FakeTool(is_available=True, raises=True)
         executor = ToolExecutor(tools={"web_search": tool})
-        action = Action(type="web_search", payload={"query": "q"})
+        action = Action(type=ActionType.WEB_SEARCH, payload={"query": "q"})
 
         events, result = consume_generator(executor.execute(action, "user text"))
 

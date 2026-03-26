@@ -61,7 +61,9 @@ class Planner:
                 ),
                 Action(type=ActionType.RESPOND),
             ]
-            # ... returns plan ...
+            
+            # Put this return statement back in!
+            return Plan(actions=actions)
 
         # --------------------------------------------------
         # 2. Web search intent

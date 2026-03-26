@@ -64,8 +64,9 @@ class Database:
         CREATE TABLE IF NOT EXISTS conversation_summary (
             session_id TEXT PRIMARY KEY,
             summary TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
+            last_turn_count INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
         """)
 
         self.conn.commit()

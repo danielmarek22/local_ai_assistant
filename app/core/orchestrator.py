@@ -15,7 +15,7 @@ from app.core.actions import Action, ActionType
 from app.core.plan import Plan
 from app.perception.state import ImageAttachment, PerceptionState
 from app.services.tool_executor import ToolExecutor
-
+from app.perception.keys import PerceptionKey
 
 logger = logging.getLogger("orchestrator")
 
@@ -110,7 +110,7 @@ class Orchestrator:
         # 1. Update perception with raw input
         # --------------------------------------------------------
         self.perception.update(
-            "user.input",
+            PerceptionKey.USER_INPUT,
             {
                 "text": user_text,
                 "source": "keyboard",
@@ -118,7 +118,6 @@ class Orchestrator:
                 "attachments": [attachment.to_perception_payload() for attachment in attachments],
             },
         )
-
         # --------------------------------------------------------
         # 2. Vector Retrieval (Semantic + Episodic)
         # --------------------------------------------------------
@@ -144,10 +143,9 @@ class Orchestrator:
 
         # Inject memories into perception so the Planner can read them
         if memory_context:
-            self.perception.update("memory.retrieved", {"value": f"\n{memory_context}\n"})
+            self.perception.update(PerceptionKey.MEMORY_RETRIEVED, {"value": f"\n{memory_context}\n"})
         else:
-            self.perception.update("memory.retrieved", {"value": "No relevant past memories found."})
-
+            self.perception.update(PerceptionKey.MEMORY_RETRIEVED, {"value": "No relevant past memories found."})
         # --------------------------------------------------------
         # 3. Persist user input (to SQLite + Vector Store)
         # --------------------------------------------------------

@@ -286,9 +286,10 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     summary = app.state.orchestrator.summary_store.get(session_id)
+    summary_text = summary[0] if summary else None
     return {
         "session_id": session_id,
-        "summary": summary,
+        "summary": summary_text,
         "messages": [
             {
                 "role": row["role"],

@@ -114,7 +114,8 @@ class ServerSessionTests(unittest.TestCase):
         self.history.add("session-a", "assistant", "Reply A")
         self.history.add("session-b", "user", "Second chat")
         self.history.add("session-b", "assistant", "Reply B")
-        self.summary_store.set("session-b", "Summary B")
+
+        self.summary_store.set("session-b", "Summary B", 2)
 
         self.fake_orchestrator = FakeOrchestrator(
             history_store=self.history,

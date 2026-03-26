@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import threading
 import time
 
+from app.perception.keys import PerceptionKey
 
 @dataclass(frozen=True)
 class PerceptionEntry:
@@ -145,20 +146,22 @@ class PerceptionState:
 
     def __init__(self):
         self._lock = threading.Lock()
+        # Storing strings internally keeps the snapshot() JSON-friendly
         self._entries: Dict[str, PerceptionEntry] = {}
 
-    def update(self, key: str, value: Any) -> None:
+    def update(self, key: PerceptionKey, value: Any) -> None:
         """Update or insert a perception signal."""
         with self._lock:
-            self._entries[key] = PerceptionEntry(
+            # Use .value to store it as a raw string
+            self._entries[key.value] = PerceptionEntry(
                 value=value,
                 timestamp=time.time(),
             )
 
-    def get(self, key: str) -> Optional[PerceptionEntry]:
+    def get(self, key: PerceptionKey) -> Optional[PerceptionEntry]:
         """Read a single perception entry."""
         with self._lock:
-            return self._entries.get(key)
+            return self._entries.get(key.value)
 
     def snapshot(self) -> Dict[str, PerceptionEntry]:
         """

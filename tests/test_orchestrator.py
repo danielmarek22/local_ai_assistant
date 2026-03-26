@@ -1,6 +1,6 @@
 import unittest
 
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
@@ -10,7 +10,7 @@ from app.core.events import (
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
 from app.perception.state import ImageAttachment
-
+from app.perception.keys import PerceptionKey
 
 def consume_generator(gen):
     events = []
@@ -170,7 +170,7 @@ class OrchestratorTests(unittest.TestCase):
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
     def test_turn_flow_injects_memory_and_tools_into_context(self):
-        plan = Plan(actions=[Action(type="web_search", payload={"query": "python"}), Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
         orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
         list(orch.handle_user_input("hello"))
@@ -189,7 +189,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("tool info", injected_context)
 
     def test_summarization_runs_when_threshold_reached(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -214,7 +214,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(summary_store.saved[0][1], "summary")
 
     def test_summarization_updates_when_summary_exists(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -242,7 +242,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(summary_store.saved), 1)
 
     def test_set_session_updates_session_id_and_resets_perception(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -256,7 +256,8 @@ class OrchestratorTests(unittest.TestCase):
         ) = self._build_orchestrator(plan=plan, summary_trigger=999)
 
         original_perception = orch.perception
-        orch.perception.update("user.input", {"text": "hello"})
+
+        orch.perception.update(PerceptionKey.USER_INPUT, {"text": "hello"})
 
         orch.set_session("session-2")
 
@@ -265,7 +266,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(orch.perception.snapshot(), {})
 
     def test_response_expression_tag_is_extracted_from_stream(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -295,7 +296,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_can_switch_expressions_multiple_times(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -333,7 +334,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "That worked. Wait, even better. All set.")
 
     def test_response_expression_tag_allows_internal_spacing(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -363,7 +364,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_expression_alias_tag_is_supported(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -393,7 +394,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Nice.")
 
     def test_image_only_turn_updates_perception_history_and_context(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -427,7 +428,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
 
     def test_turn_can_override_reasoning_for_single_message(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             llm,
