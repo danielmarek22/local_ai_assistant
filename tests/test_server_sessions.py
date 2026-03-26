@@ -1,12 +1,16 @@
 import importlib
 import json
+import shutil
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
+from app.perception.state import ImageAttachment
 from app.storage.database import Database
 
 
@@ -98,9 +102,12 @@ class FakeWebSocket:
 
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
         self.db = Database(path=":memory:")
-        self.vector_store = FakeVectorStore() # NEW
-        self.history = ChatHistoryStore(self.db, self.vector_store) # UPDATED
+        self.vector_store = FakeVectorStore()
+        self.history = ChatHistoryStore(self.db, self.vector_store, uploads_root=self.temp_dir.name)
         self.summary_store = SummaryStore(self.db)
 
         self.history.add("session-a", "user", "First chat")
@@ -140,7 +147,47 @@ class ServerSessionTests(unittest.TestCase):
             ],
         )
 
+    def test_get_session_includes_stored_image_attachments(self):
+        self.history.add(
+            "session-images",
+            "user",
+            "Screenshot here",
+            attachments=[
+                ImageAttachment(
+                    name="screen.png",
+                    mime_type="image/png",
+                    base64_data="aGVsbG8=",
+                    size_bytes=5,
+                )
+            ],
+        )
+
+        payload = server_module.asyncio.run(server_module.get_session("session-images"))
+
+        self.assertEqual(len(payload["messages"]), 1)
+        attachments = payload["messages"][0]["attachments"]
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["name"], "screen.png")
+        self.assertEqual(attachments[0]["mime_type"], "image/png")
+        self.assertTrue(attachments[0]["url"].startswith("/static/"))
+
     def test_delete_session_removes_rows_and_resets_active_session(self):
+        message_id = self.history.add(
+            "session-b",
+            "user",
+            "Attached image",
+            attachments=[
+                ImageAttachment(
+                    name="screen.png",
+                    mime_type="image/png",
+                    base64_data="aGVsbG8=",
+                    size_bytes=5,
+                )
+            ],
+        )
+        attachment_dir = Path(self.temp_dir.name) / "session-b" / str(message_id)
+        self.assertTrue(attachment_dir.exists())
+
         response = server_module.asyncio.run(server_module.delete_session("session-b"))
 
         self.assertEqual(response["deleted"], True)
@@ -152,6 +199,7 @@ class ServerSessionTests(unittest.TestCase):
         )
         self.assertEqual(len(self.fake_orchestrator.session_switches), 1)
         self.assertNotEqual(self.fake_orchestrator.session_switches[0], "session-b")
+        self.assertFalse(attachment_dir.exists())
 
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):
         session_id = server_module.resolve_session_id(

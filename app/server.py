@@ -294,6 +294,7 @@ async def get_session(session_id: str):
                 "role": row["role"],
                 "content": row["content"],
                 "timestamp": row["timestamp"],
+                "attachments": [attachment.to_api_payload() for attachment in row.get("attachments", [])],
             }
             for row in rows
         ],

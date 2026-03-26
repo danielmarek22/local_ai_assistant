@@ -8,6 +8,7 @@ Persistent storage abstraction.
 - Initialize and migrate core schema tables
 - Expose the shared `Database` object used by store classes
 - Expose the local vector database used for semantic retrieval
+- Support persisted chat attachments and their retrieval metadata
 
 ## Current Communication Pattern
 
@@ -16,6 +17,7 @@ Persistent storage abstraction.
 - `app/memory/chat_history.py`, `app/memory/memory_store.py`, and
   `app/memory/summary_store.py` use `Database.conn` directly to run SQL.
 - `app/memory/chat_history.py` and `app/memory/memory_store.py` also write to Chroma collections.
+- Chat attachments are stored as files on disk, while their metadata lives in SQLite.
 - Higher-level components (orchestrator, services, planners) should call these
   stores rather than executing SQL directly.
 
@@ -23,11 +25,14 @@ Persistent storage abstraction.
 
 - SQLite
   - `chat_history`
+  - `chat_attachments`
   - `memory`
   - `conversation_summary`
 - ChromaDB
   - `semantic_memory`
   - `episodic_memory`
+    - conversation turns
+    - image attachment summaries for long-term retrieval
 
 This is a pragmatic local-first setup; a stricter repository interface can be
 introduced later if backend portability becomes a requirement.

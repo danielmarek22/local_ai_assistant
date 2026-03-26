@@ -15,9 +15,11 @@ Memory should be treated as an *active system*, not just a database.
 
 - `ChatHistoryStore`
   - stores every message in SQLite
-  - stores an embedded copy in Chroma's `episodic_memory`
+  - stores attachment metadata in SQLite and image bytes on disk under `static/uploads/`
+  - stores embedded message copies in Chroma's `episodic_memory`
+  - stores one retrieval-oriented summary per saved image in `episodic_memory`
   - retrieves recent turns from SQLite
-  - retrieves semantically similar past-session messages from Chroma
+  - retrieves semantically similar past-session messages and stored image summaries from Chroma
 - `MemoryStore`
   - stores long-term fact-like memory in SQLite
   - stores embeddings in Chroma's `semantic_memory`
@@ -34,7 +36,9 @@ Memory should be treated as an *active system*, not just a database.
 3. Episodic memory is queried for similar messages from past sessions.
 4. Retrieved memory is injected into perception for planning and into prompt context for response generation.
 5. The current user/assistant messages are persisted to both chat history layers.
-6. If enough turns have accumulated and no summary exists yet, the session is summarized.
+6. If the user attached images, those files are stored, summarized once for long-term retrieval, and linked back to the chat message.
+7. Recent user turns with images can be replayed into the multimodal prompt from stored attachments.
+8. If enough turns have accumulated and no summary exists yet, the session is summarized.
 
 ## Data Access
 
@@ -42,3 +46,12 @@ Memory store classes execute SQL through the shared SQLite connection provided
 by `app/storage/database.py` and use `app/storage/vector_store.py` for Chroma
 collections. This is a pragmatic hybrid design rather than a strict repository
 layer.
+
+## Deletion Semantics
+
+Deleting a session removes:
+
+- chat rows from SQLite
+- attachment rows from SQLite
+- uploaded image files on disk
+- episodic vector entries for both text turns and image summaries

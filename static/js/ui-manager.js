@@ -412,9 +412,11 @@ export class UIManager {
 
         if (normalizedAttachments.length) {
             msgDiv.dataset.attachments = JSON.stringify(normalizedAttachments.map((attachment) => ({
+                id: attachment.id,
                 name: attachment.name,
                 mimeType: attachment.mimeType,
                 data: attachment.data,
+                url: attachment.url,
                 size: attachment.size,
             })));
         } else {
@@ -472,7 +474,8 @@ export class UIManager {
         }
 
         const data = typeof attachment.data === 'string' ? attachment.data.trim() : '';
-        if (!data) {
+        const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
+        if (!data && !url) {
             return null;
         }
 
@@ -495,7 +498,8 @@ export class UIManager {
             id: typeof attachment.id === 'string' && attachment.id ? attachment.id : this.createAttachmentId(),
             name: typeof attachment.name === 'string' && attachment.name.trim() ? attachment.name.trim() : 'image',
             mimeType,
-            data,
+            data: data || null,
+            url: url || null,
             size,
         };
     }
@@ -529,6 +533,10 @@ export class UIManager {
     }
 
     buildAttachmentSrc(attachment) {
+        if (attachment.url) {
+            return attachment.url;
+        }
+
         return `data:${attachment.mimeType};base64,${attachment.data}`;
     }
 
@@ -608,6 +616,7 @@ export class UIManager {
                 name: attachment.name,
                 mimeType: attachment.mimeType,
                 data: attachment.data,
+                url: attachment.url,
                 size: attachment.size,
             }));
         } catch (error) {
@@ -637,7 +646,7 @@ export class UIManager {
         const messages = sessionData.messages.map((message) => ({
             sender: message.role === 'assistant' ? 'astra' : message.role,
             text: message.content,
-            attachments: [],
+            attachments: message.attachments || [],
         }));
 
         this.currentAiMessageDiv = null;
@@ -767,6 +776,7 @@ export class UIManager {
                 name: attachment.name,
                 mimeType: attachment.mimeType,
                 data: attachment.data,
+                url: attachment.url,
                 size: attachment.size,
             }));
             if (!text && attachments.length === 0) return;

@@ -46,8 +46,8 @@ class FakeHistoryStore:
         self.records = []
         self.recent_rows = []
 
-    def add(self, session_id: str, role: str, content: str):
-        self.records.append((session_id, role, content))
+    def add(self, session_id: str, role: str, content: str, attachments=None):
+        self.records.append((session_id, role, content, attachments or []))
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
@@ -416,6 +416,7 @@ class OrchestratorTests(unittest.TestCase):
             "clipboard.png",
         )
         self.assertEqual(history.records[0][2], "[User attached 1 image]")
+        self.assertEqual(history.records[0][3], [attachment])
         self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
 
     def test_turn_can_override_reasoning_for_single_message(self):

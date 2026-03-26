@@ -148,7 +148,7 @@ class Orchestrator:
         # --------------------------------------------------------
         # 3. Persist user input (to SQLite + Vector Store)
         # --------------------------------------------------------
-        self.history.add(self.session_id, "user", history_text)
+        self.history.add(self.session_id, "user", history_text, attachments=attachments)
         logger.debug("[%s] User input persisted to history", self.session_id)
 
         # --------------------------------------------------------

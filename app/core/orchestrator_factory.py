@@ -9,6 +9,7 @@ from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
 from app.services.context_builder import ContextBuilder
+from app.services.image_summarizer import ImageSummarizer
 from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
@@ -92,11 +93,14 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing summarizers")
 
     history_summarizer = HistorySummarizer(llm)
+    image_summarizer = ImageSummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
+    history_store.image_summarizer = image_summarizer
 
     logger.debug(
-        "Summarizers ready: history=%s search=%s",
+        "Summarizers ready: history=%s image=%s search=%s",
         history_summarizer.__class__.__name__,
+        image_summarizer.__class__.__name__,
         search_summarizer.__class__.__name__,
     )
 

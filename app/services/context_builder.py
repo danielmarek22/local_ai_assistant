@@ -93,13 +93,13 @@ class ContextBuilder:
             })
 
         history_limit = 2 if summary else self.history_limit
-
         history = self.history_store.get_recent(
             session_id=session_id,
             limit=history_limit,
         )
 
         seen = set()
+        current_user_key = self._build_seen_key("user", user_text.strip(), attachments)
 
         for row in history:
             role = row["role"]
@@ -110,19 +110,24 @@ class ContextBuilder:
             if not content:
                 continue
 
-            key = (role, content)
+            row_attachments = self._normalize_history_attachments(row.get("attachments", []))
+            key = self._build_seen_key(role, content, row_attachments)
             if key in seen:
                 continue
 
-            if role == "user" and content == user_text.strip():
+            if role == "user" and key == current_user_key:
                 continue
 
             seen.add(key)
 
-            messages.append({
+            message = {
                 "role": role,
                 "content": content,
-            })
+            }
+            if role == "user" and row_attachments:
+                message["images"] = [attachment.to_llm_image() for attachment in row_attachments]
+
+            messages.append(message)
 
         user_message = {
             "role": "user",
@@ -140,3 +145,39 @@ class ContextBuilder:
             len(attachments),
         )
         return messages
+
+    def _normalize_history_attachments(
+        self,
+        attachments: list[ImageAttachment] | list[dict],
+    ) -> list[ImageAttachment]:
+        normalized: list[ImageAttachment] = []
+        for attachment in attachments or []:
+            if isinstance(attachment, ImageAttachment):
+                normalized.append(attachment)
+                continue
+
+            if isinstance(attachment, dict):
+                if attachment.get("data") or attachment.get("base64_data"):
+                    normalized.append(ImageAttachment.from_payload(attachment))
+                    continue
+                if attachment.get("storage_path") or attachment.get("url"):
+                    normalized.append(ImageAttachment.from_stored_record(attachment))
+        return normalized
+
+    def _build_seen_key(
+        self,
+        role: str,
+        content: str,
+        attachments: list[ImageAttachment],
+    ) -> tuple:
+        attachment_key = tuple(
+            (
+                attachment.attachment_id,
+                attachment.sha256,
+                attachment.storage_path,
+                attachment.url,
+                attachment.name,
+            )
+            for attachment in attachments
+        )
+        return role, content, attachment_key

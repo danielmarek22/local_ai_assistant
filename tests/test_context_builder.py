@@ -103,6 +103,42 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "What is in this image?")
         self.assertEqual(messages[-1]["images"], ["aGVsbG8="])
 
+    def test_build_replays_recent_history_images_for_user_messages(self):
+        history = FakeHistoryStore(
+            [
+                {
+                    "role": "user",
+                    "content": "Earlier screenshot",
+                    "attachments": [
+                        ImageAttachment(
+                            name="earlier.png",
+                            mime_type="image/png",
+                            base64_data="aGVsbG8=",
+                            size_bytes=5,
+                        )
+                    ],
+                }
+            ]
+        )
+        summary = FakeSummaryStore(None)
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            user_context={},
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="Can you compare it?",
+        )
+
+        self.assertEqual(messages[-2]["role"], "user")
+        self.assertEqual(messages[-2]["content"], "Earlier screenshot")
+        self.assertEqual(messages[-2]["images"], ["aGVsbG8="])
+
     def test_build_includes_configured_user_context(self):
         history = FakeHistoryStore([])
         summary = FakeSummaryStore(None)
