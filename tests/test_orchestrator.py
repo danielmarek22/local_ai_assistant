@@ -91,14 +91,18 @@ class FakeMemoryStore:
 
 class FakeSummaryStore:
     def __init__(self, existing=None):
-        self.existing = existing
+        # If the test passes in an existing summary string, 
+        # package it into the tuple format the orchestrator now expects: (summary, count)
+        self.existing = (existing, 0) if existing is not None else None
         self.saved = []
 
     def get(self, _session_id: str):
         return self.existing
 
-    def set(self, session_id: str, summary: str):
-        self.saved.append((session_id, summary))
+    # Add the new last_turn_count parameter
+    def set(self, session_id: str, summary: str, last_turn_count: int):
+        # Save the count as well so we can assert against it in tests
+        self.saved.append((session_id, summary, last_turn_count))
 
 
 class FakeSummarizer:
@@ -209,7 +213,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(summary_store.saved), 1)
         self.assertEqual(summary_store.saved[0][1], "summary")
 
-    def test_summarization_skips_when_summary_exists(self):
+    def test_summarization_updates_when_summary_exists(self):
         plan = Plan(actions=[Action(type="respond")])
         (
             orch,
@@ -229,10 +233,13 @@ class OrchestratorTests(unittest.TestCase):
 
         history.recent_rows = [{"role": "user", "content": "u1"}]
 
+        # This will add another message to history, bringing the total to at least 2.
+        # last_count is 0. Current count is 2. (2 - 0) >= 1, so it triggers.
         list(orch.handle_user_input("hello"))
 
-        self.assertEqual(len(summarizer.calls), 0)
-        self.assertEqual(len(summary_store.saved), 0)
+        # Assert that it DID summarize this time
+        self.assertEqual(len(summarizer.calls), 1)
+        self.assertEqual(len(summary_store.saved), 1)
 
     def test_set_session_updates_session_id_and_resets_perception(self):
         plan = Plan(actions=[Action(type="respond")])

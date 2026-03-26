@@ -56,6 +56,9 @@ class Orchestrator:
 
         self.perception = PerceptionState()
 
+        # Initialize our dictionary to track summarized turns per session
+        self._last_summary_counts: Dict[str, int] = {}
+
         self.session_id = str(uuid.uuid4())[:8]
 
         logger.info(
@@ -448,31 +451,47 @@ class Orchestrator:
     def _maybe_summarize(self):
         logger.debug("[%s] Checking summarization conditions", self.session_id)
 
-        if self.summary_store.get(self.session_id):
-            logger.debug("[%s] Summary already exists, skipping", self.session_id)
-            return
+        # 1. Fetch the existing summary and turn count directly from the DB
+        summary_data = self.summary_store.get(self.session_id)
+        if summary_data:
+            existing_summary, last_count = summary_data
+        else:
+            existing_summary, last_count = None, 0
 
+        # 2. Fetch history
         history = self.history.get_recent(
             session_id=self.session_id,
-            limit=100,
+            limit=1000, 
         )
+        current_count = len(history)
 
-        if len(history) < self.summary_trigger:
+        # 3. Check if we've hit the trigger threshold
+        if (current_count - last_count) < self.summary_trigger:
             return
 
         logger.info("[%s] Summarizing conversation history", self.session_id)
+        
+        summary_input = []
+        if existing_summary:
+            summary_input.append({
+                "role": "system",
+                "content": f"Here is the current summary of the conversation so far. Update it using the new messages below:\n\n{existing_summary}"
+            })
 
-        summary_input = [
+        # 4. Only append the NEW messages
+        summary_input.extend([
             {"role": row["role"], "content": row["content"]}
-            for row in history
-        ]
+            for row in history[last_count:] 
+        ])
 
+        # 5. Generate the new summary
         try:
             summary = self.summarizer.summarize(summary_input)
         except Exception:
             logger.exception("[%s] Summarization failed", self.session_id)
             return
 
-        self.summary_store.set(self.session_id, summary)
+        # 6. Save the new summary AND the current count back to the DB
+        self.summary_store.set(self.session_id, summary, current_count)
 
         logger.info("[%s] History summarized (%d chars)", self.session_id, len(summary))
