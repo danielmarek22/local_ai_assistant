@@ -6,14 +6,14 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel, ValidationError, model_validator
 
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.plan import Plan
 
 logger = logging.getLogger("llm_planner")
 
 
 class PlannerActionSpec(BaseModel):
-    type: Literal["web_search", "write_memory", "respond"]
+    type: ActionType
     query: Optional[str] = None
     content: Optional[str] = None
 
@@ -22,19 +22,19 @@ class PlannerActionSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_fields_for_type(self):
-        if self.type == "web_search":
+        if self.type == ActionType.WEB_SEARCH:
             if not self.query:
                 raise ValueError("web_search requires 'query'")
             if self.content is not None:
                 raise ValueError("web_search forbids 'content'")
             
-        elif self.type == "write_memory":
+        elif self.type == ActionType.WRITE_MEMORY:
             if not self.content:
                 raise ValueError("write_memory requires 'content'")
             if self.query is not None:
                 raise ValueError("write_memory forbids 'query'")
             
-        elif self.type == "respond":
+        elif self.type == ActionType.RESPOND:
             if self.query is not None or self.content is not None:
                 raise ValueError("respond forbids 'query' and 'content'")
 
@@ -102,12 +102,12 @@ class LLMPlanner:
             actions = []
 
             for item in parsed.actions:
-                if item.type == "web_search":
-                    actions.append(Action(type="web_search", payload={"query": item.query}))
-                elif item.type == "write_memory":
-                    actions.append(Action(type="write_memory", payload={"content": item.content}))
-                elif item.type == "respond":
-                    actions.append(Action(type="respond"))
+                if item.type == ActionType.WEB_SEARCH:
+                    actions.append(Action(type=ActionType.WEB_SEARCH, payload={"query": item.query}))
+                elif item.type == ActionType.WRITE_MEMORY:
+                    actions.append(Action(type=ActionType.WRITE_MEMORY, payload={"content": item.content}))
+                elif item.type == ActionType.RESPOND:
+                    actions.append(Action(type=ActionType.RESPOND))
 
             if actions:
                 logger.info(
@@ -127,7 +127,7 @@ class LLMPlanner:
     # ============================================================
 
     def _fallback_plan(self) -> Plan:
-        return Plan(actions=[Action(type="respond")])
+        return Plan(actions=[Action(type=ActionType.RESPOND)])
 
     def _call_llm_with_timeout(self, prompt: list[dict]) -> Optional[str]:
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)

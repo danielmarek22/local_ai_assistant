@@ -11,7 +11,7 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.plan import Plan
 from app.perception.state import ImageAttachment, PerceptionState
 from app.services.tool_executor import ToolExecutor
@@ -168,20 +168,21 @@ class Orchestrator:
         # 5. Execute actions
         # --------------------------------------------------------
         for action in plan.actions:
-            logger.info("[%s] Executing action '%s'", self.session_id, action.type)
+            logger.info("[%s] Executing action '%s'", self.session_id, action.type.value)
 
-            if action.type == "web_search":
+            if action.type == ActionType.WEB_SEARCH:
                 tool_context = yield from self.tool_executor.execute(action, user_text)
 
-            elif action.type == "write_memory":
+            elif action.type == ActionType.WRITE_MEMORY:
                 self._run_memory_action(action)
 
-            elif action.type == "respond":
+            elif action.type == ActionType.RESPOND:
                 logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
                 break
 
             else:
-                logger.warning("[%s] Unknown action '%s', skipping", self.session_id, action.type)
+                # Fail fast and loud instead of dropping it silently!
+                raise ValueError(f"Orchestrator received unhandled action type: {action.type}")
 
         # --------------------------------------------------------
         # 6. Context construction (Merge Memory & Tools)
