@@ -23,14 +23,18 @@ class SearchResultSummarizer:
             }
         ]
 
-        # Feed only structured snippets
-        for r in results:
-            text = r.content.strip()
-            if text:
-                prompt.append({
-                    "role": "user",
-                    "content": text
-                })
+        # Format and concatenate all result snippets into one user message
+        formatted_snippets = [
+            f"--- Result {i+1} ---\n{r.content.strip()}" 
+            for i, r in enumerate(results) if r.content.strip()
+        ]
+        
+        if formatted_snippets:
+            combined_content = "Search Results:\n\n" + "\n\n".join(formatted_snippets)
+            prompt.append({
+                "role": "user",
+                "content": combined_content
+            })
 
         buffer = ""
         for chunk in self.llm.stream_chat(prompt):
