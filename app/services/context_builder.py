@@ -31,7 +31,8 @@ class ContextBuilder:
         self,
         session_id: str,
         user_text: str,
-        injected_context: str | None = None,
+        memory_context: str | None = None,
+        tool_context: str | None = None,
         attachments: list[ImageAttachment] | None = None,
     ) -> list[dict]:
         logger.info("[%s] Building context", session_id)
@@ -48,14 +49,20 @@ class ContextBuilder:
             "role": "system",
             "content": self._build_system_message(
                 now_local_iso=now_local.isoformat(),
-                injected_context=injected_context,
+                memory_context=memory_context,
+                tool_context=tool_context,
                 summary=summary,
             ),
         })
         logger.debug("[%s] Added consolidated system context block", session_id)
 
-        if injected_context:
-            logger.info("[%s] Added injected context (len=%d)", session_id, len(injected_context))
+        if memory_context or tool_context:
+            logger.info(
+                "[%s] Added injected context (memory=%s, tool=%s)", 
+                session_id, 
+                bool(memory_context), 
+                bool(tool_context)
+            )
 
         history_limit = 2 if summary else self.history_limit
         history = self.history_store.get_recent(
@@ -114,7 +121,8 @@ class ContextBuilder:
     def _build_system_message(
         self,
         now_local_iso: str,
-        injected_context: str | None,
+        memory_context: str | None,
+        tool_context: str | None,
         summary: str | None,
     ) -> str:
         sections = [
@@ -126,7 +134,15 @@ class ContextBuilder:
         if user_context_section:
             sections.append(user_context_section)
 
-        if injected_context:
+        # Assemble the background context internally
+        combined_context_parts = []
+        if memory_context:
+            combined_context_parts.append(f"--- RETRIEVED MEMORY ---\n{memory_context}")
+        if tool_context:
+            combined_context_parts.append(f"--- TOOL RESULTS ---\n{tool_context}")
+
+        if combined_context_parts:
+            injected_context = "\n\n".join(combined_context_parts)
             sections.append(
                 "BACKGROUND CONTEXT (Retrieved Memories & Tool Results):\n"
                 f"{injected_context}\n\n"

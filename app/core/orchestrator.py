@@ -183,19 +183,14 @@ class Orchestrator:
                 raise ValueError(f"Orchestrator received unhandled action type: {action.type}")
 
         # --------------------------------------------------------
-        # 6. Context construction (Merge Memory & Tools)
+        # 6. Context construction
         # --------------------------------------------------------
-        # We combine retrieved memory and tool outputs so the context_builder 
-        # doesn't need its signature changed.
-        combined_context_parts = []
-        if memory_context:
-            combined_context_parts.append(f"--- RETRIEVED MEMORY ---\n{memory_context}")
-        if tool_context:
-            combined_context_parts.append(f"--- TOOL RESULTS ---\n{tool_context}")
-
-        final_injected_context = "\n\n".join(combined_context_parts) if combined_context_parts else None
-
-        messages = self._build_context(user_text, final_injected_context, attachments)
+        messages = self._build_context(
+            user_text=user_text, 
+            memory_context=memory_context, 
+            tool_context=tool_context, 
+            attachments=attachments
+        )
 
         # --------------------------------------------------------
         # 7. LLM streaming response
@@ -274,7 +269,8 @@ class Orchestrator:
     def _build_context(
         self,
         user_text: str,
-        tool_context: Optional[str],
+        memory_context: Optional[str],  # <--- NEW
+        tool_context: Optional[str],    # <--- NEW
         attachments: list[ImageAttachment] | None = None,
     ):
         logger.info("[%s] Building context", self.session_id)
@@ -282,18 +278,20 @@ class Orchestrator:
         messages = self.context_builder.build(
             session_id=self.session_id,
             user_text=user_text,
-            injected_context=tool_context,
+            memory_context=memory_context,  # <--- NEW
+            tool_context=tool_context,      # <--- NEW
             attachments=attachments or [],
         )
 
         logger.debug(
-            "[%s] Context built (messages=%d, tool_context=%s)",
+            "[%s] Context built (messages=%d, memory=%s, tools=%s)",
             self.session_id,
             len(messages),
+            bool(memory_context),
             bool(tool_context),
         )
         return messages
-
+    
     def _build_retrieval_text(
         self,
         user_text: str,

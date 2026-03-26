@@ -24,7 +24,7 @@ class FakeSummaryStore:
 
 
 class ContextBuilderTests(unittest.TestCase):
-    def test_build_includes_system_history_and_injected_context(self):
+    def test_build_includes_system_history_and_background_context(self):
         history = FakeHistoryStore(
             [
                 {"role": "assistant", "content": "Older assistant reply"},
@@ -34,7 +34,6 @@ class ContextBuilderTests(unittest.TestCase):
         )
         summary = FakeSummaryStore("Conversation summary.")
 
-        # memory_store and memory_limit removed from instantiation
         builder = ContextBuilder(
             system_prompt="System prompt",
             user_context={},
@@ -46,7 +45,8 @@ class ContextBuilderTests(unittest.TestCase):
         messages = builder.build(
             session_id="abc123",
             user_text="Current question",
-            injected_context="Some retrieved facts from VectorDB",
+            memory_context="Some retrieved facts from VectorDB",
+            tool_context="Some tool results",
         )
 
         system_messages = [m for m in messages if m["role"] == "system"]
@@ -67,8 +67,13 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIsNotNone(datetime_line)
         self.assertIsNotNone(datetime.fromisoformat(datetime_line.split(": ", 1)[1]))
 
+        # Verify the new structured background context
         self.assertIn("BACKGROUND CONTEXT (Retrieved Memories & Tool Results):", system_content)
+        self.assertIn("--- RETRIEVED MEMORY ---", system_content)
         self.assertIn("Some retrieved facts from VectorDB", system_content)
+        self.assertIn("--- TOOL RESULTS ---", system_content)
+        self.assertIn("Some tool results", system_content)
+        
         self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
 
         self.assertEqual(messages[-1], {"role": "user", "content": "Current question"})
@@ -163,7 +168,7 @@ class ContextBuilderTests(unittest.TestCase):
         messages = builder.build(
             session_id="abc123",
             user_text="Hello",
-            injected_context=None,
+            # injected_context removed from here completely
         )
 
         system_messages = [m for m in messages if m["role"] == "system"]

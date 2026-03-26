@@ -61,10 +61,15 @@ class FakeContextBuilder:
     def __init__(self):
         self.calls = []
 
-    def build(self, session_id: str, user_text: str, tool_context=None):
-        self.calls.append((session_id, user_text, tool_context))
+    def build(self, session_id: str, user_text: str, memory_context=None, tool_context=None, **kwargs):
+        self.calls.append({
+            "session_id": session_id,
+            "user_text": user_text,
+            "memory_context": memory_context,
+            "tool_context": tool_context,
+            "attachments": kwargs.get("attachments", []),
+        })
         return [{"role": "user", "content": user_text}]
-
 
 class FakeLLM:
     def __init__(self, chunks):
@@ -128,20 +133,6 @@ class FakeMemoryPolicy:
         if not content:
             return None
         return FakeMemoryPolicyDecision(content=content)
-    
-class FakeContextBuilder:
-    def __init__(self):
-        self.calls = []
-
-    def build(self, session_id: str, user_text: str, injected_context=None, **kwargs):
-        self.calls.append({
-            "session_id": session_id,
-            "user_text": user_text,
-            "injected_context": injected_context,
-            "attachments": kwargs.get("attachments", []),
-        })
-        return [{"role": "user", "content": user_text}]
-
 
 class OrchestratorTests(unittest.TestCase):
     def _build_orchestrator(self, plan: Plan, llm_chunks=None, summary_existing=None, summary_trigger=10):
@@ -175,18 +166,19 @@ class OrchestratorTests(unittest.TestCase):
 
         list(orch.handle_user_input("hello"))
 
-    # 1. Verify perception was updated with retrieved memories BEFORE planner runs
+        # 1. Verify perception was updated with retrieved memories BEFORE planner runs
         perception_snapshot = planner.calls[0][1]
-        self.assertIn("memory.retrieved", perception_snapshot)
-        self.assertIn("User likes testing", perception_snapshot["memory.retrieved"].value["value"])
+        self.assertIn(PerceptionKey.MEMORY_RETRIEVED.value, perception_snapshot)
+        self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value].value["value"])
 
-        # 2. Verify ContextBuilder received BOTH memory and tool info in injected_context
-        injected_context = context_builder.calls[0]["injected_context"]
-        self.assertIn("RETRIEVED MEMORY", injected_context)
-        self.assertIn("User likes testing", injected_context)
-        self.assertIn("Past answer", injected_context)
-        self.assertIn("TOOL RESULTS", injected_context)
-        self.assertIn("tool info", injected_context)
+        # 2. Verify ContextBuilder received memory and tool info separately
+        mem_ctx = context_builder.calls[0]["memory_context"]
+        tool_ctx = context_builder.calls[0]["tool_context"]
+        
+        self.assertIn("User likes testing", mem_ctx)
+        self.assertIn("Past answer", mem_ctx)
+        
+        self.assertEqual("tool info", tool_ctx)
 
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
