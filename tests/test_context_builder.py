@@ -49,22 +49,27 @@ class ContextBuilderTests(unittest.TestCase):
             injected_context="Some retrieved facts from VectorDB",
         )
 
-        self.assertEqual(messages[0], {"role": "system", "content": "System prompt"})
-        system_contents = [m["content"] for m in messages if m["role"] == "system"]
-        
-        # Check datetime
+        system_messages = [m for m in messages if m["role"] == "system"]
+        self.assertEqual(len(system_messages), 1)
+
+        system_content = system_messages[0]["content"]
+        self.assertTrue(system_content.startswith("System prompt"))
+        self.assertIn("\n\n---\n\n", system_content)
+
         datetime_line = next(
-            (c for c in system_contents if c.startswith("Current system datetime (local): ")),
+            (
+                line
+                for line in system_content.splitlines()
+                if line.startswith("Current system datetime (local): ")
+            ),
             None,
         )
         self.assertIsNotNone(datetime_line)
         self.assertIsNotNone(datetime.fromisoformat(datetime_line.split(": ", 1)[1]))
-        
-        # Check injected context format
-        self.assertTrue(
-            any("BACKGROUND CONTEXT (Retrieved Memories & Tool Results):" in c for c in system_contents),
-        )
-        self.assertTrue(any("Some retrieved facts from VectorDB" in c for c in system_contents))
+
+        self.assertIn("BACKGROUND CONTEXT (Retrieved Memories & Tool Results):", system_content)
+        self.assertIn("Some retrieved facts from VectorDB", system_content)
+        self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
 
         self.assertEqual(messages[-1], {"role": "user", "content": "Current question"})
 
@@ -161,17 +166,13 @@ class ContextBuilderTests(unittest.TestCase):
             injected_context=None,
         )
 
-        user_context_message = next(
-            (
-                m["content"]
-                for m in messages
-                if m["role"] == "system"
-                and "User profile/context (configured):" in m["content"]
-            ),
-            "",
-        )
-        self.assertIn("- name: Bob", user_context_message)
-        self.assertIn("- preferences: concise answers", user_context_message)
+        system_messages = [m for m in messages if m["role"] == "system"]
+        self.assertEqual(len(system_messages), 1)
+
+        system_content = system_messages[0]["content"]
+        self.assertIn("User profile/context (configured):", system_content)
+        self.assertIn("- name: Bob", system_content)
+        self.assertIn("- preferences: concise answers", system_content)
 
 
 if __name__ == "__main__":

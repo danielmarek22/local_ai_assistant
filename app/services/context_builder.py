@@ -40,57 +40,22 @@ class ContextBuilder:
 
         messages: list[dict] = []
 
-        messages.append({
-            "role": "system",
-            "content": self.system_prompt,
-        })
-        logger.debug("[%s] Added base system prompt", session_id)
-
         now_local = datetime.now().astimezone()
-        messages.append({
-            "role": "system",
-            "content": f"Current system datetime (local): {now_local.isoformat()}",
-        })
-        logger.debug("[%s] Added current system datetime context", session_id)
-
-        if self.user_context:
-            user_lines = []
-            for key, value in self.user_context.items():
-                if value is None:
-                    continue
-                if isinstance(value, str) and not value.strip():
-                    continue
-                if isinstance(value, str) and "\n" in value:
-                    user_lines.append(f"- {key}:")
-                    user_lines.extend(f"  {line}" for line in value.splitlines() if line.strip())
-                else:
-                    user_lines.append(f"- {key}: {value}")
-
-            if user_lines:
-                messages.append({
-                    "role": "system",
-                    "content": "User profile/context (configured):\n" + "\n".join(user_lines),
-                })
-
-        if injected_context:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "BACKGROUND CONTEXT (Retrieved Memories & Tool Results):\n"
-                    f"{injected_context}\n\n"
-                    "Use the above background context to inform your response. "
-                    "Blend this information naturally into the conversation. "
-                    "Do not explicitly announce that you are reading from a database or memory log."
-                ),
-            })
-            logger.info("[%s] Added injected context (len=%d)", session_id, len(injected_context))
 
         summary = self.summary_store.get(session_id) if self.summary_store else None
-        if summary:
-            messages.append({
-                "role": "system",
-                "content": f"Summary of previous conversation:\n{summary}",
-            })
+
+        messages.append({
+            "role": "system",
+            "content": self._build_system_message(
+                now_local_iso=now_local.isoformat(),
+                injected_context=injected_context,
+                summary=summary,
+            ),
+        })
+        logger.debug("[%s] Added consolidated system context block", session_id)
+
+        if injected_context:
+            logger.info("[%s] Added injected context (len=%d)", session_id, len(injected_context))
 
         history_limit = 2 if summary else self.history_limit
         history = self.history_store.get_recent(
@@ -145,6 +110,56 @@ class ContextBuilder:
             len(attachments),
         )
         return messages
+
+    def _build_system_message(
+        self,
+        now_local_iso: str,
+        injected_context: str | None,
+        summary: str | None,
+    ) -> str:
+        sections = [
+            self.system_prompt,
+            f"Current system datetime (local): {now_local_iso}",
+        ]
+
+        user_context_section = self._build_user_context_section()
+        if user_context_section:
+            sections.append(user_context_section)
+
+        if injected_context:
+            sections.append(
+                "BACKGROUND CONTEXT (Retrieved Memories & Tool Results):\n"
+                f"{injected_context}\n\n"
+                "Use the above background context to inform your response. "
+                "Blend this information naturally into the conversation. "
+                "Do not explicitly announce that you are reading from a database or memory log."
+            )
+
+        if summary:
+            sections.append(f"Summary of previous conversation:\n{summary}")
+
+        return "\n\n---\n\n".join(section for section in sections if section)
+
+    def _build_user_context_section(self) -> str | None:
+        if not self.user_context:
+            return None
+
+        user_lines = []
+        for key, value in self.user_context.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, str) and "\n" in value:
+                user_lines.append(f"- {key}:")
+                user_lines.extend(f"  {line}" for line in value.splitlines() if line.strip())
+            else:
+                user_lines.append(f"- {key}: {value}")
+
+        if not user_lines:
+            return None
+
+        return "User profile/context (configured):\n" + "\n".join(user_lines)
 
     def _normalize_history_attachments(
         self,
