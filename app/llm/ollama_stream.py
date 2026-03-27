@@ -27,6 +27,9 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        
+        # Use a Session to reuse the TCP connection for faster, lower-latency requests
+        self.session = requests.Session()
 
     def chat(
         self,
@@ -79,27 +82,24 @@ class OllamaClient(LLMClient):
         # 1. Create a shallow copy to avoid mutating the class-level options
         request_options = self.options.copy()
             
-        # --- PREVIOUS: Map max_tokens from your YAML to Ollama's num_predict ---
+        # --- Map max_tokens from your YAML to Ollama's num_predict ---
         if "max_tokens" in request_options:
             request_options["num_predict"] = request_options.pop("max_tokens")
 
-        # --- NEW: Anti-Rambling Failsafes ---
-        
+        # --- Anti-Rambling Failsafes ---
         # Clean up OpenAI specific params so Ollama doesn't complain
         request_options.pop("frequency_penalty", None)
         request_options.pop("presence_penalty", None) 
         
         # Force a strict repetition penalty to break infinite loops.
-        # Ollama's default is often too weak. 1.15 to 1.2 is the sweet spot.
         if "repeat_penalty" not in request_options:
             request_options["repeat_penalty"] = 1.15
 
-        # Lower the temperature (Reasoning models ramble heavily if this is above 0.7)
+        # Lower the temperature
         if "temperature" not in request_options or request_options["temperature"] > 0.6:
-                request_options["temperature"] = 0.6
+            request_options["temperature"] = 0.6
         
-        # Ensure stop sequences exist just in case the Modelfile is missing them.
-        # This covers the Llama and Qwen bases that DeepSeek distills are built on.
+        # Ensure stop sequences exist
         existing_stops = request_options.get("stop", [])
         if isinstance(existing_stops, str):
             existing_stops = [existing_stops]
@@ -114,7 +114,7 @@ class OllamaClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": request_options,  # Pass the modified options here
+            "options": request_options,
             "think": think_value,
         }
 
@@ -136,6 +136,7 @@ class OllamaClient(LLMClient):
                 if not line:
                     continue
 
+                # Kept the decode step just to be safe with older JSON parsers
                 chunk = json.loads(line.decode("utf-8"))
                 message = chunk.get("message", {})
                 content = message.get("content")
@@ -185,7 +186,8 @@ class OllamaClient(LLMClient):
 
         for attempt in range(1, attempts + 1):
             try:
-                response = requests.post(
+                # Use the session for connection pooling
+                response = self.session.post(
                     self.url,
                     json=payload,
                     stream=stream,

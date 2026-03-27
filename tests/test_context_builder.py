@@ -157,7 +157,6 @@ class ContextBuilderTests(unittest.TestCase):
             system_prompt="System prompt",
             user_context={
                 "name": "Bob",
-                "timezone": "America/New_York",
                 "preferences": "concise answers",
             },
             history_store=history,

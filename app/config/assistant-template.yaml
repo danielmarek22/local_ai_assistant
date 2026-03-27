@@ -34,7 +34,6 @@ assistant:
 
 user_context:
   name: user
-  timezone: America/New_York
   preferences: concise, practical answers
   profile: |
     The user is a software engineer working on this local assistant project.
