@@ -43,7 +43,11 @@ class ContextBuilder:
 
         now_local = datetime.now().astimezone()
 
-        summary = self.summary_store.get(session_id) if self.summary_store else None
+        summary_record = self.summary_store.get(session_id) if self.summary_store else None
+        if isinstance(summary_record, tuple):
+            summary = summary_record[0]
+        else:
+            summary = summary_record
 
         messages.append({
             "role": "system",

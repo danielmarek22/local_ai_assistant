@@ -16,7 +16,10 @@ from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
+from app.services.memory_action_handler import MemoryActionHandler
+from app.services.memory_retriever import MemoryRetriever
 from app.services.tool_executor import ToolExecutor
+from app.services.turn_finalizer import TurnFinalizer
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -110,6 +113,21 @@ def build_orchestrator() -> Orchestrator:
     memory_policy = SimpleMemoryPolicy()
     logger.debug("Memory policy: %s", memory_policy.__class__.__name__)
 
+    memory_retriever = MemoryRetriever(
+        memory_store=memory_store,
+        history_store=history_store,
+    )
+    memory_action_handler = MemoryActionHandler(
+        memory_store=memory_store,
+        memory_policy=memory_policy,
+    )
+    turn_finalizer = TurnFinalizer(
+        history_store=history_store,
+        summary_store=summary_store,
+        summarizer=history_summarizer,
+        summary_trigger=config.orchestrator["summary_trigger"],
+    )
+
     # --------------------------------------------------
     # Tools
     # --------------------------------------------------
@@ -173,13 +191,12 @@ def build_orchestrator() -> Orchestrator:
         llm=llm,
         context_builder=context_builder,
         history_store=history_store,
-        memory_store=memory_store,
         summary_store=summary_store,
-        summarizer=history_summarizer,
         planner=planner,
         tool_executor=tool_executor,
-        memory_policy=memory_policy,
-        summary_trigger=config.orchestrator["summary_trigger"],
+        memory_retriever=memory_retriever,
+        memory_action_handler=memory_action_handler,
+        turn_finalizer=turn_finalizer,
     )
 
     logger.info(

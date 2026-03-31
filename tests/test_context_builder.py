@@ -178,6 +178,27 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIn("- name: Bob", system_content)
         self.assertIn("- preferences: concise answers", system_content)
 
+    def test_build_unwraps_summary_store_tuple(self):
+        history = FakeHistoryStore([])
+        summary = FakeSummaryStore(("Conversation summary.", 4))
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            user_context={},
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="Hello",
+        )
+
+        system_content = messages[0]["content"]
+        self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
+        self.assertNotIn("('Conversation summary.', 4)", system_content)
+
 
 if __name__ == "__main__":
     unittest.main()

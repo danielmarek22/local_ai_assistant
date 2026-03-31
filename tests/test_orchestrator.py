@@ -11,6 +11,9 @@ from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
 from app.perception.state import ImageAttachment
 from app.perception.keys import PerceptionKey
+from app.services.memory_action_handler import MemoryActionHandler
+from app.services.memory_retriever import MemoryRetriever
+from app.services.turn_finalizer import TurnFinalizer
 
 def consume_generator(gen):
     events = []
@@ -72,14 +75,17 @@ class FakeContextBuilder:
         return [{"role": "user", "content": user_text}]
 
 class FakeLLM:
-    def __init__(self, chunks):
+    def __init__(self, chunks, error=None):
         self.chunks = chunks
+        self.error = error
         self.calls = []
 
     def stream_chat(self, messages, think_override=None):
         self.calls.append((messages, think_override))
         for chunk in self.chunks:
             yield chunk
+        if self.error is not None:
+            raise self.error
 
 
 class FakeMemoryStore:
@@ -135,8 +141,15 @@ class FakeMemoryPolicy:
         return FakeMemoryPolicyDecision(content=content)
 
 class OrchestratorTests(unittest.TestCase):
-    def _build_orchestrator(self, plan: Plan, llm_chunks=None, summary_existing=None, summary_trigger=10):
-        llm = FakeLLM(llm_chunks or ["Hello", " world"])
+    def _build_orchestrator(
+        self,
+        plan: Plan,
+        llm_chunks=None,
+        summary_existing=None,
+        summary_trigger=10,
+        llm_error=None,
+    ):
+        llm = FakeLLM(llm_chunks or ["Hello", " world"], error=llm_error)
         history = FakeHistoryStore()
         memory = FakeMemoryStore()
         summary_store = FakeSummaryStore(existing=summary_existing)
@@ -145,18 +158,28 @@ class OrchestratorTests(unittest.TestCase):
         tool_executor = FakeToolExecutor(context="tool info")
         context_builder = FakeContextBuilder()
         memory_policy = FakeMemoryPolicy()
+        memory_retriever = MemoryRetriever(memory_store=memory, history_store=history)
+        memory_action_handler = MemoryActionHandler(
+            memory_store=memory,
+            memory_policy=memory_policy,
+        )
+        turn_finalizer = TurnFinalizer(
+            history_store=history,
+            summary_store=summary_store,
+            summarizer=summarizer,
+            summary_trigger=summary_trigger,
+        )
 
         orch = Orchestrator(
             llm=llm,
             context_builder=context_builder,
             history_store=history,
-            memory_store=memory,
             summary_store=summary_store,
-            summarizer=summarizer,
             planner=planner,
-            memory_policy=memory_policy,
             tool_executor=tool_executor,
-            summary_trigger=summary_trigger,
+            memory_retriever=memory_retriever,
+            memory_action_handler=memory_action_handler,
+            turn_finalizer=turn_finalizer,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
@@ -437,6 +460,35 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 1)
         self.assertIs(llm.calls[0][1], True)
+
+    def test_turn_emits_idle_when_llm_stream_raises(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["partial"],
+            llm_error=RuntimeError("stream failed"),
+            summary_trigger=999,
+        )
+
+        events = []
+        with self.assertRaises(RuntimeError):
+            for event in orch.handle_user_input("hello"):
+                events.append(event)
+
+        state_values = [
+            event.state for event in events if isinstance(event, AssistantStateEvent)
+        ]
+        self.assertEqual(state_values[-1], AssistantState.IDLE)
 
 
 if __name__ == "__main__":
