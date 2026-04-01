@@ -311,9 +311,6 @@ async def delete_session(session_id: str):
     if deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if orchestrator.session_id == session_id:
-        orchestrator.set_session(uuid.uuid4().hex[:8])
-
     return {"deleted": True, "session_id": session_id}
 
 
@@ -347,7 +344,6 @@ async def websocket_endpoint(ws: WebSocket):
     }))
 
     orchestrator = app.state.orchestrator
-    orchestrator.set_session(session_id)
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     try:
@@ -372,6 +368,7 @@ async def websocket_endpoint(ws: WebSocket):
 
             async for event in run_generator(
                 orchestrator.handle_user_input(
+                    session_id,
                     user_text,
                     think_override=reasoning_override,
                     attachments=attachments,

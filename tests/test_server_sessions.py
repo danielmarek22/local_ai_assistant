@@ -62,15 +62,9 @@ server_module = _load_server_module()
 
 
 class FakeOrchestrator:
-    def __init__(self, history_store, summary_store, session_id="active-session"):
+    def __init__(self, history_store, summary_store):
         self.history = history_store
         self.summary_store = summary_store
-        self.session_id = session_id
-        self.session_switches = []
-
-    def set_session(self, session_id: str):
-        self.session_id = session_id
-        self.session_switches.append(session_id)
 
 class FakeCollection:
     def __init__(self):
@@ -120,7 +114,6 @@ class ServerSessionTests(unittest.TestCase):
         self.fake_orchestrator = FakeOrchestrator(
             history_store=self.history,
             summary_store=self.summary_store,
-            session_id="session-b",
         )
         server_module.app.state.orchestrator = self.fake_orchestrator
         server_module.app.state.server_instance_id = "server-1"
@@ -172,7 +165,7 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0]["mime_type"], "image/png")
         self.assertTrue(attachments[0]["url"].startswith("/static/"))
 
-    def test_delete_session_removes_rows_and_resets_active_session(self):
+    def test_delete_session_removes_rows(self):
         message_id = self.history.add(
             "session-b",
             "user",
@@ -198,8 +191,6 @@ class ServerSessionTests(unittest.TestCase):
             {"session_id": "session-b"},
             self.vector_store.episodic_collection.deleted_wheres,
         )
-        self.assertEqual(len(self.fake_orchestrator.session_switches), 1)
-        self.assertNotEqual(self.fake_orchestrator.session_switches[0], "session-b")
         self.assertFalse(attachment_dir.exists())
 
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):

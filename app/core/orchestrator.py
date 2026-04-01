@@ -1,4 +1,3 @@
-import uuid
 import logging
 import time
 import os
@@ -48,28 +47,7 @@ class Orchestrator:
         self.memory_action_handler = memory_action_handler
         self.turn_finalizer = turn_finalizer
 
-        self.perception = PerceptionState()
-
-        self.session_id = str(uuid.uuid4())[:8]
-
-        logger.info(
-            "[%s] Orchestrator initialized",
-            self.session_id,
-        )
-
-    def set_session(self, session_id: str):
-        if self.session_id == session_id:
-            return
-
-        previous_session_id = self.session_id
-        self.session_id = session_id
-        self.perception = PerceptionState()
-
-        logger.info(
-            "[%s] Session activated (previous=%s)",
-            self.session_id,
-            previous_session_id,
-        )
+        logger.info("Orchestrator initialized")
 
     # ============================================================
     # Public entry point
@@ -77,11 +55,13 @@ class Orchestrator:
 
     def handle_user_input(
         self,
+        session_id: str,
         user_text: str,
         think_override=None,
         attachments: list[ImageAttachment] | None = None,
     ):
         start_ts = time.perf_counter()
+        perception = PerceptionState()
         turn_input = TurnInput(
             user_text=user_text,
             attachments=attachments or [],
@@ -94,18 +74,18 @@ class Orchestrator:
         try:
             logger.info(
                 "[%s] User input received (len=%d, images=%d)",
-                self.session_id,
+                session_id,
                 len(turn_input.user_text),
                 len(turn_input.attachments),
             )
-            logger.debug("[%s] User input text: %r", self.session_id, turn_input.user_text)
+            logger.debug("[%s] User input text: %r", session_id, turn_input.user_text)
 
             yield AssistantStateEvent(state=AssistantState.THINKING)
 
             # --------------------------------------------------------
             # 1. Update perception with raw input
             # --------------------------------------------------------
-            self.perception.update(
+            perception.update(
                 PerceptionKey.USER_INPUT,
                 {
                     "text": turn_input.user_text,
@@ -121,9 +101,9 @@ class Orchestrator:
             # --------------------------------------------------------
             # 2. Vector Retrieval (Semantic + Episodic)
             # --------------------------------------------------------
-            retrieval = self.memory_retriever.retrieve(retrieval_text, self.session_id)
+            retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
             memory_context = retrieval.memory_context
-            self.perception.update(
+            perception.update(
                 PerceptionKey.MEMORY_RETRIEVED,
                 {"value": retrieval.perception_value},
             )
@@ -132,22 +112,26 @@ class Orchestrator:
             # 3. Persist user input (to SQLite + Vector Store)
             # --------------------------------------------------------
             self.history.add(
-                self.session_id,
+                session_id,
                 "user",
                 history_text,
                 attachments=turn_input.attachments,
             )
-            logger.debug("[%s] User input persisted to history", self.session_id)
+            logger.debug("[%s] User input persisted to history", session_id)
 
             # --------------------------------------------------------
             # 4. Planning (decide actions)
             # --------------------------------------------------------
-            perception_snapshot = self.perception.snapshot()
-            plan = self._plan(retrieval_text or turn_input.user_text, perception_snapshot)
+            perception_snapshot = perception.snapshot()
+            plan = self._plan(
+                session_id=session_id,
+                user_text=retrieval_text or turn_input.user_text,
+                perception=perception_snapshot,
+            )
 
             logger.debug(
                 "[%s] Plan actions: %s",
-                self.session_id,
+                session_id,
                 [action.type for action in plan.actions],
             )
 
@@ -157,7 +141,7 @@ class Orchestrator:
             # 5. Execute actions
             # --------------------------------------------------------
             for action in plan.actions:
-                logger.info("[%s] Executing action '%s'", self.session_id, action.type.value)
+                logger.info("[%s] Executing action '%s'", session_id, action.type.value)
 
                 if action.type == ActionType.WEB_SEARCH:
                     tool_context = yield from self.tool_executor.execute(
@@ -166,10 +150,10 @@ class Orchestrator:
                     )
 
                 elif action.type == ActionType.WRITE_MEMORY:
-                    self.memory_action_handler.handle(self.session_id, action)
+                    self.memory_action_handler.handle(session_id, action)
 
                 elif action.type == ActionType.RESPOND:
-                    logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
+                    logger.debug("[%s] Respond action reached, stopping action loop", session_id)
                     break
 
                 else:
@@ -179,6 +163,7 @@ class Orchestrator:
             # 6. Context construction
             # --------------------------------------------------------
             messages = self._build_context(
+                session_id=session_id,
                 user_text=turn_input.user_text,
                 memory_context=memory_context,
                 tool_context=tool_context,
@@ -189,6 +174,7 @@ class Orchestrator:
             # 7. LLM streaming response
             # --------------------------------------------------------
             response = yield from self._stream_response(
+                session_id,
                 messages,
                 think_override=turn_input.think_override,
             )
@@ -196,19 +182,19 @@ class Orchestrator:
             # --------------------------------------------------------
             # 8. Persist assistant response (to SQLite + Vector Store)
             # --------------------------------------------------------
-            self.history.add(self.session_id, "assistant", response)
-            logger.debug("[%s] Assistant response persisted to history", self.session_id)
+            self.history.add(session_id, "assistant", response)
+            logger.debug("[%s] Assistant response persisted to history", session_id)
 
             yield AssistantSpeechEvent(text=response, is_final=True)
 
             # --------------------------------------------------------
             # 9. Post-processing (summarization)
             # --------------------------------------------------------
-            self.turn_finalizer.finalize(self.session_id)
+            self.turn_finalizer.finalize(session_id)
 
             logger.info(
                 "[%s] Turn completed (duration=%.2f ms)",
-                self.session_id,
+                session_id,
                 (time.perf_counter() - start_ts) * 1000,
             )
         finally:
@@ -220,8 +206,8 @@ class Orchestrator:
     # Planning
     # ============================================================
 
-    def _plan(self, user_text: str, perception: dict) -> Plan:
-        logger.info("[%s] Running planner", self.session_id)
+    def _plan(self, session_id: str, user_text: str, perception: dict) -> Plan:
+        logger.info("[%s] Running planner", session_id)
 
         try:
             plan = self.planner.decide(
@@ -229,10 +215,10 @@ class Orchestrator:
                 perception=perception,
             )
         except Exception:
-            logger.exception("[%s] Planner failed", self.session_id)
+            logger.exception("[%s] Planner failed", session_id)
             raise
 
-        logger.info("[%s] Planner produced %d actions", self.session_id, len(plan.actions))
+        logger.info("[%s] Planner produced %d actions", session_id, len(plan.actions))
         return plan
 
     # ============================================================
@@ -241,15 +227,16 @@ class Orchestrator:
 
     def _build_context(
         self,
+        session_id: str,
         user_text: str,
         memory_context: Optional[str],
         tool_context: Optional[str],
         attachments: list[ImageAttachment] | None = None,
     ):
-        logger.info("[%s] Building context", self.session_id)
+        logger.info("[%s] Building context", session_id)
 
         messages = self.context_builder.build(
-            session_id=self.session_id,
+            session_id=session_id,
             user_text=user_text,
             memory_context=memory_context,
             tool_context=tool_context,
@@ -258,15 +245,15 @@ class Orchestrator:
 
         logger.debug(
             "[%s] Context built (messages=%d, memory=%s, tools=%s)",
-            self.session_id,
+            session_id,
             len(messages),
             bool(memory_context),
             bool(tool_context),
         )
         return messages
 
-    def _stream_response(self, messages, think_override=None):
-        logger.info("[%s] Calling LLM (streaming)", self.session_id)
+    def _stream_response(self, session_id: str, messages, think_override=None):
+        logger.info("[%s] Calling LLM (streaming)", session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
         visible_buffer = ""
@@ -278,7 +265,7 @@ class Orchestrator:
             for event_type, value in processor.push(chunk):
                 if event_type == "expression":
                     expression_initialized = True
-                    logger.info("[%s] Model selected avatar expression '%s'", self.session_id, value)
+                    logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
                     yield AvatarExpressionEvent(expression=value)
                     continue
 
@@ -287,7 +274,7 @@ class Orchestrator:
 
                 if not expression_initialized:
                     expression_initialized = True
-                    logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
+                    logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
                     yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
                 visible_buffer += value
@@ -296,7 +283,7 @@ class Orchestrator:
         for event_type, value in processor.flush():
             if event_type == "expression":
                 expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, value)
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
                 yield AvatarExpressionEvent(expression=value)
                 continue
 
@@ -305,19 +292,19 @@ class Orchestrator:
 
             if not expression_initialized:
                 expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
                 yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
             visible_buffer += value
             yield AssistantSpeechEvent(text=value)
 
         if not expression_initialized:
-            logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
+            logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
             yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
             "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
-            self.session_id,
+            session_id,
             len(visible_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )

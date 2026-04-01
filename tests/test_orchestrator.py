@@ -141,6 +141,8 @@ class FakeMemoryPolicy:
         return FakeMemoryPolicyDecision(content=content)
 
 class OrchestratorTests(unittest.TestCase):
+    SESSION_ID = "session-1"
+
     def _build_orchestrator(
         self,
         plan: Plan,
@@ -187,7 +189,7 @@ class OrchestratorTests(unittest.TestCase):
         plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
         orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
-        list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         # 1. Verify perception was updated with retrieved memories BEFORE planner runs
         perception_snapshot = planner.calls[0][1]
@@ -222,7 +224,7 @@ class OrchestratorTests(unittest.TestCase):
             {"role": "assistant", "content": "a1"},
         ]
 
-        list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         self.assertEqual(len(summarizer.calls), 1)
         self.assertEqual(len(summary_store.saved), 1)
@@ -250,35 +252,11 @@ class OrchestratorTests(unittest.TestCase):
 
         # This will add another message to history, bringing the total to at least 2.
         # last_count is 0. Current count is 2. (2 - 0) >= 1, so it triggers.
-        list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         # Assert that it DID summarize this time
         self.assertEqual(len(summarizer.calls), 1)
         self.assertEqual(len(summary_store.saved), 1)
-
-    def test_set_session_updates_session_id_and_resets_perception(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
-        (
-            orch,
-            _llm,
-            _history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _planner,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
-
-        original_perception = orch.perception
-
-        orch.perception.update(PerceptionKey.USER_INPUT, {"text": "hello"})
-
-        orch.set_session("session-2")
-
-        self.assertEqual(orch.session_id, "session-2")
-        self.assertIsNot(orch.perception, original_perception)
-        self.assertEqual(orch.perception.snapshot(), {})
 
     def test_response_expression_tag_is_extracted_from_stream(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -298,7 +276,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -333,7 +311,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -366,7 +344,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -396,7 +374,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -429,7 +407,7 @@ class OrchestratorTests(unittest.TestCase):
             size_bytes=5,
         )
 
-        list(orch.handle_user_input("", attachments=[attachment]))
+        list(orch.handle_user_input(self.SESSION_ID, "", attachments=[attachment]))
 
         self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
         perception_snapshot = planner.calls[0][1]
@@ -456,7 +434,7 @@ class OrchestratorTests(unittest.TestCase):
             _context_builder,
         ) = self._build_orchestrator(plan=plan, summary_trigger=999)
 
-        list(orch.handle_user_input("hello", think_override=True))
+        list(orch.handle_user_input(self.SESSION_ID, "hello", think_override=True))
 
         self.assertEqual(len(llm.calls), 1)
         self.assertIs(llm.calls[0][1], True)
@@ -482,13 +460,50 @@ class OrchestratorTests(unittest.TestCase):
 
         events = []
         with self.assertRaises(RuntimeError):
-            for event in orch.handle_user_input("hello"):
+            for event in orch.handle_user_input(self.SESSION_ID, "hello"):
                 events.append(event)
 
         state_values = [
             event.state for event in events if isinstance(event, AssistantStateEvent)
         ]
         self.assertEqual(state_values[-1], AssistantState.IDLE)
+
+    def test_shared_orchestrator_does_not_leak_session_between_turns(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            planner,
+            _tool_executor,
+            context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        list(orch.handle_user_input("session-a", "hello"))
+        list(orch.handle_user_input("session-b", "hello"))
+
+        self.assertEqual([record[0] for record in history.records], [
+            "session-a",
+            "session-a",
+            "session-b",
+            "session-b",
+        ])
+        self.assertEqual(context_builder.calls[0]["session_id"], "session-a")
+        self.assertEqual(context_builder.calls[1]["session_id"], "session-b")
+
+        first_perception = planner.calls[0][1]
+        second_perception = planner.calls[1][1]
+        self.assertEqual(
+            first_perception[PerceptionKey.USER_INPUT.value].value["text"],
+            "hello",
+        )
+        self.assertEqual(
+            second_perception[PerceptionKey.USER_INPUT.value].value["text"],
+            "hello",
+        )
 
 
 if __name__ == "__main__":
