@@ -68,19 +68,22 @@ class LLMPlanner:
             {
                 "role": "system",
                 "content": (
-                    "You are an AI planner. Decide the next action.\n"
-                    "Output ONLY valid JSON.\n\n"
-                    "Context (Check this before searching or saving!):\n"
+                    "You are an internal system router. Your ONLY job is to output a strictly formatted JSON object to trigger the correct system action. Do NOT act like a conversational assistant.\n\n"
+                    "Context (Review this to avoid duplicate actions):\n"
                     f"{perception_text}\n\n"
                     "Allowed Actions:\n"
-                    "- web_search: Use to find real-time facts/news. (requires 'query')\n"
-                    "- write_memory: Use ONLY to save enduring, long-term facts about the user (e.g., name, tech stack, preferences). Rephrase into a concise rule. Do NOT save temporary states, and do NOT save facts already present in the Context. (requires 'content')\n"
-                    "- respond: Use to just talk to the user.\n\n"
+                    "1. web_search: Use to find real-time facts/news. (Requires a 'query' string).\n"
+                    "2. write_memory: Use ONLY to save enduring, long-term facts about the user. (Requires a 'content' string).\n"
+                    "3. respond: Use when you just need to talk to the user.\n\n"
+                    "CRITICAL RULES:\n"
+                    "- Output ONLY valid JSON matching the examples perfectly.\n"
+                    "- NEVER include a 'response', 'text', or 'message' field in your JSON.\n"
+                    "- Do NOT draft the actual reply to the user. The response generation happens in a later step.\n\n"
                     "Example 1:\n"
-                    '{"actions": [{"type": "web_search", "query": "weather in Tokyo"}]}\n'
+                    '{"actions": [{"type": "web_search", "query": "weather in Tokyo"}]}\n\n'
                     "Example 2:\n"
-                    '{"actions": [{"type": "write_memory", "content": "User prefers concise Python code without markdown."}]}\n'
-                    "Example 3:\n"
+                    '{"actions": [{"type": "write_memory", "content": "User prefers Python."}]}\n\n'
+                    "Example 3 (Strictly use this format for responding):\n"
                     '{"actions": [{"type": "respond"}]}'
                 ),
             },
@@ -132,16 +135,19 @@ class LLMPlanner:
     def _call_llm_with_timeout(self, prompt: list[dict]) -> Optional[str]:
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         
-        # Pass the strict routing parameters inside an options dictionary
+        timeout_seconds = self.timeout_ms / 1000.0
+        
         future = executor.submit(
             self.llm.chat, 
             prompt, 
-            False,  # think_override=False (we don't want the planner wasting tokens thinking)
-            {"temperature": 0.0, "num_predict": 150}  # options_override
+            False,  # think_override
+            {"temperature": 0.0, "num_predict": 150},  # options_override
+            timeout_seconds,  # timeout_override
+            0  # max_retries_override <-- 0 retries, kill instantly on timeout
         )
         
         try:
-            return future.result(timeout=self.timeout_ms / 1000)
+            return future.result(timeout=timeout_seconds)
         except concurrent.futures.TimeoutError:
             future.cancel()
             return None

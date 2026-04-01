@@ -36,14 +36,15 @@ class OllamaClient(LLMClient):
         messages,
         think_override=None,
         options_override: dict | None = None,
-    ) -> str:
+        timeout_override: float | None = None,
+        max_retries_override: int | None = None,  # <-- Added parameter
+        ) -> str:
         """
         Non-streaming chat call.
         Used for planners, summarizers, and other structured outputs.
         """
         think_value = self._resolve_think_value(think_override)
         
-        # Merge default instance options with specific request overrides
         request_options = self.options.copy()
         if options_override:
             request_options.update(options_override)
@@ -63,7 +64,13 @@ class OllamaClient(LLMClient):
             len(messages),
         )
 
-        r = self._post_with_retry(payload, stream=False)
+        # Pass both overrides down to the post method
+        r = self._post_with_retry(
+            payload, 
+            stream=False, 
+            timeout_override=timeout_override,
+            max_retries_override=max_retries_override  # <-- Pass it down
+        )
         r.raise_for_status()
 
         data = r.json()
@@ -181,17 +188,27 @@ class OllamaClient(LLMClient):
             len("".join(collected_thinking))
         )
 
-    def _post_with_retry(self, payload: dict, stream: bool):
-        attempts = self.max_retries + 1
+    def _post_with_retry(
+        self, 
+        payload: dict, 
+        stream: bool, 
+        timeout_override: float | None = None,
+        max_retries_override: int | None = None,
+    ):
+        # Determine which retry count to use
+        actual_max_retries = max_retries_override if max_retries_override is not None else self.max_retries
+        attempts = actual_max_retries + 1
+        
+        # Determine which timeout to use
+        request_timeout = timeout_override if timeout_override is not None else self.timeout_s
 
         for attempt in range(1, attempts + 1):
             try:
-                # Use the session for connection pooling
                 response = self.session.post(
                     self.url,
                     json=payload,
                     stream=stream,
-                    timeout=self.timeout_s,
+                    timeout=request_timeout,
                 )
                 response.raise_for_status()
                 return response
