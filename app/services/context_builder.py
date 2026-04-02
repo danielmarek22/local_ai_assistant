@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 
 from app.logging import trace_event
-from app.perception.state import ImageAttachment
+from app.perception.attachments import Attachment, ImageAttachment, attachment_from_payload, attachment_from_stored_record
 
 logger = logging.getLogger("context_builder")
 
@@ -34,7 +34,7 @@ class ContextBuilder:
         user_text: str,
         memory_context: str | None = None,
         tool_context: str | None = None,
-        attachments: list[ImageAttachment] | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> list[dict]:
         logger.info("[%s] Building context", session_id)
         attachments = attachments or []
@@ -100,7 +100,13 @@ class ContextBuilder:
                 "content": content,
             }
             if role == "user" and row_attachments:
-                message["images"] = [attachment.to_llm_image() for attachment in row_attachments]
+                message_images = [
+                    attachment.to_llm_image()
+                    for attachment in row_attachments
+                    if isinstance(attachment, ImageAttachment)
+                ]
+                if message_images:
+                    message["images"] = message_images
 
             messages.append(message)
 
@@ -109,7 +115,13 @@ class ContextBuilder:
             "content": user_text,
         }
         if attachments:
-            user_message["images"] = [attachment.to_llm_image() for attachment in attachments]
+            user_images = [
+                attachment.to_llm_image()
+                for attachment in attachments
+                if isinstance(attachment, ImageAttachment)
+            ]
+            if user_images:
+                user_message["images"] = user_images
 
         messages.append(user_message)
 
@@ -195,27 +207,27 @@ class ContextBuilder:
 
     def _normalize_history_attachments(
         self,
-        attachments: list[ImageAttachment] | list[dict],
-    ) -> list[ImageAttachment]:
-        normalized: list[ImageAttachment] = []
+        attachments: list[Attachment] | list[dict],
+    ) -> list[Attachment]:
+        normalized: list[Attachment] = []
         for attachment in attachments or []:
-            if isinstance(attachment, ImageAttachment):
+            if isinstance(attachment, Attachment):
                 normalized.append(attachment)
                 continue
 
             if isinstance(attachment, dict):
                 if attachment.get("data") or attachment.get("base64_data"):
-                    normalized.append(ImageAttachment.from_payload(attachment))
+                    normalized.append(attachment_from_payload(attachment))
                     continue
                 if attachment.get("storage_path") or attachment.get("url"):
-                    normalized.append(ImageAttachment.from_stored_record(attachment))
+                    normalized.append(attachment_from_stored_record(attachment))
         return normalized
 
     def _build_seen_key(
         self,
         role: str,
         content: str,
-        attachments: list[ImageAttachment],
+        attachments: list[Attachment],
     ) -> tuple:
         attachment_key = tuple(
             (

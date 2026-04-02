@@ -1,12 +1,12 @@
 from dataclasses import dataclass, field
 
-from app.perception.state import ImageAttachment
+from app.perception.attachments import Attachment
 
 
 @dataclass
 class TurnInput:
     user_text: str
-    attachments: list[ImageAttachment] = field(default_factory=list)
+    attachments: list[Attachment] = field(default_factory=list)
     think_override: bool | None = None
 
     def retrieval_text(self) -> str:

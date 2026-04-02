@@ -18,3 +18,4 @@ logs/
 app/config/assistant.yaml
 static/avatar.vrm
 static/uploads/
+/.codex

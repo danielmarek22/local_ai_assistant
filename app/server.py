@@ -21,7 +21,7 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.logging import setup_logging_from_config
-from app.perception.state import ImageAttachment
+from app.perception.attachments import Attachment, attachment_from_payload
 from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 
@@ -84,7 +84,7 @@ def resolve_session_id(
     return uuid.uuid4().hex[:8]
 
 
-def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[ImageAttachment]]:
+def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[Attachment]]:
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
@@ -102,9 +102,9 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[ImageAttac
 
     attachments_payload = payload.get("attachments")
     if attachments_payload is None:
-        attachments: list[ImageAttachment] = []
+        attachments: list[Attachment] = []
     elif isinstance(attachments_payload, list):
-        attachments = [ImageAttachment.from_payload(item) for item in attachments_payload]
+        attachments = [attachment_from_payload(item) for item in attachments_payload]
     else:
         raise ValueError("User message attachments must be a list")
 

@@ -6,8 +6,8 @@ import time
 import uuid
 from pathlib import Path
 
-from app.perception.state import ImageAttachment
 from app.logging import trace_event
+from app.perception.attachments import Attachment, ImageAttachment, attachment_from_stored_record
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
 
@@ -35,7 +35,7 @@ class ChatHistoryStore:
         session_id: str,
         role: str,
         content: str,
-        attachments: list[ImageAttachment] | None = None,
+        attachments: list[Attachment] | None = None,
     ):
         current_time = time.time()
         attachments = attachments or []
@@ -121,13 +121,18 @@ class ChatHistoryStore:
         message_id: int,
         role: str,
         content: str,
-        attachments: list[ImageAttachment],
+        attachments: list[Attachment],
     ) -> list[ImageAttachment]:
         message_dir = self.uploads_root / session_id / str(message_id)
         message_dir.mkdir(parents=True, exist_ok=True)
         stored_attachments: list[ImageAttachment] = []
 
         for attachment in attachments:
+            if not isinstance(attachment, ImageAttachment):
+                raise ValueError(
+                    f"Unsupported attachment type for chat history storage: {attachment.__class__.__name__}"
+                )
+
             payload = attachment.as_bytes()
             sha256 = hashlib.sha256(payload).hexdigest()
             file_path = message_dir / f"{sha256}{self._extension_for_mime_type(attachment.mime_type)}"
@@ -247,7 +252,7 @@ class ChatHistoryStore:
     def _load_attachments_for_message_ids(
         self,
         message_ids: list[int],
-    ) -> dict[int, list[ImageAttachment]]:
+    ) -> dict[int, list[Attachment]]:
         if not message_ids:
             return {}
 
@@ -263,9 +268,9 @@ class ChatHistoryStore:
             message_ids,
         )
 
-        attachments_by_message: dict[int, list[ImageAttachment]] = {}
+        attachments_by_message: dict[int, list[Attachment]] = {}
         for row in cursor.fetchall():
-            attachment = ImageAttachment.from_stored_record({
+            attachment = attachment_from_stored_record({
                 "id": row["id"],
                 "name": row["name"],
                 "mime_type": row["mime_type"],

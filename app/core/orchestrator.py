@@ -11,10 +11,11 @@ from app.core.events import (
 from app.core.assistant_state import AssistantState
 from app.core.actions import ActionType
 from app.core.plan import Plan
-from app.perception.state import ImageAttachment, PerceptionState
 from app.core.stream_processor import StreamProcessor
 from app.core.turn_input import TurnInput
 from app.logging import trace_event
+from app.perception.attachments import Attachment
+from app.perception.state import PerceptionState
 from app.services.tool_executor import ToolExecutor
 from app.perception.keys import PerceptionKey
 
@@ -59,7 +60,7 @@ class Orchestrator:
         session_id: str,
         user_text: str,
         think_override=None,
-        attachments: list[ImageAttachment] | None = None,
+        attachments: list[Attachment] | None = None,
     ):
         start_ts = time.perf_counter()
         perception = PerceptionState()
@@ -272,7 +273,7 @@ class Orchestrator:
         user_text: str,
         memory_context: Optional[str],
         tool_context: Optional[str],
-        attachments: list[ImageAttachment] | None = None,
+        attachments: list[Attachment] | None = None,
     ):
         logger.info("[%s] Building context", session_id)
 
