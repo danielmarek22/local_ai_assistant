@@ -1,4 +1,8 @@
+import logging
+
 from app.core.plan import Plan
+
+logger = logging.getLogger("hybrid_planner")
 
 
 class HybridPlanner:
@@ -9,12 +13,18 @@ class HybridPlanner:
     def decide(self, user_text: str, perception: dict) -> Plan:
         # 1. Let rules try first
         rule_plan = self.rule_planner.decide(user_text, perception)
+        logger.debug(
+            "Hybrid planner rule result: %s",
+            [action.type.value for action in rule_plan.actions],
+        )
 
         # 2. If rules detected a specific intent, trust them
         if self._is_confident(rule_plan):
+            logger.info("Hybrid planner using rule-based decision")
             return rule_plan
 
         # 3. Otherwise, ask the LLM
+        logger.info("Hybrid planner escalating to LLM planner")
         return self.llm_planner.decide(user_text, perception)
 
     def _is_confident(self, plan: Plan) -> bool:
@@ -30,4 +40,3 @@ class HybridPlanner:
             return False
 
         return True
-

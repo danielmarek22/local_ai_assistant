@@ -5,6 +5,7 @@ from typing import Generator, Optional
 from app.core.actions import Action
 from app.core.events import AssistantStateEvent
 from app.core.assistant_state import AssistantState
+from app.logging import trace_event
 
 logger = logging.getLogger("tool_executor")
 
@@ -23,49 +24,61 @@ class ToolExecutor:
         action: Action,
         user_text: str,
     ) -> Generator[AssistantStateEvent, None, Optional[str]]:
-        tool = self.tools.get(action.type)
+        # Use .value for safe dictionary lookup
+        tool = self.tools.get(action.type.value)
 
         if not tool:
             logger.warning(
                 "Tool '%s' not registered, skipping",
-                action.type,
+                action.type.value,
             )
             return None
 
         if not tool.is_available:
             logger.warning(
                 "Tool '%s' unavailable, skipping",
-                action.type,
+                action.type.value,
             )
             return None
 
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
 
-        logger.info("Running tool '%s'", action.type)
+        logger.info("Running tool '%s'", action.type.value)
         start_ts = time.perf_counter()
 
         try:
             query = (action.payload or {}).get("query") or user_text
-            logger.debug("Tool '%s' query: %r", action.type, query)
+            trace_event(
+                "tool_executor",
+                "tool_call",
+                payload={
+                    "tool": action.type.value,
+                    "action_payload": action.payload,
+                    "query": query,
+                },
+            )
 
             context = tool.run(query)
 
             logger.info(
                 "Tool '%s' completed (duration=%.2f ms)",
-                action.type,
+                action.type.value,
                 (time.perf_counter() - start_ts) * 1000,
             )
 
             if context:
-                logger.debug(
-                    "Tool '%s' returned context (%d chars)",
-                    action.type,
-                    len(context),
+                trace_event(
+                    "tool_executor",
+                    "tool_result",
+                    payload={
+                        "tool": action.type.value,
+                        "context": context,
+                    },
                 )
             else:
                 logger.debug(
                     "Tool '%s' returned no context",
-                    action.type,
+                    action.type.value,
                 )
 
             return context
@@ -73,6 +86,6 @@ class ToolExecutor:
         except Exception:
             logger.exception(
                 "Tool '%s' failed during execution",
-                action.type,
+                action.type.value,
             )
             return None

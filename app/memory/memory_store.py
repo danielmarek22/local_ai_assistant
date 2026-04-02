@@ -1,6 +1,12 @@
 import uuid
+import logging
+
+from app.logging import trace_event
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
+
+logger = logging.getLogger("memory_store")
+
 
 class MemoryStore:
     def __init__(self, db: Database, vector_store: VectorStore):
@@ -10,6 +16,16 @@ class MemoryStore:
 
     def add(self, content: str, category: str = "general", importance: int = 1) -> None:
         mem_id = str(uuid.uuid4())
+        trace_event(
+            "memory_store",
+            "memory_saved",
+            payload={
+                "id": mem_id,
+                "content": content,
+                "category": category,
+                "importance": importance,
+            },
+        )
         
         # 1. Save to SQLite (for easy viewing/backups in the frontend)
         cursor = self.db.conn.cursor()
@@ -53,6 +69,18 @@ class MemoryStore:
         
         # Chroma returns a list of lists for documents
         if not results["documents"] or not results["documents"][0]:
+            logger.debug("Semantic memory search returned no results")
+            trace_event(
+                "memory_store",
+                "semantic_query_result",
+                payload={"query": query, "limit": limit, "documents": []},
+            )
             return []
-            
-        return results["documents"][0]
+
+        documents = results["documents"][0]
+        trace_event(
+            "memory_store",
+            "semantic_query_result",
+            payload={"query": query, "limit": limit, "documents": documents},
+        )
+        return documents

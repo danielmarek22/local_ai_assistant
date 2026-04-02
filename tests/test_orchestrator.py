@@ -1,6 +1,6 @@
 import unittest
 
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
@@ -9,7 +9,11 @@ from app.core.events import (
 )
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
-
+from app.perception.state import ImageAttachment
+from app.perception.keys import PerceptionKey
+from app.services.memory_action_handler import MemoryActionHandler
+from app.services.memory_retriever import MemoryRetriever
+from app.services.turn_finalizer import TurnFinalizer
 
 def consume_generator(gen):
     events = []
@@ -45,8 +49,8 @@ class FakeHistoryStore:
         self.records = []
         self.recent_rows = []
 
-    def add(self, session_id: str, role: str, content: str):
-        self.records.append((session_id, role, content))
+    def add(self, session_id: str, role: str, content: str, attachments=None):
+        self.records.append((session_id, role, content, attachments or []))
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
@@ -60,20 +64,28 @@ class FakeContextBuilder:
     def __init__(self):
         self.calls = []
 
-    def build(self, session_id: str, user_text: str, tool_context=None):
-        self.calls.append((session_id, user_text, tool_context))
+    def build(self, session_id: str, user_text: str, memory_context=None, tool_context=None, **kwargs):
+        self.calls.append({
+            "session_id": session_id,
+            "user_text": user_text,
+            "memory_context": memory_context,
+            "tool_context": tool_context,
+            "attachments": kwargs.get("attachments", []),
+        })
         return [{"role": "user", "content": user_text}]
 
-
 class FakeLLM:
-    def __init__(self, chunks):
+    def __init__(self, chunks, error=None):
         self.chunks = chunks
+        self.error = error
         self.calls = []
 
     def stream_chat(self, messages, think_override=None):
         self.calls.append((messages, think_override))
         for chunk in self.chunks:
             yield chunk
+        if self.error is not None:
+            raise self.error
 
 
 class FakeMemoryStore:
@@ -90,14 +102,18 @@ class FakeMemoryStore:
 
 class FakeSummaryStore:
     def __init__(self, existing=None):
-        self.existing = existing
+        # If the test passes in an existing summary string, 
+        # package it into the tuple format the orchestrator now expects: (summary, count)
+        self.existing = (existing, 0) if existing is not None else None
         self.saved = []
 
     def get(self, _session_id: str):
         return self.existing
 
-    def set(self, session_id: str, summary: str):
-        self.saved.append((session_id, summary))
+    # Add the new last_turn_count parameter
+    def set(self, session_id: str, summary: str, last_turn_count: int):
+        # Save the count as well so we can assert against it in tests
+        self.saved.append((session_id, summary, last_turn_count))
 
 
 class FakeSummarizer:
@@ -123,19 +139,19 @@ class FakeMemoryPolicy:
         if not content:
             return None
         return FakeMemoryPolicyDecision(content=content)
-    
-class FakeContextBuilder:
-    def __init__(self):
-        self.calls = []
-
-    def build(self, session_id: str, user_text: str, injected_context=None, **kwargs):
-        self.calls.append((session_id, user_text, injected_context))
-        return [{"role": "user", "content": user_text}]
-
 
 class OrchestratorTests(unittest.TestCase):
-    def _build_orchestrator(self, plan: Plan, llm_chunks=None, summary_existing=None, summary_trigger=10):
-        llm = FakeLLM(llm_chunks or ["Hello", " world"])
+    SESSION_ID = "session-1"
+
+    def _build_orchestrator(
+        self,
+        plan: Plan,
+        llm_chunks=None,
+        summary_existing=None,
+        summary_trigger=10,
+        llm_error=None,
+    ):
+        llm = FakeLLM(llm_chunks or ["Hello", " world"], error=llm_error)
         history = FakeHistoryStore()
         memory = FakeMemoryStore()
         summary_store = FakeSummaryStore(existing=summary_existing)
@@ -144,42 +160,53 @@ class OrchestratorTests(unittest.TestCase):
         tool_executor = FakeToolExecutor(context="tool info")
         context_builder = FakeContextBuilder()
         memory_policy = FakeMemoryPolicy()
+        memory_retriever = MemoryRetriever(memory_store=memory, history_store=history)
+        memory_action_handler = MemoryActionHandler(
+            memory_store=memory,
+            memory_policy=memory_policy,
+        )
+        turn_finalizer = TurnFinalizer(
+            history_store=history,
+            summary_store=summary_store,
+            summarizer=summarizer,
+            summary_trigger=summary_trigger,
+        )
 
         orch = Orchestrator(
             llm=llm,
             context_builder=context_builder,
             history_store=history,
-            memory_store=memory,
             summary_store=summary_store,
-            summarizer=summarizer,
             planner=planner,
-            memory_policy=memory_policy,
             tool_executor=tool_executor,
-            summary_trigger=summary_trigger,
+            memory_retriever=memory_retriever,
+            memory_action_handler=memory_action_handler,
+            turn_finalizer=turn_finalizer,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
     def test_turn_flow_injects_memory_and_tools_into_context(self):
-        plan = Plan(actions=[Action(type="web_search", payload={"query": "python"}), Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
         orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
-        list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
-    # 1. Verify perception was updated with retrieved memories BEFORE planner runs
+        # 1. Verify perception was updated with retrieved memories BEFORE planner runs
         perception_snapshot = planner.calls[0][1]
-        self.assertIn("memory.retrieved", perception_snapshot)
-        self.assertIn("User likes testing", perception_snapshot["memory.retrieved"].value["value"])
+        self.assertIn(PerceptionKey.MEMORY_RETRIEVED.value, perception_snapshot)
+        self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value]["value"])
 
-        # 2. Verify ContextBuilder received BOTH memory and tool info in injected_context
-        injected_context = context_builder.calls[0][2]
-        self.assertIn("RETRIEVED MEMORY", injected_context)
-        self.assertIn("User likes testing", injected_context)
-        self.assertIn("Past answer", injected_context)
-        self.assertIn("TOOL RESULTS", injected_context)
-        self.assertIn("tool info", injected_context)
+        # 2. Verify ContextBuilder received memory and tool info separately
+        mem_ctx = context_builder.calls[0]["memory_context"]
+        tool_ctx = context_builder.calls[0]["tool_context"]
+        
+        self.assertIn("User likes testing", mem_ctx)
+        self.assertIn("Past answer", mem_ctx)
+        
+        self.assertEqual("tool info", tool_ctx)
 
     def test_summarization_runs_when_threshold_reached(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -197,14 +224,14 @@ class OrchestratorTests(unittest.TestCase):
             {"role": "assistant", "content": "a1"},
         ]
 
-        list(orch.handle_user_input("hello"))
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         self.assertEqual(len(summarizer.calls), 1)
         self.assertEqual(len(summary_store.saved), 1)
         self.assertEqual(summary_store.saved[0][1], "summary")
 
-    def test_summarization_skips_when_summary_exists(self):
-        plan = Plan(actions=[Action(type="respond")])
+    def test_summarization_updates_when_summary_exists(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -223,36 +250,16 @@ class OrchestratorTests(unittest.TestCase):
 
         history.recent_rows = [{"role": "user", "content": "u1"}]
 
-        list(orch.handle_user_input("hello"))
+        # This will add another message to history, bringing the total to at least 2.
+        # last_count is 0. Current count is 2. (2 - 0) >= 1, so it triggers.
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
-        self.assertEqual(len(summarizer.calls), 0)
-        self.assertEqual(len(summary_store.saved), 0)
-
-    def test_set_session_updates_session_id_and_resets_perception(self):
-        plan = Plan(actions=[Action(type="respond")])
-        (
-            orch,
-            _llm,
-            _history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _planner,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
-
-        original_perception = orch.perception
-        orch.perception.update("user.input", {"text": "hello"})
-
-        orch.set_session("session-2")
-
-        self.assertEqual(orch.session_id, "session-2")
-        self.assertIsNot(orch.perception, original_perception)
-        self.assertEqual(orch.perception.snapshot(), {})
+        # Assert that it DID summarize this time
+        self.assertEqual(len(summarizer.calls), 1)
+        self.assertEqual(len(summary_store.saved), 1)
 
     def test_response_expression_tag_is_extracted_from_stream(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -269,7 +276,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -282,7 +289,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_can_switch_expressions_multiple_times(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -304,7 +311,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -320,7 +327,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "That worked. Wait, even better. All set.")
 
     def test_response_expression_tag_allows_internal_spacing(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -337,7 +344,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -350,7 +357,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_expression_alias_tag_is_supported(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -367,7 +374,7 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = list(orch.handle_user_input("hello"))
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         expression_values = [
             e.expression for e in events if isinstance(e, AvatarExpressionEvent)
@@ -379,8 +386,42 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[-1], "Nice.")
         self.assertEqual(history.records[1][2], "Nice.")
 
+    def test_image_only_turn_updates_perception_history_and_context(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            planner,
+            _tool_executor,
+            context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        attachment = ImageAttachment(
+            name="clipboard.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "", attachments=[attachment]))
+
+        self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
+        perception_snapshot = planner.calls[0][1]
+        self.assertEqual(perception_snapshot["user.input"]["image_count"], 1)
+        self.assertEqual(
+            perception_snapshot["user.input"]["attachments"][0]["name"],
+            "clipboard.png",
+        )
+        self.assertEqual(history.records[0][2], "[User attached 1 image]")
+        self.assertEqual(history.records[0][3], [attachment])
+        self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
+
     def test_turn_can_override_reasoning_for_single_message(self):
-        plan = Plan(actions=[Action(type="respond")])
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             llm,
@@ -393,10 +434,76 @@ class OrchestratorTests(unittest.TestCase):
             _context_builder,
         ) = self._build_orchestrator(plan=plan, summary_trigger=999)
 
-        list(orch.handle_user_input("hello", think_override=True))
+        list(orch.handle_user_input(self.SESSION_ID, "hello", think_override=True))
 
         self.assertEqual(len(llm.calls), 1)
         self.assertIs(llm.calls[0][1], True)
+
+    def test_turn_emits_idle_when_llm_stream_raises(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["partial"],
+            llm_error=RuntimeError("stream failed"),
+            summary_trigger=999,
+        )
+
+        events = []
+        with self.assertRaises(RuntimeError):
+            for event in orch.handle_user_input(self.SESSION_ID, "hello"):
+                events.append(event)
+
+        state_values = [
+            event.state for event in events if isinstance(event, AssistantStateEvent)
+        ]
+        self.assertEqual(state_values[-1], AssistantState.IDLE)
+
+    def test_shared_orchestrator_does_not_leak_session_between_turns(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            planner,
+            _tool_executor,
+            context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        list(orch.handle_user_input("session-a", "hello"))
+        list(orch.handle_user_input("session-b", "hello"))
+
+        self.assertEqual([record[0] for record in history.records], [
+            "session-a",
+            "session-a",
+            "session-b",
+            "session-b",
+        ])
+        self.assertEqual(context_builder.calls[0]["session_id"], "session-a")
+        self.assertEqual(context_builder.calls[1]["session_id"], "session-b")
+
+        first_perception = planner.calls[0][1]
+        second_perception = planner.calls[1][1]
+        self.assertEqual(
+            first_perception[PerceptionKey.USER_INPUT.value]["text"],
+            "hello",
+        )
+        self.assertEqual(
+            second_perception[PerceptionKey.USER_INPUT.value]["text"],
+            "hello",
+        )
 
 
 if __name__ == "__main__":

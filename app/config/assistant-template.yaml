@@ -34,7 +34,6 @@ assistant:
 
 user_context:
   name: user
-  timezone: America/New_York
   preferences: concise, practical answers
   profile: |
     The user is a software engineer working on this local assistant project.
@@ -74,6 +73,19 @@ tts:
     model_path: models/piper/en_US-amy-medium.onnx
     use_cuda: false
 
+logging:
+  level: INFO
+  console_level: INFO
+  file_level: INFO
+  dir: logs
+  file_name: assistant.log
+  max_bytes: 10000000
+  backup_count: 5
+  trace_enabled: true
+  trace_level: DEBUG
+  trace_file_name: trace.log
+  trace_max_bytes: 10000000
+  trace_backup_count: 5
 
 tools:
   web:

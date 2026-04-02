@@ -2,7 +2,7 @@ import re
 import logging
 from typing import Dict, Optional
 
-from app.core.actions import Action
+from app.core.actions import Action, ActionType
 from app.core.plan import Plan
 
 logger = logging.getLogger("planner")
@@ -51,21 +51,18 @@ class Planner:
         # 1. Explicit memory command
         # --------------------------------------------------
         memory_content = self._extract_memory_content(user_text)
-        if memory_content:  # <--- Changed this line
+        if memory_content:
             logger.info("Memory command detected")
 
             actions = [
                 Action(
-                    type="write_memory",
+                    type=ActionType.WRITE_MEMORY,
                     payload={"content": memory_content},
                 ),
-                Action(type="respond"),
+                Action(type=ActionType.RESPOND),
             ]
-
-            logger.info(
-                "Planner decision: memory_write + respond (%d actions)",
-                len(actions),
-            )
+            
+            # Put this return statement back in!
             return Plan(actions=actions)
 
         # --------------------------------------------------
@@ -77,10 +74,10 @@ class Planner:
             return Plan(
                 actions=[
                     Action(
-                        type="web_search",
+                        type=ActionType.WEB_SEARCH,
                         payload={"query": user_text},
                     ),
-                    Action(type="respond"),
+                    Action(type=ActionType.RESPOND),
                 ]
             )
 
@@ -88,7 +85,7 @@ class Planner:
         # 3. Default response
         # --------------------------------------------------
         logger.info("Planner decision: default respond")
-        return Plan(actions=[Action(type="respond")])
+        return Plan(actions=[Action(type=ActionType.RESPOND)])
 
     # ============================================================
     # Intent detection helpers (private)

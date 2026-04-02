@@ -14,13 +14,13 @@ At a high level, every user interaction follows this loop:
 1. User input enters the system
 2. Perception state is updated with the raw input
 3. Relevant memory is retrieved from the vector database
-4. The current turn is persisted to chat history
+4. The current turn is persisted to chat history and any uploaded images are stored
 5. A planner decides what to do
 6. Actions are executed (LLM, tools, services)
 7. Context is assembled from system prompt, summaries, recent history, retrieved memory, and tool output
 8. The assistant response is streamed and persisted
 9. Conversation summarization may run
-7. A response is returned to the user
+10. A response is returned to the user
 
 This loop repeats until the interaction is complete.
 
@@ -46,7 +46,8 @@ It forwards raw input directly into the core orchestration layer.
 **Role:** Raw input → structured signal
 
 Responsibilities:
-- Normalize text
+- Normalize text and attachment payloads
+- Provide shared attachment models and attachment construction helpers
 - Extract basic intent or signals
 - Prepare a clean representation for planners
 
@@ -60,13 +61,16 @@ Heavy reasoning belongs elsewhere.
 **Role:** Central nervous system
 
 The orchestrator:
-- Maintains session state
 - Coordinates all subsystems
-- Runs the main decision loop
-- Retrieves semantic and episodic memory
+- Runs the main turn loop
+- Accepts `session_id` explicitly for each turn instead of storing mutable active-session state
+- Uses a fresh `PerceptionState` snapshot per turn
+- Delegates semantic and episodic retrieval to a `MemoryRetriever`
+- Persists user attachments with their chat turns
 - Routes planner decisions to execution
-- Streams assistant output back as events
-- Triggers summarization when a session reaches the configured threshold
+- Delegates explicit memory writes to a `MemoryActionHandler`
+- Streams assistant output back as events, using a `StreamProcessor` for avatar-expression parsing
+- Delegates summarization to a `TurnFinalizer`
 
 Nothing else in the system should be aware of the *entire* system state.
 
@@ -106,6 +110,7 @@ The LLM layer:
 - Executes inference
 - Returns structured outputs
 - Supports per-request option overrides for non-streaming calls used by planners and summarizers
+- Supports multimodal requests when a message includes an `images` field
 
 All backend-specific details (local vs API, quantization, batching) live here.
 
@@ -135,6 +140,7 @@ Tools never decide *when* they are used — planners do.
 
 Memory:
 - Stores conversations, long-term facts, and session summaries
+- Stores attachment metadata and image retrieval summaries
 - Applies a lightweight memory policy for explicit memory writes
 - Retrieves relevant past information through vector search
 - Separates **semantic memory** from **episodic conversation memory**
@@ -144,6 +150,7 @@ Memory is treated as an **active subsystem**, not a passive database.
 Current implementation details:
 - `MemoryStore` writes long-term fact-like memory to both SQLite and the Chroma `semantic_memory` collection.
 - `ChatHistoryStore` writes every message to both SQLite and the Chroma `episodic_memory` collection.
+- The current attachment pipeline is image-focused: stored image attachments are saved on disk, indexed in SQLite, and summarized into extra episodic-memory vector documents.
 - `SummaryStore` keeps one rolling summary per session in SQLite.
 - When a session is deleted, both SQLite rows and episodic vector entries for that session are removed.
 
@@ -160,7 +167,7 @@ Storage:
 - Centralizes persistence configuration (path, connection setup)
 
 Current implementation note:
-- `Database` owns the SQLite schema for `chat_history`, `memory`, and `conversation_summary`.
+- `Database` owns the SQLite schema for `chat_history`, `chat_attachments`, `memory`, and `conversation_summary`.
 - `VectorStore` owns two Chroma collections:
   - `semantic_memory`
   - `episodic_memory`
@@ -176,11 +183,12 @@ Current implementation note:
 **Role:** Background processes
 
 Services:
-- Run alongside the main loop
-- Perform monitoring or maintenance
-- Can influence state indirectly
+- Support the main loop with reusable helpers
+- Assemble prompt context and manage turn-finalization side effects
+- Execute tools and auxiliary LLM calls
+- Provide streaming and retrieval helpers
 
-They are persistent, unlike tools.
+Some are persistent, while others are lightweight execution helpers used inside a turn.
 
 ---
 

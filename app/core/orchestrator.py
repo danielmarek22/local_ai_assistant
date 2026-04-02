@@ -1,9 +1,7 @@
-import uuid
 import logging
-import re
 import time
 import os
-from typing import Generator, Optional, Dict
+from typing import Optional
 
 from app.core.events import (
     AssistantSpeechEvent,
@@ -11,20 +9,19 @@ from app.core.events import (
     AvatarExpressionEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.core.actions import Action
+from app.core.actions import ActionType
 from app.core.plan import Plan
+from app.core.stream_processor import StreamProcessor
+from app.core.turn_input import TurnInput
+from app.logging import trace_event
+from app.perception.attachments import Attachment
 from app.perception.state import PerceptionState
 from app.services.tool_executor import ToolExecutor
-
+from app.perception.keys import PerceptionKey
 
 logger = logging.getLogger("orchestrator")
 
-_AVATAR_EXPRESSION_PATTERN = re.compile(
-    r"\[\s*(?:state|expression)\s*:\s*(happy|angry|sad|relaxed|surprised|neutral)\s*\]",
-    re.IGNORECASE,
-)
 _DEFAULT_AVATAR_EXPRESSION = "neutral"
-_EXPRESSION_TAG_PREFIX_PATTERN = re.compile(r"\[\s*(?:state|expression)\s*:\s*", re.IGNORECASE)
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # FATAL errors only
 
@@ -35,174 +32,227 @@ class Orchestrator:
         llm,
         context_builder,
         history_store,
-        memory_store,
         summary_store,
-        summarizer,
         planner,
-        memory_policy,
         tool_executor: ToolExecutor,
-        summary_trigger: int = 10,
+        memory_retriever,
+        memory_action_handler,
+        turn_finalizer,
     ):
         self.llm = llm
         self.context_builder = context_builder
         self.history = history_store
-        self.memory = memory_store
         self.summary_store = summary_store
-        self.summarizer = summarizer
         self.planner = planner
         self.tool_executor = tool_executor
-        self.summary_trigger = summary_trigger
-        self.memory_policy = memory_policy
+        self.memory_retriever = memory_retriever
+        self.memory_action_handler = memory_action_handler
+        self.turn_finalizer = turn_finalizer
 
-        self.perception = PerceptionState()
-
-        self.session_id = str(uuid.uuid4())[:8]
-
-        logger.info(
-            "[%s] Orchestrator initialized (summary_trigger=%d)",
-            self.session_id,
-            summary_trigger,
-        )
-
-    def set_session(self, session_id: str):
-        if self.session_id == session_id:
-            return
-
-        previous_session_id = self.session_id
-        self.session_id = session_id
-        self.perception = PerceptionState()
-
-        logger.info(
-            "[%s] Session activated (previous=%s)",
-            self.session_id,
-            previous_session_id,
-        )
+        logger.info("Orchestrator initialized")
 
     # ============================================================
     # Public entry point
     # ============================================================
 
-    def handle_user_input(self, user_text: str, think_override=None):
+    def handle_user_input(
+        self,
+        session_id: str,
+        user_text: str,
+        think_override=None,
+        attachments: list[Attachment] | None = None,
+    ):
         start_ts = time.perf_counter()
-
-        logger.info("[%s] User input received (len=%d)", self.session_id, len(user_text))
-        logger.debug("[%s] User input text: %r", self.session_id, user_text)
-
-        yield AssistantStateEvent(state=AssistantState.THINKING)
-
-        # --------------------------------------------------------
-        # 1. Update perception with raw input
-        # --------------------------------------------------------
-        self.perception.update(
-            "user.input",
-            {
-                "text": user_text,
-                "source": "keyboard",
-            },
+        perception = PerceptionState()
+        turn_input = TurnInput(
+            user_text=user_text,
+            attachments=attachments or [],
+            think_override=think_override,
         )
+        retrieval_text = turn_input.retrieval_text()
+        history_text = turn_input.history_text()
+        idle_emitted = False
 
-        # --------------------------------------------------------
-        # 2. Vector Retrieval (Semantic + Episodic)
-        # --------------------------------------------------------
-        logger.debug("[%s] Querying vector DB for memories", self.session_id)
-        semantic_memories = self.memory.get_relevant(user_text, limit=3)
-        episodic_memories = self.history.search_past_conversations(user_text, self.session_id, limit=3)
+        try:
+            logger.info(
+                "[%s] User input received (len=%d, images=%d)",
+                session_id,
+                len(turn_input.user_text),
+                len(turn_input.attachments),
+            )
+            trace_event(
+                "orchestrator",
+                "turn_input",
+                session_id=session_id,
+                payload={
+                    "user_text": turn_input.user_text,
+                    "retrieval_text": retrieval_text,
+                    "history_text": history_text,
+                    "think_override": turn_input.think_override,
+                    "attachments": [attachment.to_perception_payload() for attachment in turn_input.attachments],
+                },
+            )
 
-        memory_blocks = []
-        if semantic_memories:
-            memory_blocks.append("Relevant Facts:\n" + "\n".join(f"- {m}" for m in semantic_memories))
-        if episodic_memories:
-            memory_blocks.append("Past Conversations:\n" + "\n".join(f"- {m}" for m in episodic_memories))
+            yield AssistantStateEvent(state=AssistantState.THINKING)
 
-        memory_context = "\n\n".join(memory_blocks) if memory_blocks else None
+            # --------------------------------------------------------
+            # 1. Update perception with raw input
+            # --------------------------------------------------------
+            perception.update(
+                PerceptionKey.USER_INPUT,
+                {
+                    "text": turn_input.user_text,
+                    "source": "keyboard",
+                    "image_count": len(turn_input.attachments),
+                    "attachments": [
+                        attachment.to_perception_payload()
+                        for attachment in turn_input.attachments
+                    ],
+                },
+            )
 
-        # Inject memories into perception so the Planner can read them
-        if memory_context:
-            self.perception.update("memory.retrieved", {"value": f"\n{memory_context}\n"})
-        else:
-            self.perception.update("memory.retrieved", {"value": "No relevant past memories found."})
+            # --------------------------------------------------------
+            # 2. Vector Retrieval (Semantic + Episodic)
+            # --------------------------------------------------------
+            retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
+            memory_context = retrieval.memory_context
+            trace_event(
+                "orchestrator",
+                "memory_retrieval",
+                session_id=session_id,
+                payload={
+                    "query": retrieval_text,
+                    "memory_context": retrieval.memory_context,
+                    "perception_value": retrieval.perception_value,
+                },
+            )
+            perception.update(
+                PerceptionKey.MEMORY_RETRIEVED,
+                {"value": retrieval.perception_value},
+            )
 
-        # --------------------------------------------------------
-        # 3. Persist user input (to SQLite + Vector Store)
-        # --------------------------------------------------------
-        self.history.add(self.session_id, "user", user_text)
-        logger.debug("[%s] User input persisted to history", self.session_id)
+            # --------------------------------------------------------
+            # 3. Persist user input (to SQLite + Vector Store)
+            # --------------------------------------------------------
+            self.history.add(
+                session_id,
+                "user",
+                history_text,
+                attachments=turn_input.attachments,
+            )
 
-        # --------------------------------------------------------
-        # 4. Planning (decide actions)
-        # --------------------------------------------------------
-        perception_snapshot = self.perception.snapshot()
-        plan = self._plan(user_text, perception_snapshot)
+            # --------------------------------------------------------
+            # 4. Planning (decide actions)
+            # --------------------------------------------------------
+            perception_snapshot = perception.snapshot()
+            plan = self._plan(
+                session_id=session_id,
+                user_text=retrieval_text or turn_input.user_text,
+                perception=perception_snapshot,
+            )
 
-        logger.debug("[%s] Plan actions: %s", self.session_id, [action.type for action in plan.actions])
+            logger.debug(
+                "[%s] Plan actions: %s",
+                session_id,
+                [action.type for action in plan.actions],
+            )
+            trace_event(
+                "orchestrator",
+                "plan_result",
+                session_id=session_id,
+                payload=[
+                    {"type": action.type.value, "payload": action.payload}
+                    for action in plan.actions
+                ],
+            )
 
-        tool_context: Optional[str] = None
+            tool_context: Optional[str] = None
 
-        # --------------------------------------------------------
-        # 5. Execute actions
-        # --------------------------------------------------------
-        for action in plan.actions:
-            logger.info("[%s] Executing action '%s'", self.session_id, action.type)
+            # --------------------------------------------------------
+            # 5. Execute actions
+            # --------------------------------------------------------
+            for action in plan.actions:
+                logger.info("[%s] Executing action '%s'", session_id, action.type.value)
 
-            if action.type == "web_search":
-                tool_context = yield from self.tool_executor.execute(action, user_text)
+                if action.type == ActionType.WEB_SEARCH:
+                    tool_context = yield from self.tool_executor.execute(
+                        action,
+                        turn_input.user_text,
+                    )
 
-            elif action.type == "write_memory":
-                self._run_memory_action(action)
+                elif action.type == ActionType.WRITE_MEMORY:
+                    self.memory_action_handler.handle(session_id, action)
 
-            elif action.type == "respond":
-                logger.debug("[%s] Respond action reached, stopping action loop", self.session_id)
-                break
+                elif action.type == ActionType.RESPOND:
+                    logger.debug("[%s] Respond action reached", session_id)
+                    break
 
-            else:
-                logger.warning("[%s] Unknown action '%s', skipping", self.session_id, action.type)
+                else:
+                    raise ValueError(f"Orchestrator received unhandled action type: {action.type}")
 
-        # --------------------------------------------------------
-        # 6. Context construction (Merge Memory & Tools)
-        # --------------------------------------------------------
-        # We combine retrieved memory and tool outputs so the context_builder 
-        # doesn't need its signature changed.
-        combined_context_parts = []
-        if memory_context:
-            combined_context_parts.append(f"--- RETRIEVED MEMORY ---\n{memory_context}")
-        if tool_context:
-            combined_context_parts.append(f"--- TOOL RESULTS ---\n{tool_context}")
+            # --------------------------------------------------------
+            # 6. Context construction
+            # --------------------------------------------------------
+            messages = self._build_context(
+                session_id=session_id,
+                user_text=turn_input.user_text,
+                memory_context=memory_context,
+                tool_context=tool_context,
+                attachments=turn_input.attachments,
+            )
 
-        final_injected_context = "\n\n".join(combined_context_parts) if combined_context_parts else None
+            # --------------------------------------------------------
+            # 7. LLM streaming response
+            # --------------------------------------------------------
+            response = yield from self._stream_response(
+                session_id,
+                messages,
+                think_override=turn_input.think_override,
+            )
 
-        messages = self._build_context(user_text, final_injected_context)
+            # --------------------------------------------------------
+            # 8. Persist assistant response (to SQLite + Vector Store)
+            # --------------------------------------------------------
+            self.history.add(session_id, "assistant", response)
+            trace_event(
+                "orchestrator",
+                "assistant_response",
+                session_id=session_id,
+                payload={"response": response},
+            )
 
-        # --------------------------------------------------------
-        # 7. LLM streaming response
-        # --------------------------------------------------------
-        response = yield from self._stream_response(messages, think_override=think_override)
+            yield AssistantSpeechEvent(text=response, is_final=True)
 
-        # --------------------------------------------------------
-        # 8. Persist assistant response (to SQLite + Vector Store)
-        # --------------------------------------------------------
-        self.history.add(self.session_id, "assistant", response)
-        logger.debug("[%s] Assistant response persisted to history", self.session_id)
+            # --------------------------------------------------------
+            # 9. Post-processing (summarization)
+            # --------------------------------------------------------
+            self.turn_finalizer.finalize(session_id)
 
-        yield AssistantSpeechEvent(text=response, is_final=True)
-        yield AssistantStateEvent(state=AssistantState.IDLE)
+            logger.info(
+                "[%s] Turn completed (duration=%.2f ms)",
+                session_id,
+                (time.perf_counter() - start_ts) * 1000,
+            )
 
-        # --------------------------------------------------------
-        # 9. Post-processing (summarization)
-        # --------------------------------------------------------
-        self._maybe_summarize()
-
-        logger.info(
-            "[%s] Turn completed (duration=%.2f ms)",
-            self.session_id,
-            (time.perf_counter() - start_ts) * 1000,
-        )
+            idle_emitted = True
+            yield AssistantStateEvent(state=AssistantState.IDLE)
+        finally:
+            if not idle_emitted:
+                idle_emitted = True
+                yield AssistantStateEvent(state=AssistantState.IDLE)
 
     # ============================================================
     # Planning
     # ============================================================
 
-    def _plan(self, user_text: str, perception: dict) -> Plan:
-        logger.info("[%s] Running planner", self.session_id)
+    def _plan(self, session_id: str, user_text: str, perception: dict) -> Plan:
+        logger.info("[%s] Running planner", session_id)
+        trace_event(
+            "orchestrator",
+            "planner_input",
+            session_id=session_id,
+            payload={"user_text": user_text, "perception": perception},
+        )
 
         try:
             plan = self.planner.decide(
@@ -210,107 +260,96 @@ class Orchestrator:
                 perception=perception,
             )
         except Exception:
-            logger.exception("[%s] Planner failed", self.session_id)
+            logger.exception("[%s] Planner failed", session_id)
             raise
 
-        logger.info("[%s] Planner produced %d actions", self.session_id, len(plan.actions))
+        logger.info("[%s] Planner produced %d actions", session_id, len(plan.actions))
         return plan
-
-    # ============================================================
-    # Action execution
-    # ============================================================
-    
-    def _run_memory_action(self, action: Action):
-        logger.debug("[%s] Processing memory action", self.session_id)
-
-        decision = self.memory_policy.decide_from_action(action.payload or {})
-
-        if not decision:
-            logger.debug("[%s] Memory action ignored by policy", self.session_id)
-            return
-
-        self.memory.add(
-            content=decision.content,
-            category=decision.category,
-            importance=decision.importance,
-        )
-
-        logger.info(
-            "[%s] Memory written (category=%s, importance=%d)",
-            self.session_id,
-            decision.category,
-            decision.importance,
-        )
 
     # ============================================================
     # Context & response
     # ============================================================
 
-    def _build_context(self, user_text: str, tool_context: Optional[str]):
-        logger.info("[%s] Building context", self.session_id)
+    def _build_context(
+        self,
+        session_id: str,
+        user_text: str,
+        memory_context: Optional[str],
+        tool_context: Optional[str],
+        attachments: list[Attachment] | None = None,
+    ):
+        logger.info("[%s] Building context", session_id)
 
         messages = self.context_builder.build(
-            session_id=self.session_id,
+            session_id=session_id,
             user_text=user_text,
-            injected_context=tool_context, 
+            memory_context=memory_context,
+            tool_context=tool_context,
+            attachments=attachments or [],
         )
 
         logger.debug(
-            "[%s] Context built (messages=%d, tool_context=%s)",
-            self.session_id,
+            "[%s] Context built (messages=%d, memory=%s, tools=%s)",
+            session_id,
             len(messages),
+            bool(memory_context),
             bool(tool_context),
         )
         return messages
 
-    def _stream_response(self, messages, think_override=None):
-        logger.info("[%s] Calling LLM (streaming)", self.session_id)
+    def _stream_response(self, session_id: str, messages, think_override=None):
+        logger.info("[%s] Calling LLM (streaming)", session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
         visible_buffer = ""
-        stream_buffer = ""
         expression_initialized = False
         start_ts = time.perf_counter()
+        processor = StreamProcessor()
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
-            stream_buffer += chunk
-
-            events, stream_buffer = self._extract_expression_events(stream_buffer)
-            visible_buffer, expression_initialized = yield from self._emit_stream_events(
-                events,
+            visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                session_id,
+                processor.push(chunk),
                 visible_buffer,
                 expression_initialized,
             )
 
-        events, stream_buffer = self._extract_expression_events(stream_buffer, force=True)
-        visible_buffer, expression_initialized = yield from self._emit_stream_events(
-            events,
+        visible_buffer, expression_initialized = yield from self._emit_processor_events(
+            session_id,
+            processor.flush(),
             visible_buffer,
             expression_initialized,
         )
 
         if not expression_initialized:
-            logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
+            logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
             yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
             "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
-            self.session_id,
+            session_id,
             len(visible_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )
+        trace_event(
+            "orchestrator",
+            "llm_stream_complete",
+            session_id=session_id,
+            payload={"visible_response": visible_buffer},
+        )
         return visible_buffer
 
-    def _emit_stream_events(
+    def _emit_processor_events(
         self,
-        events,
+        session_id: str,
+        events: list[tuple[str, str]],
         visible_buffer: str,
         expression_initialized: bool,
     ):
         for event_type, value in events:
             if event_type == "expression":
                 expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, value)
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
                 yield AvatarExpressionEvent(expression=value)
                 continue
 
@@ -319,92 +358,10 @@ class Orchestrator:
 
             if not expression_initialized:
                 expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", self.session_id, _DEFAULT_AVATAR_EXPRESSION)
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
                 yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
             visible_buffer += value
             yield AssistantSpeechEvent(text=value)
 
         return visible_buffer, expression_initialized
-
-    def _extract_expression_events(self, text: str, force: bool = False):
-        events = []
-        remainder = text
-
-        while remainder:
-            match = _AVATAR_EXPRESSION_PATTERN.search(remainder)
-            if match:
-                if match.start() > 0:
-                    events.append(("text", remainder[:match.start()]))
-
-                events.append(("expression", match.group(1).lower()))
-                remainder = remainder[match.end():]
-                continue
-
-            if force:
-                events.append(("text", remainder))
-                return events, ""
-
-            marker_start = self._find_incomplete_expression_start(remainder)
-            if marker_start is None:
-                events.append(("text", remainder))
-                return events, ""
-
-            if marker_start > 0:
-                events.append(("text", remainder[:marker_start]))
-
-            return events, remainder[marker_start:]
-
-        return events, remainder
-
-    def _find_incomplete_expression_start(self, text: str):
-        last_bracket = text.rfind("[")
-        if last_bracket == -1:
-            return None
-
-        candidate = text[last_bracket:]
-        normalized = re.sub(r"\s+", "", candidate.lower())
-
-        if "[state:".startswith(normalized) or "[expression:".startswith(normalized):
-            return last_bracket
-
-        if _EXPRESSION_TAG_PREFIX_PATTERN.match(candidate) and "]" not in candidate:
-            return last_bracket
-
-        return None
-
-    # ============================================================
-    # Summarization
-    # ============================================================
-
-    def _maybe_summarize(self):
-        logger.debug("[%s] Checking summarization conditions", self.session_id)
-
-        if self.summary_store.get(self.session_id):
-            logger.debug("[%s] Summary already exists, skipping", self.session_id)
-            return
-
-        history = self.history.get_recent(
-            session_id=self.session_id,
-            limit=100,
-        )
-
-        if len(history) < self.summary_trigger:
-            return
-
-        logger.info("[%s] Summarizing conversation history", self.session_id)
-
-        summary_input = [
-            {"role": row["role"], "content": row["content"]}
-            for row in history
-        ]
-
-        try:
-            summary = self.summarizer.summarize(summary_input)
-        except Exception:
-            logger.exception("[%s] Summarization failed", self.session_id)
-            return
-
-        self.summary_store.set(self.session_id, summary)
-
-        logger.info("[%s] History summarized (%d chars)", self.session_id, len(summary))

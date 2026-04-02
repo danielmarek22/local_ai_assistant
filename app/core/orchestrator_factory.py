@@ -4,18 +4,22 @@ from app.config import Config
 from app.llm.ollama_stream import OllamaClient
 from app.core.orchestrator import Orchestrator
 from app.storage.database import Database
-from app.storage.vector_store import VectorStore  # NEW: Import the vector store
+from app.storage.vector_store import VectorStore
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
 from app.services.context_builder import ContextBuilder
+from app.services.image_summarizer import ImageSummarizer
 from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
+from app.services.memory_action_handler import MemoryActionHandler
+from app.services.memory_retriever import MemoryRetriever
 from app.services.tool_executor import ToolExecutor
+from app.services.turn_finalizer import TurnFinalizer
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -70,9 +74,8 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database()
-    vector_store = VectorStore()  # NEW: Initialize ChromaDB (CPU based)
-    
-    # UPDATED: Pass vector_store to the memory and history stores
+    vector_store = VectorStore()
+
     history_store = ChatHistoryStore(db, vector_store)
     memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
@@ -92,11 +95,14 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing summarizers")
 
     history_summarizer = HistorySummarizer(llm)
+    image_summarizer = ImageSummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
+    history_store.image_summarizer = image_summarizer
 
     logger.debug(
-        "Summarizers ready: history=%s search=%s",
+        "Summarizers ready: history=%s image=%s search=%s",
         history_summarizer.__class__.__name__,
+        image_summarizer.__class__.__name__,
         search_summarizer.__class__.__name__,
     )
 
@@ -105,6 +111,21 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     memory_policy = SimpleMemoryPolicy()
     logger.debug("Memory policy: %s", memory_policy.__class__.__name__)
+
+    memory_retriever = MemoryRetriever(
+        memory_store=memory_store,
+        history_store=history_store,
+    )
+    memory_action_handler = MemoryActionHandler(
+        memory_store=memory_store,
+        memory_policy=memory_policy,
+    )
+    turn_finalizer = TurnFinalizer(
+        history_store=history_store,
+        summary_store=summary_store,
+        summarizer=history_summarizer,
+        summary_trigger=config.orchestrator["summary_trigger"],
+    )
 
     # --------------------------------------------------
     # Tools
@@ -146,7 +167,6 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
 
-    # UPDATED: Removed memory_store and memory_limit since Orchestrator handles retrieval now
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
         user_context=config.user_context,
@@ -169,13 +189,12 @@ def build_orchestrator() -> Orchestrator:
         llm=llm,
         context_builder=context_builder,
         history_store=history_store,
-        memory_store=memory_store,
         summary_store=summary_store,
-        summarizer=history_summarizer,
         planner=planner,
         tool_executor=tool_executor,
-        memory_policy=memory_policy,
-        summary_trigger=config.orchestrator["summary_trigger"],
+        memory_retriever=memory_retriever,
+        memory_action_handler=memory_action_handler,
+        turn_finalizer=turn_finalizer,
     )
 
     logger.info(

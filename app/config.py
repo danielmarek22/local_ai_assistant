@@ -51,7 +51,17 @@ class Config:
             "logging",
             {
                 "level": "INFO",
+                "console_level": "INFO",
+                "file_level": "INFO",
                 "dir": "logs",
+                "file_name": "assistant.log",
+                "max_bytes": 10_000_000,
+                "backup_count": 5,
+                "trace_enabled": True,
+                "trace_level": "DEBUG",
+                "trace_file_name": "trace.log",
+                "trace_max_bytes": 10_000_000,
+                "trace_backup_count": 5,
             },
         )
 

@@ -4,7 +4,6 @@ import { UIManager } from './js/ui-manager.js';
 import { NetworkClient } from './js/network-client.js';
 import { CONFIG } from './js/config.js';
 
-// 1. Initialize Sub-systems
 const audioManager = new AudioManager();
 const uiManager = new UIManager();
 const sessionStorageKey = CONFIG.UI.STORAGE_KEYS.CURRENT_SESSION;
@@ -41,10 +40,9 @@ function clearSessionContext() {
     sessionStorage.removeItem(sessionStorageKey);
 }
 
-// 2. Initialize Avatar
 const avatarManager = new AvatarManager(
-    'canvas-container', 
-    () => audioManager.getVisemeData() 
+    'canvas-container',
+    () => audioManager.getVisemeData()
 );
 
 function syncAssistantPresentation() {
@@ -67,7 +65,6 @@ uiManager.onVolumeChange((volume) => {
     audioManager.setVolume(volume);
 });
 
-// 3. Define Network Handlers
 const handlers = {
     onSessionInit: ({ serverInstanceId, sessionId }) => {
         currentServerInstanceId = serverInstanceId;
@@ -96,8 +93,6 @@ const handlers = {
     }
 };
 
-// 4. Connect Network
-// (URL is now handled inside NetworkClient via Config)
 const client = new NetworkClient(handlers);
 const storedSessionContext = readStoredSessionContext();
 
@@ -111,12 +106,10 @@ if (storedSessionContext?.sessionId && storedSessionContext?.serverInstanceId) {
     client.connect({ sessionMode: 'new' });
 }
 
-// 5. Handle User Input
 uiManager.onSend((text, options) => {
-    // Browsers require user interaction to start AudioContext
     audioManager.init();
-    
-    uiManager.appendUserMessage(text);
+
+    uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
 });
 

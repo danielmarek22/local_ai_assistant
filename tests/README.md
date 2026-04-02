@@ -21,15 +21,22 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Injected background context behavior
   - Summary inclusion behavior
   - Deduplication and filtering of recent history
+  - Replaying recent stored image attachments into multimodal context
 
 - `test_memory_store.py`
   - SQLite + vector-store dual writes
   - Semantic retrieval through the memory collection
 
+- `test_chat_history.py`
+  - Persisted attachment metadata and upload storage behavior
+  - Image-summary writes into episodic memory
+  - Session deletion cleanup across SQLite, uploaded files, and vector data
+
 - `test_orchestrator.py`
   - Turn lifecycle and event emission
   - Memory/tool context injection into prompts
   - Avatar expression tag parsing
+  - Image-only user turns and attachment persistence
   - Summarization trigger behavior
 
 - `test_tool_executor.py`
@@ -39,6 +46,7 @@ Tests currently focus on deterministic core behavior that can be validated witho
 - `test_server_sessions.py`
   - Session listing/open/delete behavior
   - Session summary access
+  - Restoring stored image attachments in session history
   - Local session switching semantics
 
 - `test_http_retries.py`
@@ -86,5 +94,5 @@ When adding tests, prefer:
 Suggested next additions:
 
 - Websocket-level tests for streaming and TTS event sequencing.
-- End-to-end tests for vector-store deletion and retrieval consistency.
+- Browser-level tests for attachment and clipboard workflows.
 - Tests around summarizer prompt structure and summary replacement behavior.

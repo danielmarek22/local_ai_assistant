@@ -7,6 +7,9 @@ Support utilities and long-lived helper services used by the orchestrator.
 - Prompt/context assembly
 - Search result summarization
 - History summarization
+- Image summarization for long-term retrieval
+- Memory retrieval helpers
+- Turn-finalization helpers
 - Tool execution helpers
 - Text streaming helpers such as sentence splitting
 
@@ -19,6 +22,11 @@ Support utilities and long-lived helper services used by the orchestrator.
   - injected background context (retrieved memory + tool results)
   - session summary
   - recent chat history
+- `memory_retriever.py` combines semantic memory and episodic history retrieval into one reusable turn helper.
+- `memory_action_handler.py` isolates explicit planner-driven memory writes from the orchestrator.
+- `turn_finalizer.py` owns rolling-summary updates after a turn completes.
+- `stream_processor.py` lives under `app/core` because it is turn-stream parsing logic, but it serves the same “small helper around orchestration” role.
+- `image_summarizer.py` generates one concise factual summary per stored image so attachments can be found again through episodic vector search without resending every old image to the model.
 - `tool_executor.py` is the adapter that turns planner actions into tool calls.
 
 Some files in this directory are classic "services", while others are prompt and

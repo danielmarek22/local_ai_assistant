@@ -419,6 +419,46 @@ body {
     animation: fadeIn 0.3s ease;
 }
 
+.message-body {
+    white-space: pre-wrap;
+}
+
+.message-attachments {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+}
+
+.message-attachment {
+    margin: 0;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.message.user .message-attachment {
+    border-color: rgba(0, 0, 0, 0.12);
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.message-attachment-image {
+    display: block;
+    width: 100%;
+    max-height: 220px;
+    object-fit: cover;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.message-attachment-meta {
+    padding: 6px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: inherit;
+    opacity: 0.9;
+}
+
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
 .message.user {
@@ -497,14 +537,74 @@ body {
     background: rgba(0, 0, 0, 0.3);
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     display: flex;
-    align-items: flex-end; /* Aligns button to bottom when text grows */
+    align-items: flex-end;
     gap: 10px;
     border-bottom-left-radius: 15px;
     border-bottom-right-radius: 15px;
 }
 
-#user-input {
+#composer-field {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+#attachment-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attachment-chip {
+    position: relative;
+    width: 72px;
+    height: 72px;
+    margin: 0;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.attachment-chip-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.attachment-chip-meta {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 14px 6px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #eef5fb;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.78) 100%);
+}
+
+.attachment-chip-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 20px;
+    height: 20px;
+    border: none;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+}
+
+#user-input {
+    width: 100%;
+    box-sizing: border-box;
     padding: 12px;
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.1);
@@ -512,13 +612,11 @@ body {
     color: white;
     outline: none;
     transition: border 0.2s;
-    
-    /* New styles for auto-expansion */
-    resize: none;         /* Hide manual resize handle */
-    overflow-y: hidden;   /* Hide scrollbar initially */
-    min-height: 20px;     /* Minimum height (approx 1 line) */
-    max-height: 150px;    /* Limit height to prevent taking over screen */
-    line-height: 1.5;     /* Good readability */
+    resize: none;
+    overflow-y: hidden;
+    min-height: 20px;
+    max-height: 150px;
+    line-height: 1.5;
 }
 
 #user-input:focus { border-color: #00ff99; }
@@ -599,6 +697,14 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.22);
     background: rgba(255, 255, 255, 0.04);
     flex-shrink: 0;
+}
+
+.composer-menu-icon {
+    width: 16px;
+    flex-shrink: 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #8fb8c6;
 }
 
 .composer-menu-item.active .composer-menu-check {

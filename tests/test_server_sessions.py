@@ -1,12 +1,16 @@
 import importlib
 import json
+import shutil
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
+from app.perception.state import ImageAttachment
 from app.storage.database import Database
 
 
@@ -58,15 +62,9 @@ server_module = _load_server_module()
 
 
 class FakeOrchestrator:
-    def __init__(self, history_store, summary_store, session_id="active-session"):
+    def __init__(self, history_store, summary_store):
         self.history = history_store
         self.summary_store = summary_store
-        self.session_id = session_id
-        self.session_switches = []
-
-    def set_session(self, session_id: str):
-        self.session_id = session_id
-        self.session_switches.append(session_id)
 
 class FakeCollection:
     def __init__(self):
@@ -98,21 +96,24 @@ class FakeWebSocket:
 
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
         self.db = Database(path=":memory:")
-        self.vector_store = FakeVectorStore() # NEW
-        self.history = ChatHistoryStore(self.db, self.vector_store) # UPDATED
+        self.vector_store = FakeVectorStore()
+        self.history = ChatHistoryStore(self.db, self.vector_store, uploads_root=self.temp_dir.name)
         self.summary_store = SummaryStore(self.db)
 
         self.history.add("session-a", "user", "First chat")
         self.history.add("session-a", "assistant", "Reply A")
         self.history.add("session-b", "user", "Second chat")
         self.history.add("session-b", "assistant", "Reply B")
-        self.summary_store.set("session-b", "Summary B")
+
+        self.summary_store.set("session-b", "Summary B", 2)
 
         self.fake_orchestrator = FakeOrchestrator(
             history_store=self.history,
             summary_store=self.summary_store,
-            session_id="session-b",
         )
         server_module.app.state.orchestrator = self.fake_orchestrator
         server_module.app.state.server_instance_id = "server-1"
@@ -140,7 +141,47 @@ class ServerSessionTests(unittest.TestCase):
             ],
         )
 
-    def test_delete_session_removes_rows_and_resets_active_session(self):
+    def test_get_session_includes_stored_image_attachments(self):
+        self.history.add(
+            "session-images",
+            "user",
+            "Screenshot here",
+            attachments=[
+                ImageAttachment(
+                    name="screen.png",
+                    mime_type="image/png",
+                    base64_data="aGVsbG8=",
+                    size_bytes=5,
+                )
+            ],
+        )
+
+        payload = server_module.asyncio.run(server_module.get_session("session-images"))
+
+        self.assertEqual(len(payload["messages"]), 1)
+        attachments = payload["messages"][0]["attachments"]
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["name"], "screen.png")
+        self.assertEqual(attachments[0]["mime_type"], "image/png")
+        self.assertTrue(attachments[0]["url"].startswith("/static/"))
+
+    def test_delete_session_removes_rows(self):
+        message_id = self.history.add(
+            "session-b",
+            "user",
+            "Attached image",
+            attachments=[
+                ImageAttachment(
+                    name="screen.png",
+                    mime_type="image/png",
+                    base64_data="aGVsbG8=",
+                    size_bytes=5,
+                )
+            ],
+        )
+        attachment_dir = Path(self.temp_dir.name) / "session-b" / str(message_id)
+        self.assertTrue(attachment_dir.exists())
+
         response = server_module.asyncio.run(server_module.delete_session("session-b"))
 
         self.assertEqual(response["deleted"], True)
@@ -150,8 +191,7 @@ class ServerSessionTests(unittest.TestCase):
             {"session_id": "session-b"},
             self.vector_store.episodic_collection.deleted_wheres,
         )
-        self.assertEqual(len(self.fake_orchestrator.session_switches), 1)
-        self.assertNotEqual(self.fake_orchestrator.session_switches[0], "session-b")
+        self.assertFalse(attachment_dir.exists())
 
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):
         session_id = server_module.resolve_session_id(
@@ -184,18 +224,38 @@ class ServerSessionTests(unittest.TestCase):
         self.assertNotEqual(session_id, "session-a")
 
     def test_parse_user_message_supports_structured_reasoning_override(self):
-        text, reasoning = server_module.parse_user_message(
+        text, reasoning, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
         )
 
         self.assertEqual(text, "hello")
         self.assertIs(reasoning, True)
+        self.assertEqual(attachments, [])
+
+    def test_parse_user_message_parses_base64_image_attachments(self):
+        text, reasoning, attachments = server_module.parse_user_message(
+            '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":5}]}'
+        )
+
+        self.assertEqual(text, "look")
+        self.assertIsNone(reasoning)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].name, "cat.png")
+        self.assertEqual(attachments[0].mime_type, "image/png")
+        self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
+
+    def test_parse_user_message_rejects_empty_payload_without_text_or_images(self):
+        with self.assertRaises(ValueError):
+            server_module.parse_user_message(
+                '{"type":"user_message","text":"   ","attachments":[]}'
+            )
 
     def test_parse_user_message_keeps_plain_text_backward_compatible(self):
-        text, reasoning = server_module.parse_user_message("hello")
+        text, reasoning, attachments = server_module.parse_user_message("hello")
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+        self.assertEqual(attachments, [])
 
     def test_should_forward_state_holds_responding_until_audio(self):
         self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))

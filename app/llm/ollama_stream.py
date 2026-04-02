@@ -3,6 +3,7 @@ import json
 import time
 import logging
 from .base import LLMClient
+from app.logging import trace_event
 
 logger = logging.getLogger("ollama_client")
 
@@ -27,20 +28,24 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        
+        # Use a Session to reuse the TCP connection for faster, lower-latency requests
+        self.session = requests.Session()
 
     def chat(
         self,
         messages,
         think_override=None,
         options_override: dict | None = None,
-    ) -> str:
+        timeout_override: float | None = None,
+        max_retries_override: int | None = None,  # <-- Added parameter
+        ) -> str:
         """
         Non-streaming chat call.
         Used for planners, summarizers, and other structured outputs.
         """
         think_value = self._resolve_think_value(think_override)
         
-        # Merge default instance options with specific request overrides
         request_options = self.options.copy()
         if options_override:
             request_options.update(options_override)
@@ -59,16 +64,27 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
+        trace_event("llm", "chat_request", payload=payload)
 
-        r = self._post_with_retry(payload, stream=False)
+        # Pass both overrides down to the post method
+        r = self._post_with_retry(
+            payload, 
+            stream=False, 
+            timeout_override=timeout_override,
+            max_retries_override=max_retries_override  # <-- Pass it down
+        )
         r.raise_for_status()
 
         data = r.json()
         message = data.get("message", {})
-        logger.info(
-            "Ollama chat raw output: content=%r thinking=%r",
-            message.get("content"),
-            message.get("thinking"),
+        trace_event(
+            "llm",
+            "chat_response",
+            payload={
+                "content": message.get("content"),
+                "thinking": message.get("thinking"),
+                "done_reason": data.get("done_reason"),
+            },
         )
 
         return message["content"]
@@ -79,27 +95,24 @@ class OllamaClient(LLMClient):
         # 1. Create a shallow copy to avoid mutating the class-level options
         request_options = self.options.copy()
             
-        # --- PREVIOUS: Map max_tokens from your YAML to Ollama's num_predict ---
+        # --- Map max_tokens from your YAML to Ollama's num_predict ---
         if "max_tokens" in request_options:
             request_options["num_predict"] = request_options.pop("max_tokens")
 
-        # --- NEW: Anti-Rambling Failsafes ---
-        
+        # --- Anti-Rambling Failsafes ---
         # Clean up OpenAI specific params so Ollama doesn't complain
         request_options.pop("frequency_penalty", None)
         request_options.pop("presence_penalty", None) 
         
         # Force a strict repetition penalty to break infinite loops.
-        # Ollama's default is often too weak. 1.15 to 1.2 is the sweet spot.
         if "repeat_penalty" not in request_options:
             request_options["repeat_penalty"] = 1.15
 
-        # Lower the temperature (Reasoning models ramble heavily if this is above 0.7)
+        # Lower the temperature
         if "temperature" not in request_options or request_options["temperature"] > 0.6:
-                request_options["temperature"] = 0.6
+            request_options["temperature"] = 0.6
         
-        # Ensure stop sequences exist just in case the Modelfile is missing them.
-        # This covers the Llama and Qwen bases that DeepSeek distills are built on.
+        # Ensure stop sequences exist
         existing_stops = request_options.get("stop", [])
         if isinstance(existing_stops, str):
             existing_stops = [existing_stops]
@@ -114,7 +127,7 @@ class OllamaClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": request_options,  # Pass the modified options here
+            "options": request_options,
             "think": think_value,
         }
 
@@ -124,6 +137,7 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
+        trace_event("llm", "stream_request", payload=payload)
 
         collected_content = []
         collected_thinking = []
@@ -136,6 +150,7 @@ class OllamaClient(LLMClient):
                 if not line:
                     continue
 
+                # Kept the decode step just to be safe with older JSON parsers
                 chunk = json.loads(line.decode("utf-8"))
                 message = chunk.get("message", {})
                 content = message.get("content")
@@ -179,17 +194,36 @@ class OllamaClient(LLMClient):
             len("".join(collected_content)),
             len("".join(collected_thinking))
         )
+        trace_event(
+            "llm",
+            "stream_response",
+            payload={
+                "content": "".join(collected_content),
+                "thinking": "".join(collected_thinking),
+            },
+        )
 
-    def _post_with_retry(self, payload: dict, stream: bool):
-        attempts = self.max_retries + 1
+    def _post_with_retry(
+        self, 
+        payload: dict, 
+        stream: bool, 
+        timeout_override: float | None = None,
+        max_retries_override: int | None = None,
+    ):
+        # Determine which retry count to use
+        actual_max_retries = max_retries_override if max_retries_override is not None else self.max_retries
+        attempts = actual_max_retries + 1
+        
+        # Determine which timeout to use
+        request_timeout = timeout_override if timeout_override is not None else self.timeout_s
 
         for attempt in range(1, attempts + 1):
             try:
-                response = requests.post(
+                response = self.session.post(
                     self.url,
                     json=payload,
                     stream=stream,
-                    timeout=self.timeout_s,
+                    timeout=request_timeout,
                 )
                 response.raise_for_status()
                 return response

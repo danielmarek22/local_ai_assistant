@@ -3,7 +3,7 @@
 <head>
     <title>Project Astra: Local AI</title>
     <link rel="stylesheet" href="/static/css/styles.css">
-    
+
     <script type="importmap">
         {
             "imports": {
@@ -16,7 +16,7 @@
 </head>
 <body>
     <div id="canvas-container"></div>
-    
+
     <div id="chat-panel" class="status-idle">
         <div id="status-bar">
             <div class="status-left">
@@ -37,13 +37,17 @@
                 <div id="chat-history">
                     <div class="message astra">System: Online. Ready.</div>
                 </div>
-                
+
                 <div id="input-area">
-                    <textarea 
-                        id="user-input" 
-                        placeholder="Type a message..." 
-                        rows="1"
-                    ></textarea>
+                    <div id="composer-field">
+                        <div id="attachment-preview" class="hidden" aria-live="polite"></div>
+                        <textarea
+                            id="user-input"
+                            placeholder="Type a message or attach images..."
+                            rows="1"
+                        ></textarea>
+                    </div>
+                    <input id="image-input" class="hidden" type="file" accept="image/*" multiple>
                     <div id="composer-menu" class="composer-menu">
                         <button
                             id="composer-menu-btn"
@@ -56,6 +60,15 @@
                             +
                         </button>
                         <div id="composer-menu-popover" class="composer-menu-popover hidden" role="menu">
+                            <button
+                                id="image-attach-btn"
+                                class="composer-menu-item"
+                                type="button"
+                                role="menuitem"
+                            >
+                                <span class="composer-menu-icon" aria-hidden="true">img</span>
+                                <span class="composer-menu-label">Attach images</span>
+                            </button>
                             <button
                                 id="reasoning-toggle"
                                 class="composer-menu-item"
@@ -112,7 +125,7 @@
                 </div>
             </section>
         </div>
-        </div>
+    </div>
 
     <button id="chat-open-btn" class="chat-open-btn" type="button" aria-label="Open chat panel">Chat</button>
 

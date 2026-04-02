@@ -1,3 +1,5 @@
+from app.logging import trace_event
+
 class HistorySummarizer:
     def __init__(self, llm):
         self.llm = llm
@@ -34,4 +36,9 @@ class HistorySummarizer:
         for chunk in self.llm.stream_chat(prompt):
             buffer += chunk
 
+        trace_event(
+            "history_summarizer",
+            "summary_generated",
+            payload={"prompt": prompt, "summary": buffer},
+        )
         return buffer.strip()
