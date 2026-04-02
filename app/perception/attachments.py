@@ -1,5 +1,6 @@
 import base64
 import binascii
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,18 +32,7 @@ class Attachment:
         return payload
 
     def to_api_payload(self) -> dict[str, Any]:
-        payload = {
-            "name": self.name,
-            "mime_type": self.mime_type,
-            "size_bytes": self.size_bytes,
-        }
-        if self.attachment_id is not None:
-            payload["id"] = self.attachment_id
-        if self.url:
-            payload["url"] = self.url
-        if self.summary_text:
-            payload["summary_text"] = self.summary_text
-        return payload
+        return self.to_perception_payload()
 
 
 @dataclass(frozen=True)
@@ -79,6 +69,7 @@ class ImageAttachment(Attachment):
             mime_type=mime_type,
             base64_data=normalized_data,
             size_bytes=size_bytes,
+            sha256=hashlib.sha256(base64.b64decode(normalized_data)).hexdigest(),
         )
 
     @classmethod

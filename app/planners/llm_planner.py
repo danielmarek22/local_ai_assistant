@@ -213,7 +213,7 @@ class LLMPlanner:
                 lines.append("- [Truncated to save context]")
                 break
             try:
-                value = str(entry.value)[:150] # Increased slightly to allow memories to fit
+                value = str(entry)[:150] # Increased slightly to allow memories to fit
             except Exception:
                 value = str(entry)[:150]
 

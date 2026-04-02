@@ -194,7 +194,7 @@ class OrchestratorTests(unittest.TestCase):
         # 1. Verify perception was updated with retrieved memories BEFORE planner runs
         perception_snapshot = planner.calls[0][1]
         self.assertIn(PerceptionKey.MEMORY_RETRIEVED.value, perception_snapshot)
-        self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value].value["value"])
+        self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value]["value"])
 
         # 2. Verify ContextBuilder received memory and tool info separately
         mem_ctx = context_builder.calls[0]["memory_context"]
@@ -411,9 +411,9 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
         perception_snapshot = planner.calls[0][1]
-        self.assertEqual(perception_snapshot["user.input"].value["image_count"], 1)
+        self.assertEqual(perception_snapshot["user.input"]["image_count"], 1)
         self.assertEqual(
-            perception_snapshot["user.input"].value["attachments"][0]["name"],
+            perception_snapshot["user.input"]["attachments"][0]["name"],
             "clipboard.png",
         )
         self.assertEqual(history.records[0][2], "[User attached 1 image]")
@@ -497,11 +497,11 @@ class OrchestratorTests(unittest.TestCase):
         first_perception = planner.calls[0][1]
         second_perception = planner.calls[1][1]
         self.assertEqual(
-            first_perception[PerceptionKey.USER_INPUT.value].value["text"],
+            first_perception[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
         self.assertEqual(
-            second_perception[PerceptionKey.USER_INPUT.value].value["text"],
+            second_perception[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
 

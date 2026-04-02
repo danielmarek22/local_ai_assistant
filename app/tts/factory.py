@@ -41,7 +41,6 @@ def build_tts_engine(tts_config: dict) -> TTS:
             use_cuda=settings.get("use_cuda", True),
         )
 
-    # --- NEW GPT-SOVITS BLOCK ---
     if engine in ("gpt_sovits", "gpt-sovits", "sovits"):
         from app.tts.gpt_sovits_tts import GPTSoVITSTTS
 
@@ -53,7 +52,6 @@ def build_tts_engine(tts_config: dict) -> TTS:
             text_lang=settings.get("text_lang", "en"),
             prompt_lang=settings.get("prompt_lang", "en"),
         )
-    # ----------------------------
 
     raise ValueError(
         f"Unsupported TTS engine '{engine}'. Supported engines: qwen3, piper, gpt_sovits."

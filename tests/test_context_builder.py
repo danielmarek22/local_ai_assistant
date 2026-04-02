@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 from datetime import datetime
 
 from app.perception.state import ImageAttachment
@@ -198,6 +199,58 @@ class ContextBuilderTests(unittest.TestCase):
         system_content = messages[0]["content"]
         self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
         self.assertNotIn("('Conversation summary.', 4)", system_content)
+
+    def test_build_deduplicates_current_user_message_against_stored_attachment_variant(self):
+        image_b64 = "aGVsbG8="
+        image_sha256 = hashlib.sha256(b"hello").hexdigest()
+        history = FakeHistoryStore(
+            [
+                {
+                    "role": "user",
+                    "content": "Current question",
+                    "attachments": [
+                        {
+                            "id": 42,
+                            "name": "cat.png",
+                            "mime_type": "image/png",
+                            "size_bytes": 5,
+                            "storage_path": "static/uploads/s1/1/cat.png",
+                            "url": "/static/uploads/s1/1/cat.png",
+                            "sha256": image_sha256,
+                        }
+                    ],
+                }
+            ]
+        )
+        summary = FakeSummaryStore(None)
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            user_context={},
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+        )
+
+        attachment = ImageAttachment.from_payload(
+            {
+                "name": "cat.png",
+                "mime_type": "image/png",
+                "data": image_b64,
+                "size_bytes": 5,
+            }
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="Current question",
+            attachments=[attachment],
+        )
+
+        user_messages = [message for message in messages if message["role"] == "user"]
+        self.assertEqual(len(user_messages), 1)
+        self.assertEqual(user_messages[0]["content"], "Current question")
+        self.assertEqual(user_messages[0]["images"], [image_b64])
 
 
 if __name__ == "__main__":

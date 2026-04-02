@@ -233,6 +233,9 @@ class Orchestrator:
                 session_id,
                 (time.perf_counter() - start_ts) * 1000,
             )
+
+            idle_emitted = True
+            yield AssistantStateEvent(state=AssistantState.IDLE)
         finally:
             if not idle_emitted:
                 idle_emitted = True
@@ -304,41 +307,19 @@ class Orchestrator:
         processor = StreamProcessor()
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
-            for event_type, value in processor.push(chunk):
-                if event_type == "expression":
-                    expression_initialized = True
-                    logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
-                    yield AvatarExpressionEvent(expression=value)
-                    continue
+            visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                session_id,
+                processor.push(chunk),
+                visible_buffer,
+                expression_initialized,
+            )
 
-                if not value:
-                    continue
-
-                if not expression_initialized:
-                    expression_initialized = True
-                    logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
-                    yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
-
-                visible_buffer += value
-                yield AssistantSpeechEvent(text=value)
-
-        for event_type, value in processor.flush():
-            if event_type == "expression":
-                expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
-                yield AvatarExpressionEvent(expression=value)
-                continue
-
-            if not value:
-                continue
-
-            if not expression_initialized:
-                expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
-                yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
-
-            visible_buffer += value
-            yield AssistantSpeechEvent(text=value)
+        visible_buffer, expression_initialized = yield from self._emit_processor_events(
+            session_id,
+            processor.flush(),
+            visible_buffer,
+            expression_initialized,
+        )
 
         if not expression_initialized:
             logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
@@ -357,3 +338,30 @@ class Orchestrator:
             payload={"visible_response": visible_buffer},
         )
         return visible_buffer
+
+    def _emit_processor_events(
+        self,
+        session_id: str,
+        events: list[tuple[str, str]],
+        visible_buffer: str,
+        expression_initialized: bool,
+    ):
+        for event_type, value in events:
+            if event_type == "expression":
+                expression_initialized = True
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
+                yield AvatarExpressionEvent(expression=value)
+                continue
+
+            if not value:
+                continue
+
+            if not expression_initialized:
+                expression_initialized = True
+                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
+                yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+
+            visible_buffer += value
+            yield AssistantSpeechEvent(text=value)
+
+        return visible_buffer, expression_initialized

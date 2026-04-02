@@ -11,6 +11,7 @@ _TRACE_LOGGER_NAME = "trace"
 _SENSITIVE_BINARY_KEYS = {"base64_data", "data", "images"}
 _DEFAULT_MAX_STRING_CHARS = 4000
 _DEFAULT_MAX_LOG_CHARS = 12000
+_WARNED_UNREGISTERED_TRACE_EVENTS: set[str] = set()
 
 # Trace naming convention table.
 # Canonical grep token format in logs/trace.log:
@@ -329,6 +330,13 @@ def trace_event(
     }
     if not known_component or not known_event:
         record["convention"] = "unregistered"
+        event_key = record["event_key"]
+        if event_key not in _WARNED_UNREGISTERED_TRACE_EVENTS:
+            _WARNED_UNREGISTERED_TRACE_EVENTS.add(event_key)
+            logging.getLogger(__name__).warning(
+                "Unregistered trace event convention: %s",
+                event_key,
+            )
     if session_id is not None:
         record["session_id"] = session_id
     if fields:

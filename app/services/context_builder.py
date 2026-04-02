@@ -231,11 +231,20 @@ class ContextBuilder:
     ) -> tuple:
         attachment_key = tuple(
             (
-                attachment.attachment_id,
+                "sha256",
                 attachment.sha256,
-                attachment.storage_path,
-                attachment.url,
+            )
+            if attachment.sha256
+            else (
+                "id",
+                attachment.attachment_id,
+            )
+            if attachment.attachment_id is not None
+            else (
+                "fallback",
                 attachment.name,
+                attachment.mime_type,
+                attachment.size_bytes,
             )
             for attachment in attachments
         )

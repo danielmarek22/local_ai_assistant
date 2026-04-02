@@ -25,13 +25,11 @@ class PerceptionState:
 
     def __init__(self):
         self._lock = threading.Lock()
-        # Storing strings internally keeps the snapshot() JSON-friendly
         self._entries: Dict[str, PerceptionEntry] = {}
 
     def update(self, key: PerceptionKey, value: Any) -> None:
         """Update or insert a perception signal."""
         with self._lock:
-            # Use .value to store it as a raw string
             self._entries[key.value] = PerceptionEntry(
                 value=value,
                 timestamp=time.time(),
@@ -42,10 +40,13 @@ class PerceptionState:
         with self._lock:
             return self._entries.get(key.value)
 
-    def snapshot(self) -> Dict[str, PerceptionEntry]:
+    def snapshot(self) -> Dict[str, Any]:
         """
         Planner-safe snapshot.
-        Returns shallow copy so planner can't mutate state.
+        Returns plain values so planner code does not depend on PerceptionEntry.
         """
         with self._lock:
-            return dict(self._entries)
+            return {
+                key: entry.value
+                for key, entry in self._entries.items()
+            }

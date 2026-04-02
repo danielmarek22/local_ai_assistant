@@ -4,7 +4,7 @@ from app.config import Config
 from app.llm.ollama_stream import OllamaClient
 from app.core.orchestrator import Orchestrator
 from app.storage.database import Database
-from app.storage.vector_store import VectorStore  # NEW: Import the vector store
+from app.storage.vector_store import VectorStore
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
@@ -74,9 +74,8 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database()
-    vector_store = VectorStore()  # NEW: Initialize ChromaDB (CPU based)
-    
-    # UPDATED: Pass vector_store to the memory and history stores
+    vector_store = VectorStore()
+
     history_store = ChatHistoryStore(db, vector_store)
     memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
@@ -168,7 +167,6 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
 
-    # UPDATED: Removed memory_store and memory_limit since Orchestrator handles retrieval now
     context_builder = ContextBuilder(
         system_prompt=config.assistant["system_prompt"],
         user_context=config.user_context,
