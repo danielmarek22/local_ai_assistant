@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import logging
 
+from app.logging import trace_event
 
 logger = logging.getLogger("memory_retriever")
 
@@ -51,6 +52,17 @@ class MemoryRetriever:
             )
 
         memory_context = "\n\n".join(memory_blocks) if memory_blocks else None
+        trace_event(
+            "memory_retriever",
+            "retrieval_result",
+            session_id=session_id,
+            payload={
+                "query": query,
+                "semantic_memories": semantic_memories,
+                "episodic_memories": episodic_memories,
+                "memory_context": memory_context,
+            },
+        )
         if memory_context:
             return MemoryRetrievalResult(
                 memory_context=memory_context,

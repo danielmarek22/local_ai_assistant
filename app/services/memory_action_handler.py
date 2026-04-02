@@ -1,6 +1,7 @@
 import logging
 
 from app.core.actions import Action
+from app.logging import trace_event
 
 
 logger = logging.getLogger("memory_action_handler")
@@ -18,7 +19,27 @@ class MemoryActionHandler:
 
         if not decision:
             logger.debug("[%s] Memory action ignored by policy", session_id)
+            trace_event(
+                "memory_action",
+                "memory_action_skipped",
+                session_id=session_id,
+                payload={"action_payload": action.payload},
+            )
             return
+
+        trace_event(
+            "memory_action",
+            "memory_action_applied",
+            session_id=session_id,
+            payload={
+                "action_payload": action.payload,
+                "decision": {
+                    "content": decision.content,
+                    "category": decision.category,
+                    "importance": decision.importance,
+                },
+            },
+        )
 
         self.memory.add(
             content=decision.content,

@@ -5,6 +5,7 @@ from typing import Generator, Optional
 from app.core.actions import Action
 from app.core.events import AssistantStateEvent
 from app.core.assistant_state import AssistantState
+from app.logging import trace_event
 
 logger = logging.getLogger("tool_executor")
 
@@ -47,7 +48,15 @@ class ToolExecutor:
 
         try:
             query = (action.payload or {}).get("query") or user_text
-            logger.debug("Tool '%s' query: %r", action.type.value, query)
+            trace_event(
+                "tool_executor",
+                "tool_call",
+                payload={
+                    "tool": action.type.value,
+                    "action_payload": action.payload,
+                    "query": query,
+                },
+            )
 
             context = tool.run(query)
 
@@ -58,10 +67,13 @@ class ToolExecutor:
             )
 
             if context:
-                logger.debug(
-                    "Tool '%s' returned context (%d chars)",
-                    action.type.value,
-                    len(context),
+                trace_event(
+                    "tool_executor",
+                    "tool_result",
+                    payload={
+                        "tool": action.type.value,
+                        "context": context,
+                    },
                 )
             else:
                 logger.debug(

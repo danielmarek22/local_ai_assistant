@@ -3,6 +3,7 @@ import json
 import time
 import logging
 from .base import LLMClient
+from app.logging import trace_event
 
 logger = logging.getLogger("ollama_client")
 
@@ -63,6 +64,7 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
+        trace_event("llm", "chat_request", payload=payload)
 
         # Pass both overrides down to the post method
         r = self._post_with_retry(
@@ -75,10 +77,14 @@ class OllamaClient(LLMClient):
 
         data = r.json()
         message = data.get("message", {})
-        logger.info(
-            "Ollama chat raw output: content=%r thinking=%r",
-            message.get("content"),
-            message.get("thinking"),
+        trace_event(
+            "llm",
+            "chat_response",
+            payload={
+                "content": message.get("content"),
+                "thinking": message.get("thinking"),
+                "done_reason": data.get("done_reason"),
+            },
         )
 
         return message["content"]
@@ -131,6 +137,7 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
+        trace_event("llm", "stream_request", payload=payload)
 
         collected_content = []
         collected_thinking = []
@@ -186,6 +193,14 @@ class OllamaClient(LLMClient):
             "Ollama stream raw output: content_len=%d thinking_len=%d",
             len("".join(collected_content)),
             len("".join(collected_thinking))
+        )
+        trace_event(
+            "llm",
+            "stream_response",
+            payload={
+                "content": "".join(collected_content),
+                "thinking": "".join(collected_thinking),
+            },
         )
 
     def _post_with_retry(

@@ -14,6 +14,7 @@ from app.core.plan import Plan
 from app.perception.state import ImageAttachment, PerceptionState
 from app.core.stream_processor import StreamProcessor
 from app.core.turn_input import TurnInput
+from app.logging import trace_event
 from app.services.tool_executor import ToolExecutor
 from app.perception.keys import PerceptionKey
 
@@ -78,7 +79,18 @@ class Orchestrator:
                 len(turn_input.user_text),
                 len(turn_input.attachments),
             )
-            logger.debug("[%s] User input text: %r", session_id, turn_input.user_text)
+            trace_event(
+                "orchestrator",
+                "turn_input",
+                session_id=session_id,
+                payload={
+                    "user_text": turn_input.user_text,
+                    "retrieval_text": retrieval_text,
+                    "history_text": history_text,
+                    "think_override": turn_input.think_override,
+                    "attachments": [attachment.to_perception_payload() for attachment in turn_input.attachments],
+                },
+            )
 
             yield AssistantStateEvent(state=AssistantState.THINKING)
 
@@ -103,6 +115,16 @@ class Orchestrator:
             # --------------------------------------------------------
             retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
             memory_context = retrieval.memory_context
+            trace_event(
+                "orchestrator",
+                "memory_retrieval",
+                session_id=session_id,
+                payload={
+                    "query": retrieval_text,
+                    "memory_context": retrieval.memory_context,
+                    "perception_value": retrieval.perception_value,
+                },
+            )
             perception.update(
                 PerceptionKey.MEMORY_RETRIEVED,
                 {"value": retrieval.perception_value},
@@ -117,7 +139,6 @@ class Orchestrator:
                 history_text,
                 attachments=turn_input.attachments,
             )
-            logger.debug("[%s] User input persisted to history", session_id)
 
             # --------------------------------------------------------
             # 4. Planning (decide actions)
@@ -133,6 +154,15 @@ class Orchestrator:
                 "[%s] Plan actions: %s",
                 session_id,
                 [action.type for action in plan.actions],
+            )
+            trace_event(
+                "orchestrator",
+                "plan_result",
+                session_id=session_id,
+                payload=[
+                    {"type": action.type.value, "payload": action.payload}
+                    for action in plan.actions
+                ],
             )
 
             tool_context: Optional[str] = None
@@ -153,7 +183,7 @@ class Orchestrator:
                     self.memory_action_handler.handle(session_id, action)
 
                 elif action.type == ActionType.RESPOND:
-                    logger.debug("[%s] Respond action reached, stopping action loop", session_id)
+                    logger.debug("[%s] Respond action reached", session_id)
                     break
 
                 else:
@@ -183,7 +213,12 @@ class Orchestrator:
             # 8. Persist assistant response (to SQLite + Vector Store)
             # --------------------------------------------------------
             self.history.add(session_id, "assistant", response)
-            logger.debug("[%s] Assistant response persisted to history", session_id)
+            trace_event(
+                "orchestrator",
+                "assistant_response",
+                session_id=session_id,
+                payload={"response": response},
+            )
 
             yield AssistantSpeechEvent(text=response, is_final=True)
 
@@ -208,6 +243,12 @@ class Orchestrator:
 
     def _plan(self, session_id: str, user_text: str, perception: dict) -> Plan:
         logger.info("[%s] Running planner", session_id)
+        trace_event(
+            "orchestrator",
+            "planner_input",
+            session_id=session_id,
+            payload={"user_text": user_text, "perception": perception},
+        )
 
         try:
             plan = self.planner.decide(
@@ -307,5 +348,11 @@ class Orchestrator:
             session_id,
             len(visible_buffer),
             (time.perf_counter() - start_ts) * 1000,
+        )
+        trace_event(
+            "orchestrator",
+            "llm_stream_complete",
+            session_id=session_id,
+            payload={"visible_response": visible_buffer},
         )
         return visible_buffer

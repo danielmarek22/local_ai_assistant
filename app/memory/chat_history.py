@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from app.perception.state import ImageAttachment
+from app.logging import trace_event
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
 
@@ -38,6 +39,28 @@ class ChatHistoryStore:
     ):
         current_time = time.time()
         attachments = attachments or []
+        trace_event(
+            "chat_history",
+            "history_add",
+            session_id=session_id,
+            payload={
+                "role": role,
+                "content": content,
+                "attachments": [
+                    {
+                        "name": attachment.name,
+                        "mime_type": attachment.mime_type,
+                        "size_bytes": attachment.size_bytes,
+                        "attachment_id": attachment.attachment_id,
+                        "storage_path": attachment.storage_path,
+                        "url": attachment.url,
+                        "sha256": attachment.sha256,
+                        "summary_text": attachment.summary_text,
+                    }
+                    for attachment in attachments
+                ],
+            },
+        )
 
         cursor = self.db.conn.cursor()
         cursor.execute(
@@ -110,6 +133,16 @@ class ChatHistoryStore:
             file_path = message_dir / f"{sha256}{self._extension_for_mime_type(attachment.mime_type)}"
             if not file_path.exists():
                 file_path.write_bytes(payload)
+            trace_event(
+                "chat_history",
+                "attachment_stored",
+                session_id=session_id,
+                payload={
+                    "file_path": str(file_path),
+                    "bytes": len(payload),
+                    "name": attachment.name,
+                },
+            )
 
             stored_attachment = ImageAttachment(
                 name=attachment.name,
@@ -170,6 +203,11 @@ class ChatHistoryStore:
             return None
 
         summary = summary.strip()
+        trace_event(
+            "chat_history",
+            "attachment_summary",
+            payload={"attachment_name": attachment.name, "summary": summary},
+        )
         return summary or None
 
     def _build_attachment_vector_doc(
@@ -266,9 +304,22 @@ class ChatHistoryStore:
         )
 
         if not results["documents"] or not results["documents"][0]:
+            trace_event(
+                "chat_history",
+                "episodic_search",
+                session_id=current_session,
+                payload={"query": query, "limit": limit, "documents": []},
+            )
             return []
 
-        return results["documents"][0]
+        documents = results["documents"][0]
+        trace_event(
+            "chat_history",
+            "episodic_search",
+            session_id=current_session,
+            payload={"query": query, "limit": limit, "documents": documents},
+        )
+        return documents
 
     def get_recent(self, session_id: str, limit: int = 10):
         cursor = self.db.conn.cursor()
@@ -283,7 +334,14 @@ class ChatHistoryStore:
             (session_id, limit)
         )
         rows = cursor.fetchall()
-        return list(reversed(self._rows_with_attachments(rows)))
+        hydrated = list(reversed(self._rows_with_attachments(rows)))
+        trace_event(
+            "chat_history",
+            "recent_history",
+            session_id=session_id,
+            payload={"limit": limit, "rows": hydrated},
+        )
+        return hydrated
 
     def get_all(self, session_id: str):
         cursor = self.db.conn.cursor()

@@ -1,3 +1,5 @@
+from app.logging import trace_event
+
 class SearchResultSummarizer:
     def __init__(self, llm):
         self.llm = llm
@@ -40,4 +42,16 @@ class SearchResultSummarizer:
         for chunk in self.llm.stream_chat(prompt):
             buffer += chunk
 
+        trace_event(
+            "search_summarizer",
+            "summary_generated",
+            payload={
+                "results": [
+                    {"title": result.title, "url": result.url, "content": result.content}
+                    for result in results
+                ],
+                "prompt": prompt,
+                "summary": buffer,
+            },
+        )
         return buffer.strip()

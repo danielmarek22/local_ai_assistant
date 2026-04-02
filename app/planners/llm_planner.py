@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 from app.core.actions import Action, ActionType
 from app.core.plan import Plan
+from app.logging import trace_event
 
 logger = logging.getLogger("llm_planner")
 
@@ -58,7 +59,7 @@ class LLMPlanner:
         start_ts = time.perf_counter()
 
         logger.info("LLMPlanner invoked (len=%d)", len(user_text))
-        
+
         # VRAM Saver: Truncate user text if it's unreasonably long
         safe_user_text = user_text[:1000] 
         perception_text = self._format_perception(perception)
@@ -89,11 +90,21 @@ class LLMPlanner:
             },
             {"role": "user", "content": safe_user_text},
         ]
-
+        trace_event(
+            "llm_planner",
+            "planner_call",
+            payload={
+                "user_text": user_text,
+                "safe_user_text": safe_user_text,
+                "perception": perception,
+                "prompt": prompt,
+            },
+        )
         buffer = self._call_llm_with_timeout(prompt)
 
         if buffer is None:
             logger.warning("LLMPlanner timed out after %.2fs", self.timeout_ms / 1000)
+            trace_event("llm_planner", "planner_timeout", payload={"timeout_ms": self.timeout_ms})
             return self._fallback_plan()
 
         try:
@@ -118,10 +129,27 @@ class LLMPlanner:
                     len(actions),
                     (time.perf_counter() - start_ts) * 1000,
                 )
+                trace_event(
+                    "llm_planner",
+                    "planner_result",
+                    payload={
+                        "raw_output": buffer,
+                        "extracted_json": data,
+                        "actions": [
+                            {"type": action.type.value, "payload": action.payload}
+                            for action in actions
+                        ],
+                    },
+                )
                 return Plan(actions=actions)
 
         except Exception as e:
             logger.warning("LLMPlanner parsing failed: %s. Raw: %r", e, buffer)
+            trace_event(
+                "llm_planner",
+                "planner_parse_failure",
+                payload={"error": str(e), "raw_output": buffer},
+            )
 
         return self._fallback_plan()
 
@@ -138,12 +166,12 @@ class LLMPlanner:
         timeout_seconds = self.timeout_ms / 1000.0
         
         future = executor.submit(
-            self.llm.chat, 
-            prompt, 
-            False,  # think_override
-            {"temperature": 0.0, "num_predict": 150},  # options_override
-            timeout_seconds,  # timeout_override
-            0  # max_retries_override <-- 0 retries, kill instantly on timeout
+            self.llm.chat,
+            prompt,
+            think_override=False,
+            options_override={"temperature": 0.0, "num_predict": 150},
+            timeout_override=timeout_seconds,
+            max_retries_override=0,
         )
         
         try:

@@ -1,5 +1,6 @@
 import logging
 
+from app.logging import trace_event
 
 logger = logging.getLogger("turn_finalizer")
 
@@ -18,8 +19,6 @@ class TurnFinalizer:
         self.summary_trigger = summary_trigger
 
     def finalize(self, session_id: str) -> None:
-        logger.debug("[%s] Checking summarization conditions", session_id)
-
         summary_data = self.summary_store.get(session_id)
         if summary_data:
             existing_summary, last_count = summary_data
@@ -31,6 +30,16 @@ class TurnFinalizer:
             limit=1000,
         )
         current_count = len(history)
+        trace_event(
+            "turn_finalizer",
+            "summarization_check",
+            session_id=session_id,
+            payload={
+                "current_count": current_count,
+                "last_count": last_count,
+                "summary_trigger": self.summary_trigger,
+            },
+        )
 
         if (current_count - last_count) < self.summary_trigger:
             return
@@ -54,6 +63,12 @@ class TurnFinalizer:
             {"role": row["role"], "content": row["content"]}
             for row in history[last_count:]
         )
+        trace_event(
+            "turn_finalizer",
+            "summary_input",
+            session_id=session_id,
+            payload={"summary_input": summary_input},
+        )
 
         try:
             summary = self.summarizer.summarize(summary_input)
@@ -63,3 +78,9 @@ class TurnFinalizer:
 
         self.summary_store.set(session_id, summary, current_count)
         logger.info("[%s] History summarized (%d chars)", session_id, len(summary))
+        trace_event(
+            "turn_finalizer",
+            "summary_saved",
+            session_id=session_id,
+            payload={"summary": summary, "last_turn_count": current_count},
+        )

@@ -1,3 +1,5 @@
+from app.logging import trace_event
+
 class ImageSummarizer:
     def __init__(self, llm):
         self.llm = llm
@@ -28,7 +30,7 @@ class ImageSummarizer:
             },
         ]
 
-        return self.llm.chat(
+        result = self.llm.chat(
             prompt,
             think_override=False,
             options_override={
@@ -36,3 +38,17 @@ class ImageSummarizer:
                 "num_predict": 160,
             },
         ).strip()
+        trace_event(
+            "image_summarizer",
+            "summary_generated",
+            payload={
+                "attachment": {
+                    "name": attachment.name,
+                    "mime_type": attachment.mime_type,
+                    "size_bytes": attachment.size_bytes,
+                },
+                "prompt": prompt,
+                "summary": result,
+            },
+        )
+        return result

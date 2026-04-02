@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 
+from app.logging import trace_event
 from app.perception.state import ImageAttachment
 
 logger = logging.getLogger("context_builder")
@@ -36,7 +37,6 @@ class ContextBuilder:
         attachments: list[ImageAttachment] | None = None,
     ) -> list[dict]:
         logger.info("[%s] Building context", session_id)
-        logger.debug("[%s] User input len=%d", session_id, len(user_text))
         attachments = attachments or []
 
         messages: list[dict] = []
@@ -58,7 +58,6 @@ class ContextBuilder:
                 summary=summary,
             ),
         })
-        logger.debug("[%s] Added consolidated system context block", session_id)
 
         if memory_context or tool_context:
             logger.info(
@@ -119,6 +118,19 @@ class ContextBuilder:
             session_id,
             len(messages),
             len(attachments),
+        )
+        trace_event(
+            "context_builder",
+            "context_built",
+            session_id=session_id,
+            payload={
+                "user_text": user_text,
+                "summary": summary,
+                "memory_context": memory_context,
+                "tool_context": tool_context,
+                "history_limit_used": history_limit,
+                "messages": messages,
+            },
         )
         return messages
 

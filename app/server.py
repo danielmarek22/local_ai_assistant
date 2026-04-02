@@ -20,12 +20,13 @@ from app.core.events import (
     AssistantStateEvent,
     AvatarExpressionEvent,
 )
-from app.logging import setup_logging
+from app.logging import setup_logging_from_config
 from app.perception.state import ImageAttachment
 from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 
-setup_logging()
+config = Config()
+setup_logging_from_config(config.logging)
 logger = logging.getLogger("server")
 
 app = FastAPI()
@@ -35,8 +36,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 AUDIO_DIR = Path("static/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
-
-config = Config()
 
 tts = build_tts_engine(config.tts)
 

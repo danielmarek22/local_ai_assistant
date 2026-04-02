@@ -1,10 +1,14 @@
 import uuid
 
+from app.config import Config
 from app.core.orchestrator_factory import build_orchestrator
+from app.logging import setup_logging_from_config
 from app.ui.console import print_event
 
 
 def main():
+    config = Config()
+    setup_logging_from_config(config.logging)
     orchestrator = build_orchestrator()
     session_id = uuid.uuid4().hex[:8]
 

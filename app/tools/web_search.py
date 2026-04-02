@@ -2,6 +2,8 @@ import requests
 import logging
 import time
 
+from app.logging import trace_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +38,7 @@ class SearXNGClient:
         Check whether the SearXNG instance is reachable.
         This should be called once at startup.
         """
+        trace_event("web_search", "probe_start", payload={"base_url": self.base_url})
         try:
             requests.get(
                 f"{self.base_url}/search",
@@ -46,6 +49,11 @@ class SearXNGClient:
         except Exception:
             self.is_available = False
 
+        trace_event(
+            "web_search",
+            "probe_result",
+            payload={"base_url": self.base_url, "is_available": self.is_available},
+        )
         return self.is_available
 
     def search(self, query: str, limit: int = 5) -> list[WebSearchResult]:
@@ -53,6 +61,7 @@ class SearXNGClient:
             "q": query,
             "format": "json",
         }
+        trace_event("web_search", "search_request", payload={"params": params, "limit": limit})
 
         response = self._get_with_retry(
             f"{self.base_url}/search",
@@ -72,6 +81,14 @@ class SearXNGClient:
                 )
             )
 
+        trace_event(
+            "web_search",
+            "search_results",
+            payload=[
+                {"title": result.title, "url": result.url, "content": result.content}
+                for result in results
+            ],
+        )
         return results
 
     def _get_with_retry(self, url: str, params: dict):
@@ -138,8 +155,10 @@ class WebSearchTool:
         Execute the web search and return a summarized context string.
         Raises on unexpected failure (orchestrator handles it).
         """
+        trace_event("web_search", "tool_run", payload={"query": query})
         results = self.client.search(query)
         summary = self.summarizer.summarize(results)
+        trace_event("web_search", "tool_summary", payload={"summary": summary})
 
         if not summary:
             return None
