@@ -29,6 +29,8 @@ Memory should be treated as an *active system*, not just a database.
 - `SimpleMemoryPolicy`
   - converts planner `write_memory` actions into concrete storage decisions
 
+The attachment model now has a shared `Attachment` base type, but persistence is still intentionally image-focused today.
+
 ## How Memory Is Used In A Turn
 
 1. The orchestrator receives user input.

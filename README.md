@@ -12,7 +12,7 @@ The current implementation is optimized for a **single local user** running the 
 
 The system is composed of several loosely-coupled subsystems:
 
-- **Core orchestration** – session lifecycle, action routing, logging
+- **Core orchestration** – per-turn coordination, action routing, logging
 - **LLM interface** – model loading, prompting, and inference
 - **Planners** – decide *what* the assistant should do next
 - **Memory & storage** – conversation history, attachments, semantic memory, summaries, and persistence
@@ -34,7 +34,7 @@ The assistant currently uses a **hybrid memory system**:
   - relevant messages and stored image summaries from past sessions via episodic memory
 - Retrieved memory and tool output are injected into the prompt as background context before response generation.
 
-Attached images are handled as a first-class part of the conversation:
+Attachments are handled as a first-class part of the conversation. The current implementation supports images and keeps a lightweight base `Attachment` model so other types can be added later without reshaping the turn pipeline:
 
 - the browser converts selected or pasted images to Base64 before sending them
 - the backend stores the image bytes on disk and attachment metadata in SQLite

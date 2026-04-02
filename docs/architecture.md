@@ -47,6 +47,7 @@ It forwards raw input directly into the core orchestration layer.
 
 Responsibilities:
 - Normalize text and attachment payloads
+- Provide shared attachment models and attachment construction helpers
 - Extract basic intent or signals
 - Prepare a clean representation for planners
 
@@ -60,14 +61,16 @@ Heavy reasoning belongs elsewhere.
 **Role:** Central nervous system
 
 The orchestrator:
-- Maintains session state
 - Coordinates all subsystems
-- Runs the main decision loop
-- Retrieves semantic and episodic memory
-- Persists user image attachments with their chat turns
+- Runs the main turn loop
+- Accepts `session_id` explicitly for each turn instead of storing mutable active-session state
+- Uses a fresh `PerceptionState` snapshot per turn
+- Delegates semantic and episodic retrieval to a `MemoryRetriever`
+- Persists user attachments with their chat turns
 - Routes planner decisions to execution
-- Streams assistant output back as events
-- Triggers summarization when a session reaches the configured threshold
+- Delegates explicit memory writes to a `MemoryActionHandler`
+- Streams assistant output back as events, using a `StreamProcessor` for avatar-expression parsing
+- Delegates summarization to a `TurnFinalizer`
 
 Nothing else in the system should be aware of the *entire* system state.
 
@@ -137,7 +140,7 @@ Tools never decide *when* they are used — planners do.
 
 Memory:
 - Stores conversations, long-term facts, and session summaries
-- Stores image attachment metadata and retrieval summaries
+- Stores attachment metadata and image retrieval summaries
 - Applies a lightweight memory policy for explicit memory writes
 - Retrieves relevant past information through vector search
 - Separates **semantic memory** from **episodic conversation memory**
@@ -147,7 +150,7 @@ Memory is treated as an **active subsystem**, not a passive database.
 Current implementation details:
 - `MemoryStore` writes long-term fact-like memory to both SQLite and the Chroma `semantic_memory` collection.
 - `ChatHistoryStore` writes every message to both SQLite and the Chroma `episodic_memory` collection.
-- Stored image attachments are saved on disk, indexed in SQLite, and summarized into extra episodic-memory vector documents.
+- The current attachment pipeline is image-focused: stored image attachments are saved on disk, indexed in SQLite, and summarized into extra episodic-memory vector documents.
 - `SummaryStore` keeps one rolling summary per session in SQLite.
 - When a session is deleted, both SQLite rows and episodic vector entries for that session are removed.
 
@@ -180,11 +183,12 @@ Current implementation note:
 **Role:** Background processes
 
 Services:
-- Run alongside the main loop
-- Perform monitoring or maintenance
-- Can influence state indirectly
+- Support the main loop with reusable helpers
+- Assemble prompt context and manage turn-finalization side effects
+- Execute tools and auxiliary LLM calls
+- Provide streaming and retrieval helpers
 
-They are persistent, unlike tools.
+Some are persistent, while others are lightweight execution helpers used inside a turn.
 
 ---
 
