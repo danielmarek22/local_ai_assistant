@@ -39,7 +39,7 @@ class _FakeStreamResponse(_FakeResponse):
 
 class HttpRetryTests(unittest.TestCase):
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
-    @patch("app.llm.ollama_stream.requests.post")
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_chat_retries_on_timeout_then_succeeds(self, post_mock, _sleep_mock):
         post_mock.side_effect = [
             requests.Timeout("timeout"),
@@ -63,11 +63,14 @@ class HttpRetryTests(unittest.TestCase):
         self.assertFalse(post_mock.call_args.kwargs["json"]["think"])
 
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
-    @patch("app.llm.ollama_stream.requests.post")
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_chat_does_not_retry_on_http_400(self, post_mock, _sleep_mock):
         response = requests.Response()
         response.status_code = 400
-        post_mock.side_effect = requests.HTTPError(response=response)
+        post_mock.return_value = _FakeResponse(
+            http_error=requests.HTTPError(response=response),
+            status_code=400,
+        )
 
         client = OllamaClient(
             model="test-model",
@@ -82,7 +85,7 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(post_mock.call_count, 1)
 
-    @patch("app.llm.ollama_stream.requests.post")
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_uses_configured_thinking_level(self, post_mock):
         post_mock.return_value = _FakeResponse(
             data={"message": {"content": "ok"}},
@@ -99,7 +102,7 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(post_mock.call_args.kwargs["json"]["think"], "medium")
 
-    @patch("app.llm.ollama_stream.requests.post")
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_surfaces_thinking_when_content_is_empty(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[

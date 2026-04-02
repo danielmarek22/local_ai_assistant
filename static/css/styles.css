@@ -258,7 +258,7 @@ body {
 
 .config-control-input input[type="range"] {
     flex: 1;
-    accent-color: #00ff99;
+    accent-color: #00c3ff;
 }
 
 .config-control-input span {
@@ -463,10 +463,10 @@ body {
 
 .message.user {
     align-self: flex-end;
-    background: #00ff99;
+    background: #00c3ff;
     color: #000;
     border-bottom-right-radius: 2px;
-    box-shadow: 0 2px 5px rgba(0,255,153,0.2);
+    box-shadow: 0 2px 5px rgba(0,195,255,0.2);
 }
 
 .message.astra {
@@ -619,7 +619,7 @@ body {
     line-height: 1.5;
 }
 
-#user-input:focus { border-color: #00ff99; }
+#user-input:focus { border-color: #00b5fd; }
 
 .composer-menu {
     position: relative;
@@ -724,7 +724,7 @@ body {
     padding: 0 20px;
     border-radius: 8px;
     border: none;
-    background: #00ff99;
+    background: #00c3ff;
     color: #000;
     font-weight: bold;
     cursor: pointer;
