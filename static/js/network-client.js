@@ -172,4 +172,37 @@ export class NetworkClient {
 
         return response.json();
     }
+
+    async reflectMemories(daysOld = 0) {
+        const response = await fetch('/api/admin/reflect', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                days_old: daysOld,
+            }),
+        });
+
+        if (!response.ok) {
+            let detail = `Failed to run reflection (${response.status})`;
+
+            try {
+                const payload = await response.json();
+                const message = payload?.detail?.message;
+                const error = payload?.detail?.error;
+                if (message && error) {
+                    detail = `${message}: ${error}`;
+                } else if (message) {
+                    detail = message;
+                }
+            } catch (_error) {
+                // Keep default message when response is non-JSON.
+            }
+
+            throw new Error(detail);
+        }
+
+        return response.json();
+    }
 }

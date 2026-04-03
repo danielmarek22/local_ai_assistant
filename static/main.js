@@ -11,6 +11,7 @@ let currentServerInstanceId = null;
 let currentSessionId = null;
 let assistantState = 'idle';
 let assistantExpression = 'neutral';
+let reflectionInFlight = false;
 
 function readStoredSessionContext() {
     const rawValue = sessionStorage.getItem(sessionStorageKey);
@@ -46,10 +47,17 @@ const avatarManager = new AvatarManager(
 );
 
 function syncAssistantPresentation() {
-    const visualState = audioManager.hasActiveSpeech() ? 'responding' : assistantState;
+    const baseState = reflectionInFlight ? 'dreaming' : assistantState;
+    const visualState = audioManager.hasActiveSpeech() ? 'responding' : baseState;
     uiManager.updateStatus(visualState);
     avatarManager.setState(visualState);
     avatarManager.setExpression(assistantExpression);
+}
+
+function setReflectionInFlight(isInFlight) {
+    reflectionInFlight = isInFlight;
+    uiManager.setReflectRunning(isInFlight);
+    syncAssistantPresentation();
 }
 
 audioManager.setPlaybackHandlers({
@@ -111,6 +119,29 @@ uiManager.onSend((text, options) => {
 
     uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
+});
+
+uiManager.onReflect(async () => {
+    if (reflectionInFlight) {
+        return;
+    }
+
+    uiManager.setReflectStatus('');
+    setReflectionInFlight(true);
+
+    try {
+        const result = await client.reflectMemories(0);
+        uiManager.setReflectStatus(
+            `Dream complete: ${result.deleted_count} deleted, ${result.created_count} created.`,
+            'success',
+        );
+    } catch (error) {
+        console.error(error);
+        uiManager.setReflectStatus(error?.message || 'Memory reflection failed.', 'error');
+    } finally {
+        await avatarManager.playDreamingOutro();
+        setReflectionInFlight(false);
+    }
 });
 
 async function refreshHistory() {

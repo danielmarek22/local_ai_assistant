@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from contextlib import suppress
+from pydantic import BaseModel, Field
 from app.config import Config
 
 from app.core.assistant_state import AssistantState
@@ -24,6 +25,7 @@ from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, attachment_from_payload
 from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
+from app.services.memory_reflector import MemoryReflector
 
 config = Config()
 setup_logging_from_config(config.logging)
@@ -172,6 +174,10 @@ class TTSJob:
     session_id: str
 
 
+class ReflectRequest(BaseModel):
+    days_old: int = Field(default=14, ge=0)
+
+
 def _next_or_sentinel(iterator: Iterator[Any]):
     try:
         return next(iterator)
@@ -278,6 +284,10 @@ def _should_forward_state(state: str) -> bool:
 async def startup_event():
     app.state.server_instance_id = uuid.uuid4().hex[:8]
     app.state.orchestrator = build_orchestrator()
+    app.state.memory_reflector = MemoryReflector(
+        llm=app.state.orchestrator.llm,
+        memory_store=app.state.orchestrator.memory_retriever.memory,
+    )
     logger.info(
         "Orchestrator initialized at startup (server_instance_id=%s)",
         app.state.server_instance_id,
@@ -353,6 +363,38 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {"deleted": True, "session_id": session_id}
+
+
+@app.post("/api/admin/reflect")
+async def run_memory_reflection(payload: ReflectRequest):
+    reflector = getattr(app.state, "memory_reflector", None)
+    if reflector is None:
+        orchestrator = app.state.orchestrator
+        reflector = MemoryReflector(
+            llm=orchestrator.llm,
+            memory_store=orchestrator.memory_retriever.memory,
+        )
+        app.state.memory_reflector = reflector
+
+    logger.info("Manual memory reflection requested (days_old=%d)", payload.days_old)
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        reflector.reflect_and_prune,
+        payload.days_old,
+    )
+
+    if not result.get("success", True):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Memory reflection failed",
+                "error": result.get("error"),
+            },
+        )
+
+    return result
 
 
 @app.websocket("/ws")

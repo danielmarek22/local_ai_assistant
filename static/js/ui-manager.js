@@ -23,6 +23,8 @@ export class UIManager {
         this.reasoningToggle = document.getElementById('reasoning-toggle');
         this.playbackVolumeInput = document.getElementById('playback-volume');
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
+        this.reflectNowBtn = document.getElementById('reflect-now-btn');
+        this.reflectStatus = document.getElementById('reflect-status');
         this.sendBtn = document.getElementById('send-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
@@ -275,16 +277,23 @@ export class UIManager {
     }
 
     initConfigControls() {
-        if (!this.playbackVolumeInput || !this.playbackVolumeValue) {
-            return;
+        if (this.playbackVolumeInput && this.playbackVolumeValue) {
+            this.setPlaybackVolume(this.readStoredPlaybackVolume(), { persist: false, notify: false });
+
+            this.playbackVolumeInput.addEventListener('input', () => {
+                const nextVolume = Number(this.playbackVolumeInput.value) / 100;
+                this.setPlaybackVolume(nextVolume, { persist: true, notify: true });
+            });
         }
 
-        this.setPlaybackVolume(this.readStoredPlaybackVolume(), { persist: false, notify: false });
-
-        this.playbackVolumeInput.addEventListener('input', () => {
-            const nextVolume = Number(this.playbackVolumeInput.value) / 100;
-            this.setPlaybackVolume(nextVolume, { persist: true, notify: true });
+        this.reflectNowBtn?.addEventListener('click', () => {
+            if (this.onReflectHandler) {
+                this.onReflectHandler();
+            }
         });
+
+        this.setReflectRunning(false);
+        this.setReflectStatus('');
     }
 
     readStoredPlaybackVolume() {
@@ -759,6 +768,27 @@ export class UIManager {
     onVolumeChange(callback) {
         this.onVolumeChangeHandler = callback;
         callback(this.getPlaybackVolume());
+    }
+
+    setReflectRunning(isRunning) {
+        if (!this.reflectNowBtn) return;
+
+        this.reflectNowBtn.disabled = isRunning;
+        this.reflectNowBtn.textContent = isRunning ? 'Dreaming...' : 'Run Reflection';
+    }
+
+    setReflectStatus(message = '', tone = 'info') {
+        if (!this.reflectStatus) return;
+
+        const hasMessage = Boolean(message);
+        this.reflectStatus.textContent = message;
+        this.reflectStatus.classList.toggle('hidden', !hasMessage);
+        this.reflectStatus.classList.toggle('success', hasMessage && tone === 'success');
+        this.reflectStatus.classList.toggle('error', hasMessage && tone === 'error');
+    }
+
+    onReflect(callback) {
+        this.onReflectHandler = callback;
     }
 
     scrollToBottom() {

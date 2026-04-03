@@ -66,6 +66,34 @@ class FakeOrchestrator:
         self.history = history_store
         self.summary_store = summary_store
 
+
+class FakeMemoryReflector:
+    def __init__(self):
+        self.calls = []
+        self.next_result = {
+            "success": True,
+            "days_old": 0,
+            "stale_count": 3,
+            "deleted_count": 1,
+            "kept_count": 2,
+            "created_count": 1,
+            "delete_ids": ["mem-1"],
+            "keep_ids": ["mem-2", "mem-3"],
+            "new_memories": [
+                {
+                    "content": "Consolidated preference",
+                    "category": "preference",
+                    "importance": 3,
+                }
+            ],
+            "error": None,
+        }
+
+    def reflect_and_prune(self, days_old):
+        self.calls.append(days_old)
+        return self.next_result
+
+
 class FakeCollection:
     def __init__(self):
         self.docs = []
@@ -115,8 +143,10 @@ class ServerSessionTests(unittest.TestCase):
             history_store=self.history,
             summary_store=self.summary_store,
         )
+        self.fake_reflector = FakeMemoryReflector()
         server_module.app.state.orchestrator = self.fake_orchestrator
         server_module.app.state.server_instance_id = "server-1"
+        server_module.app.state.memory_reflector = self.fake_reflector
 
     def test_list_sessions_returns_saved_sessions(self):
         response = server_module.asyncio.run(server_module.list_sessions())
@@ -192,6 +222,19 @@ class ServerSessionTests(unittest.TestCase):
             self.vector_store.episodic_collection.deleted_wheres,
         )
         self.assertFalse(attachment_dir.exists())
+
+    def test_run_memory_reflection_returns_reflector_summary(self):
+        payload = server_module.asyncio.run(
+            server_module.run_memory_reflection(
+                server_module.ReflectRequest(days_old=0)
+            )
+        )
+
+        self.assertEqual(self.fake_reflector.calls, [0])
+        self.assertEqual(payload["days_old"], 0)
+        self.assertEqual(payload["stale_count"], 3)
+        self.assertEqual(payload["deleted_count"], 1)
+        self.assertEqual(payload["created_count"], 1)
 
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):
         session_id = server_module.resolve_session_id(

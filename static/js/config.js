@@ -25,6 +25,10 @@ export const CONFIG = {
                 // '/static/animations/Thinking/Thinking_3.fbx',
                 // '/static/animations/Thinking/Thinking_4.fbx'
             ],
+            dreaming:   [
+                '/static/animations/Dreaming/Dreaming_1.fbx',
+                '/static/animations/Dreaming/Dreaming_2.fbx'
+            ],
             searching:  [
                 '/static/animations/Typing_Or_Searching.fbx'
             ],
@@ -55,6 +59,7 @@ export const CONFIG = {
         STATUS_TEXT: {
             idle:       "Astra is Idle",
             thinking:   "Astra is Thinking...",
+            dreaming:   "Astra is Dreaming...",
             searching:  "Searching Knowledge Base...",
             responding: "Astra is Responding"
         }

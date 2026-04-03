@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: mistral-nemo
+  model: ministral-3:8b
   timeout_s: 30.0
   max_retries: 2
   retry_backoff_s: 0.25

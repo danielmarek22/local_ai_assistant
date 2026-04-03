@@ -113,3 +113,58 @@ class MemoryStore:
         )
         self.db.conn.commit()
         logger.debug("Updated last_accessed_at for %d memories", len(memory_ids))
+
+    def get_stale(self, days_old: int = 14) -> list[dict]:
+        """
+        Return memories whose last access timestamp is older than `days_old`.
+        A value of 0 means return all memories.
+        """
+        if days_old < 0:
+            raise ValueError("days_old must be >= 0")
+
+        cursor = self.db.conn.cursor()
+        if days_old == 0:
+            cursor.execute(
+                """
+                SELECT id, category, content, importance, created_at, last_accessed_at
+                FROM memory
+                ORDER BY last_accessed_at ASC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, category, content, importance, created_at, last_accessed_at
+                FROM memory
+                WHERE last_accessed_at <= datetime('now', ?)
+                ORDER BY last_accessed_at ASC
+                """,
+                (f"-{days_old} days",),
+            )
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    def delete_memories(self, memory_ids: list[str]) -> int:
+        """
+        Delete memories from SQLite and the semantic vector collection.
+        Returns the number of removed SQLite rows.
+        """
+        if not memory_ids:
+            return 0
+
+        cursor = self.db.conn.cursor()
+        placeholders = ",".join(["?"] * len(memory_ids))
+        cursor.execute(
+            f"DELETE FROM memory WHERE id IN ({placeholders})",
+            memory_ids,
+        )
+        deleted_rows = cursor.rowcount or 0
+        self.db.conn.commit()
+
+        try:
+            self.collection.delete(ids=memory_ids)
+        except Exception:
+            logger.exception("Failed deleting %d memories from vector store", len(memory_ids))
+
+        logger.info("Deleted %d memories", deleted_rows)
+        return deleted_rows
