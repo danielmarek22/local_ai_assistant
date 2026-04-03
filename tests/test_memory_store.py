@@ -5,14 +5,19 @@ from app.memory.memory_store import MemoryStore
 
 class FakeCollection:
     def __init__(self):
+        self.ids = []
         self.docs = []
 
     def add(self, ids, documents, metadatas):
+        self.ids.extend(ids)
         self.docs.extend(documents)
 
     def query(self, query_texts, n_results, where=None):
         # Fake search behavior: return everything we have up to n_results
-        return {"documents": [self.docs[:n_results]] if self.docs else [[]]}
+        return {
+            "ids": [self.ids[:n_results]] if self.ids else [[]],
+            "documents": [self.docs[:n_results]] if self.docs else [[]],
+        }
 
 
 class FakeVectorStore:
@@ -33,7 +38,9 @@ class MemoryStoreTests(unittest.TestCase):
         # 1. Check SQLite
         sqlite_results = self.store.get_all(limit=10)
         self.assertEqual(len(sqlite_results), 1)
-        self.assertEqual(sqlite_results[0], "I like Python")
+        self.assertEqual(sqlite_results[0]["content"], "I like Python")
+        self.assertIsNotNone(sqlite_results[0]["created_at"])
+        self.assertIsNotNone(sqlite_results[0]["last_accessed_at"])
 
         # 2. Check VectorDB mock collection
         self.assertEqual(len(self.vector_store.semantic_collection.docs), 1)

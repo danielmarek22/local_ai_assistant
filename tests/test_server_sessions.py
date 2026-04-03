@@ -276,6 +276,52 @@ class ServerSessionTests(unittest.TestCase):
         )
         self.assertEqual(pending_chunks, [])
 
+    def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
+        text = (
+            "# Title\n"
+            "- First item\n"
+            "1. Second item\n"
+            "> Quoted line\n"
+            "---\n"
+            "After."
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(
+            prepared,
+            "Title First item Second item Quoted line After.",
+        )
+
+    def test_prepare_tts_text_keeps_labels_and_drops_markdown_urls(self):
+        text = (
+            "Read [docs](https://example.com/docs) and "
+            "![logo](https://example.com/logo.png). "
+            "Reference [guide][guide-ref]. "
+            "<https://example.com/raw>\n"
+            "[guide-ref]: https://example.com/guide"
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(prepared, "Read docs and logo. Reference guide.")
+
+    def test_prepare_tts_text_drops_fenced_code_and_unwraps_inline_styles(self):
+        text = (
+            "Use **bold**, _italic_, `inline code`, and ~~strikethrough~~.\n"
+            "```python\n"
+            "print('hidden')\n"
+            "```\n"
+            "Escaped \\*literal\\* marker."
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(
+            prepared,
+            "Use bold, italic, inline code, and strikethrough. Escaped *literal* marker.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
