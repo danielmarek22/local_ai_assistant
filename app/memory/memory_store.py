@@ -27,36 +27,40 @@ class MemoryStore:
             },
         )
         
-        # 1. Save to SQLite (for easy viewing/backups in the frontend)
+        # 1. Save to SQLite with shared UUID
         cursor = self.db.conn.cursor()
         cursor.execute(
-            "INSERT INTO memory (category, content, importance) VALUES (?, ?, ?)",
-            (category, content, importance),
+            """
+            INSERT INTO memory (id, category, content, importance) 
+            VALUES (?, ?, ?, ?)
+            """,
+            (mem_id, category, content, importance),
         )
         self.db.conn.commit()
 
-        # 2. Save to Vector Store (for AI semantic retrieval)
+        # 2. Save to Vector Store using the SAME UUID
         self.collection.add(
             ids=[mem_id],
             documents=[content],
             metadatas=[{"category": category, "importance": importance}]
         )
 
-    def get_all(self, limit: int = 20) -> list[str]:
+    def get_all(self, limit: int = 20) -> list[dict]:
         """
-        Retrieves recent memories for the UI/frontend, sorted by importance and recency.
+        Retrieves recent memories for the UI/frontend.
+        Returns full dicts so the UI can display timestamps!
         """
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
-            SELECT content
+            SELECT id, content, importance, created_at, last_accessed_at
             FROM memory
-            ORDER BY importance DESC, created_at DESC
+            ORDER BY importance DESC, last_accessed_at DESC
             LIMIT ?
             """,
             (limit,),
         )
-        return [row["content"] for row in cursor.fetchall()]
+        return [dict(row) for row in cursor.fetchall()]
 
     def get_relevant(self, query: str, limit: int = 3) -> list[str]:
         """
@@ -67,7 +71,6 @@ class MemoryStore:
             n_results=limit
         )
         
-        # Chroma returns a list of lists for documents
         if not results["documents"] or not results["documents"][0]:
             logger.debug("Semantic memory search returned no results")
             trace_event(
@@ -77,10 +80,36 @@ class MemoryStore:
             )
             return []
 
+        retrieved_ids = results["ids"][0]
         documents = results["documents"][0]
+
+        # Bump the access timestamp in SQLite for the memories we just pulled
+        if retrieved_ids:
+            self._touch_memories(retrieved_ids)
+
         trace_event(
             "memory_store",
             "semantic_query_result",
             payload={"query": query, "limit": limit, "documents": documents},
         )
         return documents
+
+    def _touch_memories(self, memory_ids: list[str]):
+        """Helper to update the last_accessed_at timestamp."""
+        if not memory_ids:
+            return
+            
+        cursor = self.db.conn.cursor()
+        # Create a parameter placeholder list like (?, ?, ?)
+        placeholders = ",".join(["?"] * len(memory_ids))
+        
+        cursor.execute(
+            f"""
+            UPDATE memory 
+            SET last_accessed_at = CURRENT_TIMESTAMP 
+            WHERE id IN ({placeholders})
+            """,
+            memory_ids
+        )
+        self.db.conn.commit()
+        logger.debug("Updated last_accessed_at for %d memories", len(memory_ids))

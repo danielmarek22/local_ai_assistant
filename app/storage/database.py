@@ -50,13 +50,15 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_chat_attachments_session_id ON chat_attachments(session_id)"
         )
 
+        # UPDATED: id is TEXT, added last_accessed_at
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT PRIMARY KEY,
             category TEXT,
             content TEXT NOT NULL,
             importance INTEGER DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """)
 
@@ -66,7 +68,7 @@ class Database:
             summary TEXT NOT NULL,
             last_turn_count INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+        )
         """)
 
         self.conn.commit()
