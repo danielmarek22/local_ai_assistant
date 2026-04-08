@@ -19,6 +19,7 @@ class OllamaClient(LLMClient):
         timeout_s: float = 30.0,
         max_retries: int = 2,
         retry_backoff_s: float = 0.25,
+        preload_model: bool = True,
     ):
         self.model = model
         self.url = f"{host}/api/chat"
@@ -28,20 +29,22 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
-        
+        self.preload_model = preload_model
+
         # Use a Session to reuse the TCP connection for faster, lower-latency requests
         self.session = requests.Session()
 
-        logger.info(f"Preloading {self.model} into VRAM...")
-        try:
-            self.session.post(
-                f"{host}/api/generate",
-                json={"model": self.model, "keep_alive": "-1"},
-                timeout=30
-            )
-            logger.info("Model preloaded successfully!")
-        except Exception as e:
-            logger.warning(f"Failed to preload model: {e}")
+        if self.preload_model:
+            logger.info(f"Preloading {self.model} into VRAM...")
+            try:
+                self.session.post(
+                    f"{host}/api/generate",
+                    json={"model": self.model, "keep_alive": "-1"},
+                    timeout=30,
+                )
+                logger.info("Model preloaded successfully!")
+            except Exception as e:
+                logger.warning(f"Failed to preload model: {e}")
 
     def chat(
         self,

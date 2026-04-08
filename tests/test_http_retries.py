@@ -54,6 +54,7 @@ class HttpRetryTests(unittest.TestCase):
             timeout_s=0.1,
             max_retries=2,
             retry_backoff_s=0.0,
+            preload_model=False,
         )
 
         result = client.chat([{"role": "user", "content": "hello"}])
@@ -78,6 +79,7 @@ class HttpRetryTests(unittest.TestCase):
             timeout_s=0.1,
             max_retries=3,
             retry_backoff_s=0.0,
+            preload_model=False,
         )
 
         with self.assertRaises(requests.HTTPError):
@@ -96,6 +98,7 @@ class HttpRetryTests(unittest.TestCase):
             host="http://localhost:11434",
             thinking_enabled=True,
             thinking_level="medium",
+            preload_model=False,
         )
 
         client.chat([{"role": "user", "content": "hello"}])
@@ -116,6 +119,7 @@ class HttpRetryTests(unittest.TestCase):
         client = OllamaClient(
             model="test-model",
             host="http://localhost:11434",
+            preload_model=False,
         )
 
         chunks = list(client.stream_chat([{"role": "user", "content": "hello"}], think_override=True))
