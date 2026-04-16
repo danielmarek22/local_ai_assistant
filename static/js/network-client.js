@@ -2,7 +2,7 @@ import { CONFIG } from './config.js';
 
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -59,6 +59,7 @@ export class NetworkClient {
                     this.handlers.onSessionInit({
                         serverInstanceId: data.server_instance_id,
                         sessionId: data.session_id,
+                        gestureCatalog: data.gesture_catalog || {},
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {
@@ -66,6 +67,9 @@ export class NetworkClient {
                 }
                 else if (data.type === 'assistant_expression' && this.handlers.onExpression) {
                     this.handlers.onExpression(data.expression);
+                }
+                else if (data.type === 'assistant_animation' && this.handlers.onAnimation) {
+                    this.handlers.onAnimation(data.animation);
                 }
                 else if (data.type === 'assistant_chunk' && this.handlers.onChunk) {
                     this.handlers.onChunk(data.content);

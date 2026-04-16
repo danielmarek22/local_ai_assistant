@@ -20,6 +20,7 @@ from app.core.events import (
     AssistantSpeechEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
+    AvatarAnimationEvent,
 )
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, attachment_from_payload
@@ -276,6 +277,19 @@ async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> Non
     pending_chunks.clear()
 
 
+def _build_session_init_payload(
+    server_instance_id: str,
+    session_id: str,
+    gesture_catalog: dict[str, str] | None = None,
+) -> dict:
+    return {
+        "type": "session_init",
+        "server_instance_id": server_instance_id,
+        "session_id": session_id,
+        "gesture_catalog": dict(gesture_catalog or {}),
+    }
+
+
 def _should_forward_state(state: str) -> bool:
     return state != AssistantState.RESPONDING
 
@@ -420,11 +434,11 @@ async def websocket_endpoint(ws: WebSocket):
         session_id,
         session_mode,
     )
-    await ws.send_text(json.dumps({
-        "type": "session_init",
-        "server_instance_id": server_instance_id,
-        "session_id": session_id,
-    }))
+    await ws.send_text(json.dumps(_build_session_init_payload(
+        server_instance_id=server_instance_id,
+        session_id=session_id,
+        gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+    )))
 
     orchestrator = app.state.orchestrator
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
@@ -486,6 +500,18 @@ async def websocket_endpoint(ws: WebSocket):
                     await _send_ws_payload(ws, {
                         "type": "assistant_expression",
                         "expression": event.expression,
+                    })
+                    continue
+
+                if isinstance(event, AvatarAnimationEvent):
+                    logger.debug(
+                        "[%s] Avatar animation -> %s",
+                        connection_id,
+                        event.animation,
+                    )
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_animation",
+                        "animation": event.animation,
                     })
                     continue
 

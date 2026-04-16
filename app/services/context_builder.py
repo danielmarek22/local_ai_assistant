@@ -158,9 +158,9 @@ class ContextBuilder:
             f"Current system datetime (local): {now_local_iso}",
         ]
 
-        user_context_section = self._build_user_context_section()
-        if user_context_section:
-            sections.append(user_context_section)
+        # user_context_section = self._build_user_context_section()
+        # if user_context_section:
+            # sections.append(user_context_section)
 
         # Assemble the background context internally
         combined_context_parts = []

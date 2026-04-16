@@ -62,9 +62,10 @@ server_module = _load_server_module()
 
 
 class FakeOrchestrator:
-    def __init__(self, history_store, summary_store):
+    def __init__(self, history_store, summary_store, gesture_catalog=None):
         self.history = history_store
         self.summary_store = summary_store
+        self.gesture_catalog = gesture_catalog or {}
 
 
 class FakeMemoryReflector:
@@ -142,6 +143,7 @@ class ServerSessionTests(unittest.TestCase):
         self.fake_orchestrator = FakeOrchestrator(
             history_store=self.history,
             summary_store=self.summary_store,
+            gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
         )
         self.fake_reflector = FakeMemoryReflector()
         server_module.app.state.orchestrator = self.fake_orchestrator
@@ -303,6 +305,23 @@ class ServerSessionTests(unittest.TestCase):
     def test_should_forward_state_holds_responding_until_audio(self):
         self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
         self.assertTrue(server_module._should_forward_state(server_module.AssistantState.THINKING))
+
+    def test_build_session_init_payload_includes_gesture_catalog(self):
+        payload = server_module._build_session_init_payload(
+            server_instance_id="server-1",
+            session_id="session-a",
+            gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "type": "session_init",
+                "server_instance_id": "server-1",
+                "session_id": "session-a",
+                "gesture_catalog": {"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            },
+        )
 
     def test_flush_pending_chunks_sends_buffered_text_in_order(self):
         ws = FakeWebSocket()

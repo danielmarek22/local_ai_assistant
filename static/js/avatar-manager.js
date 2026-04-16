@@ -21,6 +21,11 @@ export class AvatarManager {
         this.animations = {}; 
         this.currentAction = null;
         this.stateAnimations = {}; 
+        this.gestureCatalog = {};
+        this.gestureAnimations = {};
+        this.gestureQueue = [];
+        this.isGesturePlaying = false;
+        this.activeGestureName = null;
         this.dreamingPhase = null; // intro | holding | outro
         this.pendingDreamingOutroStart = false;
         this.dreamingOutroPromise = null;
@@ -105,7 +110,7 @@ export class AvatarManager {
 
                 // Listen for animation loops to trigger variety
                 this.mixer.addEventListener('loop', (e) => {
-                    if (this.currentState === 'dreaming') {
+                    if (this.currentState === 'dreaming' || this.isGesturePlaying) {
                         return;
                     }
 
@@ -123,6 +128,21 @@ export class AvatarManager {
                 });
 
                 this.mixer.addEventListener('finished', (event) => {
+                    if (this.isGesturePlaying && this.activeGestureName) {
+                        const gestureKey = this.gestureAnimations[this.activeGestureName];
+                        const gestureAction = gestureKey ? this.animations[gestureKey] : null;
+                        if (gestureAction && event.action === gestureAction) {
+                            this.isGesturePlaying = false;
+                            this.activeGestureName = null;
+
+                            this.processGestureQueue();
+                            if (!this.isGesturePlaying) {
+                                this.playRandomVariant(this.currentState);
+                            }
+                            return;
+                        }
+                    }
+
                     if (this.currentState !== 'dreaming') {
                         return;
                     }
@@ -171,6 +191,7 @@ export class AvatarManager {
                         this.loadAnimation(path, animKey, playImmediately);
                     });
                 });
+                this.loadGestureAnimations();
             },
             (progress) => {},
             (error) => console.error("Error loading VRM:", error)
@@ -178,12 +199,15 @@ export class AvatarManager {
     }
 
     // --- Mixamo FBX Loader Method ---
-    loadAnimation(url, name, playImmediately = false) {
+    loadAnimation(url, name, playImmediately = false, onLoaded = null) {
         loadMixamoAnimation(url, this.currentVrm)
             .then((clip) => {
                 if (clip) {
                     const action = this.mixer.clipAction(clip);
                     this.animations[name] = action;
+                    if (onLoaded) {
+                        onLoaded(action);
+                    }
 
                     if (playImmediately) {
                         this.fadeToAction(name, 0.0); 
@@ -191,6 +215,80 @@ export class AvatarManager {
                 }
             })
             .catch((error) => console.error(`Failed to load Mixamo animation "${name}":`, error));
+    }
+
+    setGestureCatalog(gestureCatalog = {}) {
+        this.gestureCatalog = {};
+        this.gestureAnimations = {};
+        this.gestureQueue = [];
+        this.isGesturePlaying = false;
+        this.activeGestureName = null;
+
+        for (const [name, url] of Object.entries(gestureCatalog)) {
+            if (!url) continue;
+            const normalizedName = String(name).trim().toLowerCase();
+            if (!normalizedName) continue;
+            this.gestureCatalog[normalizedName] = url;
+        }
+
+        this.loadGestureAnimations();
+    }
+
+    loadGestureAnimations() {
+        if (!this.currentVrm || !this.mixer) {
+            return;
+        }
+
+        for (const [gestureName, url] of Object.entries(this.gestureCatalog)) {
+            if (this.gestureAnimations[gestureName]) {
+                continue;
+            }
+
+            const animationKey = `gesture_${gestureName}`;
+            this.gestureAnimations[gestureName] = animationKey;
+            this.loadAnimation(url, animationKey, false, () => {
+                this.processGestureQueue();
+            });
+        }
+    }
+
+    queueGesture(animationName) {
+        const normalized = String(animationName || '').trim().toLowerCase();
+        if (!normalized) {
+            return;
+        }
+
+        if (!this.gestureCatalog[normalized]) {
+            console.debug(`Ignoring unknown gesture animation "${normalized}"`);
+            return;
+        }
+
+        this.gestureQueue.push(normalized);
+        this.processGestureQueue();
+    }
+
+    processGestureQueue() {
+        if (this.isGesturePlaying) {
+            return;
+        }
+
+        const nextGestureName = this.gestureQueue[0];
+        if (!nextGestureName) {
+            return;
+        }
+
+        const animationKey = this.gestureAnimations[nextGestureName];
+        const action = animationKey ? this.animations[animationKey] : null;
+        if (!action) {
+            return;
+        }
+
+        this.gestureQueue.shift();
+        this.isGesturePlaying = true;
+        this.activeGestureName = nextGestureName;
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        this.fadeToAction(animationKey, 0.35);
     }
 
     fadeToAction(name, duration = 0.5) {
@@ -243,6 +341,10 @@ export class AvatarManager {
     }
 
     playRandomVariant(state) {
+        if (this.isGesturePlaying) {
+            return;
+        }
+
         const resolvedState = this.resolveAnimationState(state);
         const availableAnimations = this.getPlayableAnimationKeys(resolvedState);
         
@@ -288,6 +390,10 @@ export class AvatarManager {
                 this.dreamingOutroResolver = null;
             }
             this.dreamingOutroPromise = null;
+        }
+
+        if (this.isGesturePlaying) {
+            return;
         }
 
         this.playRandomVariant(state);
@@ -425,7 +531,9 @@ export class AvatarManager {
             }
 
             // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
-            if (this.currentAction && this.currentState === 'thinking') {
+            // Never pause one-shot gesture clips; they must reach `finished`
+            // so we can resume queued/default state animations.
+            if (this.currentAction && this.currentState === 'thinking' && !this.isGesturePlaying) {
                 const duration = this.currentAction.getClip().duration;
                 
                 // Freeze at the 50% mark. Tweak this 0.5 value if her hand hasn't 

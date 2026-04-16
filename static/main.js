@@ -74,10 +74,11 @@ uiManager.onVolumeChange((volume) => {
 });
 
 const handlers = {
-    onSessionInit: ({ serverInstanceId, sessionId }) => {
+    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog }) => {
         currentServerInstanceId = serverInstanceId;
         currentSessionId = sessionId;
         uiManager.setSessionScope(serverInstanceId, sessionId);
+        avatarManager.setGestureCatalog(gestureCatalog || {});
         persistSessionContext();
     },
     onState: (state) => {
@@ -87,6 +88,9 @@ const handlers = {
     onExpression: (expression) => {
         assistantExpression = expression;
         syncAssistantPresentation();
+    },
+    onAnimation: (animation) => {
+        avatarManager.queueGesture(animation);
     },
     onChunk: (content) => {
         uiManager.appendToAiMessage(content);

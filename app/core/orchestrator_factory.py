@@ -20,6 +20,10 @@ from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 from app.services.tool_executor import ToolExecutor
 from app.services.turn_finalizer import TurnFinalizer
+from app.services.gesture_catalog import (
+    build_prompt_with_gesture_catalog,
+    discover_gesture_catalog,
+)
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -55,6 +59,7 @@ def build_orchestrator() -> Orchestrator:
             "temperature": config.llm["generation"]["temperature"],
             "top_p": config.llm["generation"]["top_p"],
             "num_predict": config.llm["generation"]["max_tokens"],
+            "top_k": 64
         },
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
@@ -67,6 +72,8 @@ def build_orchestrator() -> Orchestrator:
         config.llm["generation"]["top_p"],
         config.llm["generation"]["max_tokens"],
     )
+
+    llm.preload()
 
     # --------------------------------------------------
     # Storage
@@ -166,9 +173,13 @@ def build_orchestrator() -> Orchestrator:
     # Context builder
     # --------------------------------------------------
     logger.info("Setting up context builder")
+    gesture_catalog = discover_gesture_catalog()
 
     context_builder = ContextBuilder(
-        system_prompt=config.assistant["system_prompt"],
+        system_prompt=build_prompt_with_gesture_catalog(
+            config.assistant["system_prompt"],
+            gesture_catalog=gesture_catalog,
+        ),
         user_context=config.user_context,
         history_store=history_store,
         summary_store=summary_store,
@@ -195,6 +206,7 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         memory_action_handler=memory_action_handler,
         turn_finalizer=turn_finalizer,
+        gesture_catalog=gesture_catalog,
     )
 
     logger.info(

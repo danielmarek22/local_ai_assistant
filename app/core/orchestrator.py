@@ -7,6 +7,7 @@ from app.core.events import (
     AssistantSpeechEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
+    AvatarAnimationEvent,
 )
 from app.core.assistant_state import AssistantState
 from app.core.actions import ActionType
@@ -38,6 +39,7 @@ class Orchestrator:
         memory_retriever,
         memory_action_handler,
         turn_finalizer,
+        gesture_catalog: dict[str, str] | None = None,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -48,6 +50,8 @@ class Orchestrator:
         self.memory_retriever = memory_retriever
         self.memory_action_handler = memory_action_handler
         self.turn_finalizer = turn_finalizer
+        self.gesture_catalog = dict(gesture_catalog or {})
+        self.allowed_animations = set(self.gesture_catalog.keys())
 
         logger.info("Orchestrator initialized")
 
@@ -304,7 +308,7 @@ class Orchestrator:
         visible_buffer = ""
         expression_initialized = False
         start_ts = time.perf_counter()
-        processor = StreamProcessor()
+        processor = StreamProcessor(allowed_animations=self.allowed_animations)
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
             visible_buffer, expression_initialized = yield from self._emit_processor_events(
@@ -351,6 +355,11 @@ class Orchestrator:
                 expression_initialized = True
                 logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
                 yield AvatarExpressionEvent(expression=value)
+                continue
+
+            if event_type == "animation":
+                logger.info("[%s] Model selected avatar animation '%s'", session_id, value)
+                yield AvatarAnimationEvent(animation=value)
                 continue
 
             if not value:
