@@ -61,6 +61,7 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        self._multimodal_supported = True
 
         # Reuse a single TCP connection across all requests.
         self.session = requests.Session()
@@ -159,10 +160,14 @@ class OllamaClient(LLMClient):
         """
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
+        request_messages = messages
+
+        if not self._multimodal_supported:
+            request_messages, _ = self._strip_images_from_messages(request_messages)
 
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages,
             "stream": True,
             "options": request_options,
             "think": think_value,
@@ -177,6 +182,69 @@ class OllamaClient(LLMClient):
 
         collected_content: list[str] = []
         collected_thinking: list[str] = []
+        try:
+            yield from self._stream_payload(payload, collected_content, collected_thinking)
+        except requests.HTTPError as exc:
+            if not self._should_retry_stream_without_images(exc, request_messages):
+                raise
+
+            response_text = self._http_error_text(exc)
+            if self._error_indicates_model_without_images(response_text):
+                self._multimodal_supported = False
+
+            fallback_candidates = self._build_image_fallback_messages(request_messages)
+            if not fallback_candidates:
+                raise
+
+            last_exc: requests.HTTPError = exc
+            for fallback_messages, strategy in fallback_candidates:
+                payload["messages"] = fallback_messages
+                logger.warning(
+                    "Ollama stream rejected image payload (status=%s); retrying %s.",
+                    getattr(last_exc.response, "status_code", None),
+                    strategy,
+                )
+                trace_event(
+                    "llm",
+                    "stream_retry_without_images",
+                    payload={
+                        "status_code": getattr(last_exc.response, "status_code", None),
+                        "response_text": self._http_error_text(last_exc),
+                        "strategy": strategy,
+                    },
+                )
+                try:
+                    yield from self._stream_payload(payload, collected_content, collected_thinking)
+                    break
+                except requests.HTTPError as retry_exc:
+                    if not self._should_retry_stream_without_images(retry_exc, fallback_messages):
+                        raise
+                    last_exc = retry_exc
+                    if self._error_indicates_model_without_images(self._http_error_text(retry_exc)):
+                        self._multimodal_supported = False
+            else:
+                raise last_exc
+
+        logger.info(
+            "Ollama stream complete (content_len=%d, thinking_len=%d)",
+            len("".join(collected_content)),
+            len("".join(collected_thinking)),
+        )
+        trace_event(
+            "llm",
+            "stream_response",
+            payload={
+                "content": "".join(collected_content),
+                "thinking": "".join(collected_thinking),
+            },
+        )
+
+    def _stream_payload(
+        self,
+        payload: dict,
+        collected_content: list[str],
+        collected_thinking: list[str],
+    ) -> Iterator[str]:
         in_thinking_block = False
 
         with self._post_stream(payload) as r:
@@ -217,20 +285,6 @@ class OllamaClient(LLMClient):
                             "before finishing — response may be truncated."
                         )
                     break
-
-        logger.info(
-            "Ollama stream complete (content_len=%d, thinking_len=%d)",
-            len("".join(collected_content)),
-            len("".join(collected_thinking)),
-        )
-        trace_event(
-            "llm",
-            "stream_response",
-            payload={
-                "content": "".join(collected_content),
-                "thinking": "".join(collected_thinking),
-            },
-        )
 
     # ------------------------------------------------------------------
     # Private — request helpers
@@ -353,6 +407,242 @@ class OllamaClient(LLMClient):
         if not self.thinking_enabled:
             return False
         return self.thinking_level or True
+
+    def _strip_images_from_messages(self, messages) -> tuple[list, bool]:
+        stripped = []
+        removed_images = False
+
+        for message in messages:
+            if not isinstance(message, dict):
+                stripped.append(message)
+                continue
+
+            if "images" not in message:
+                stripped.append(message)
+                continue
+
+            message_without_images = dict(message)
+            message_without_images.pop("images", None)
+            stripped.append(message_without_images)
+            removed_images = True
+
+        return stripped, removed_images
+
+    def _build_image_fallback_messages(self, messages) -> list[tuple[list, str]]:
+        candidates: list[tuple[list, str]] = []
+        seen_keys: set[str] = set()
+
+        image_message_indices = self._image_message_indices(messages)
+        if not image_message_indices:
+            return candidates
+
+        current_image_message_index = self._current_user_message_index_with_images(messages)
+        ordered_indices = []
+        if current_image_message_index is not None:
+            ordered_indices.append(current_image_message_index)
+        ordered_indices.extend(
+            index
+            for index in reversed(image_message_indices)
+            if index != current_image_message_index
+        )
+
+        for message_index in ordered_indices:
+            image_count = self._image_count_for_message(messages, message_index)
+            if image_count > 1:
+                for image_index in range(image_count):
+                    candidate, removed = self._strip_message_images(
+                        messages,
+                        message_index=message_index,
+                        image_indexes={image_index},
+                    )
+                    if removed:
+                        self._add_fallback_candidate(
+                            candidates,
+                            seen_keys,
+                            candidate,
+                            strategy=f"without image {image_index + 1} from message {message_index + 1}",
+                        )
+
+            candidate, removed = self._strip_message_images(
+                messages,
+                message_index=message_index,
+                image_indexes=None,
+            )
+            if removed:
+                label = (
+                    "without current message images"
+                    if message_index == current_image_message_index
+                    else f"without images from message {message_index + 1}"
+                )
+                self._add_fallback_candidate(
+                    candidates,
+                    seen_keys,
+                    candidate,
+                    strategy=label,
+                )
+
+        candidate, removed = self._strip_images_from_messages(messages)
+        if removed:
+            self._add_fallback_candidate(
+                candidates,
+                seen_keys,
+                candidate,
+                strategy="without all images",
+            )
+
+        return candidates
+
+    def _add_fallback_candidate(
+        self,
+        candidates: list[tuple[list, str]],
+        seen_keys: set[str],
+        candidate_messages: list,
+        strategy: str,
+    ) -> None:
+        key = json.dumps(candidate_messages, sort_keys=True)
+        if key in seen_keys:
+            return
+
+        seen_keys.add(key)
+        candidates.append((candidate_messages, strategy))
+
+    def _image_message_indices(self, messages) -> list[int]:
+        return [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict) and self._message_images(message)
+        ]
+
+    def _current_user_message_index_with_images(self, messages) -> int | None:
+        if not messages:
+            return None
+
+        index = len(messages) - 1
+        message = messages[index]
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and self._message_images(message)
+        ):
+            return index
+        return None
+
+    def _image_count_for_message(self, messages, message_index: int) -> int:
+        if message_index < 0 or message_index >= len(messages):
+            return 0
+
+        message = messages[message_index]
+        images = self._message_images(message) if isinstance(message, dict) else []
+        return len(images)
+
+    def _strip_message_images(
+        self,
+        messages,
+        message_index: int,
+        image_indexes: set[int] | None,
+    ) -> tuple[list, bool]:
+        stripped = []
+        removed_images = False
+
+        for index, message in enumerate(messages):
+            if index != message_index or not isinstance(message, dict):
+                stripped.append(message)
+                continue
+
+            images = self._message_images(message)
+            if not images:
+                stripped.append(message)
+                continue
+
+            updated_message = dict(message)
+            if image_indexes is None:
+                updated_message.pop("images", None)
+                removed_images = True
+            else:
+                remaining_images = [
+                    image
+                    for image_index, image in enumerate(images)
+                    if image_index not in image_indexes
+                ]
+                if len(remaining_images) != len(images):
+                    removed_images = True
+                if remaining_images:
+                    updated_message["images"] = remaining_images
+                else:
+                    updated_message.pop("images", None)
+
+            stripped.append(updated_message)
+
+        return stripped, removed_images
+
+    def _message_images(self, message: dict) -> list:
+        images = message.get("images")
+        if not isinstance(images, list):
+            return []
+        return images
+
+    def _should_retry_stream_without_images(
+        self,
+        exc: requests.HTTPError,
+        messages,
+    ) -> bool:
+        if not self._multimodal_supported:
+            return False
+
+        _, has_images = self._strip_images_from_messages(messages)
+        if not has_images:
+            return False
+
+        status_code = getattr(exc.response, "status_code", None)
+        if status_code not in {400, 415, 422}:
+            return False
+
+        error_text = self._http_error_text(exc)
+        if not error_text:
+            return True
+
+        image_error_markers = (
+            "image",
+            "vision",
+            "multimodal",
+            "unsupported",
+            "not support",
+            "base64",
+        )
+        return any(marker in error_text for marker in image_error_markers)
+
+    def _error_indicates_model_without_images(self, error_text: str) -> bool:
+        if not error_text:
+            return False
+
+        capability_markers = (
+            "does not support image",
+            "doesn't support image",
+            "vision is not supported",
+            "multimodal is not supported",
+            "model does not support vision",
+        )
+        return any(marker in error_text for marker in capability_markers)
+
+    def _http_error_text(self, exc: requests.HTTPError) -> str:
+        response = getattr(exc, "response", None)
+        if response is None:
+            return ""
+
+        try:
+            text = response.text
+        except Exception:
+            text = ""
+
+        if not text:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                text = str(payload.get("error") or payload.get("message") or "")
+
+        return str(text).strip().lower()
 
     def _is_retryable(self, exc: requests.RequestException) -> bool:
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):

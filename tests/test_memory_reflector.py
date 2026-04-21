@@ -7,9 +7,13 @@ class FakeLLM:
     def __init__(self, response: str):
         self.response = response
         self.calls = 0
+        self.last_options_override = None
+        self.last_think_override = None
 
-    def chat(self, messages, _think_override):
+    def chat(self, messages, think_override=None, options_override=None):
         self.calls += 1
+        self.last_think_override = think_override
+        self.last_options_override = options_override
         return self.response
 
 
@@ -66,6 +70,8 @@ class MemoryReflectorTests(unittest.TestCase):
         self.assertEqual(memory_store.deleted_ids, ["mem-1"])
         self.assertEqual(len(memory_store.added_memories), 1)
         self.assertEqual(memory_store.added_memories[0]["category"], "preference")
+        self.assertEqual(llm.last_think_override, False)
+        self.assertEqual(llm.last_options_override, {"temperature": 0.0, "num_predict": 1024})
 
     def test_reflect_and_prune_returns_zero_op_when_no_stale_memories(self):
         llm = FakeLLM("should not be called")

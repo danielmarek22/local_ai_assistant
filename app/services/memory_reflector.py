@@ -17,6 +17,11 @@ class ReflectorOutput(BaseModel):
     new_memories: list[NewMemorySpec]
 
 class MemoryReflector:
+    _REFLECTION_OPTIONS = {
+        "temperature": 0.0,
+        "num_predict": 1024,
+    }
+
     def __init__(self, llm, memory_store):
         self.llm = llm
         self.memory_store = memory_store
@@ -94,7 +99,11 @@ class MemoryReflector:
 
         # Since this is an offline/manual task, we can afford a longer LLM generation time
         logger.info("Asking LLM to evaluate %d stale memories...", len(stale_memories))
-        response = self.llm.chat(prompt, False)
+        response = self.llm.chat(
+            prompt,
+            think_override=False,
+            options_override=self._REFLECTION_OPTIONS,
+        )
         trace_event(
             "memory_reflector",
             "llm_output",
@@ -108,6 +117,10 @@ class MemoryReflector:
         try:
             data = self._extract_json(response)
             if data is None:
+                if "{" in response:
+                    raise ValueError(
+                        "No complete JSON object found in reflection response (output may be truncated)"
+                    )
                 raise ValueError("No JSON object found in reflection response")
 
             parsed = ReflectorOutput.model_validate(data)

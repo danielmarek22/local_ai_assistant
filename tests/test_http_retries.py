@@ -125,6 +125,114 @@ class HttpRetryTests(unittest.TestCase):
             ["<think>\n", "Thinking Process:\n\n1. Hello", "\n</think>\n\n"],
         )
 
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_stream_retries_without_images_on_http_400(self, post_mock):
+        error_response = requests.Response()
+        error_response.status_code = 400
+        error_response._content = b'{"error":"model does not support images"}'
+
+        post_mock.side_effect = [
+            _FakeStreamResponse(
+                lines=[],
+                http_error=requests.HTTPError(response=error_response),
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"ok"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+        ]
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        chunks = list(
+            client.stream_chat(
+                [{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]
+            )
+        )
+
+        self.assertEqual(chunks, ["ok"])
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertNotIn("images", post_mock.call_args.kwargs["json"]["messages"][0])
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_stream_keeps_images_enabled_after_single_bad_image(self, post_mock):
+        error_response = requests.Response()
+        error_response.status_code = 400
+        error_response._content = b'{"error":"invalid image data"}'
+
+        post_mock.side_effect = [
+            _FakeStreamResponse(
+                lines=[],
+                http_error=requests.HTTPError(response=error_response),
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"first"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"second"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+        ]
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        list(client.stream_chat([{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]))
+        list(client.stream_chat([{"role": "user", "content": "again", "images": ["d29ybGQ="]}]))
+
+        self.assertEqual(post_mock.call_count, 3)
+        last_messages = post_mock.call_args.kwargs["json"]["messages"]
+        self.assertEqual(last_messages[0]["images"], ["d29ybGQ="])
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_stream_disables_images_when_model_lacks_vision_support(self, post_mock):
+        error_response = requests.Response()
+        error_response.status_code = 400
+        error_response._content = b'{"error":"model does not support images"}'
+
+        post_mock.side_effect = [
+            _FakeStreamResponse(
+                lines=[],
+                http_error=requests.HTTPError(response=error_response),
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"first"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"second"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+        ]
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        list(client.stream_chat([{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]))
+        list(client.stream_chat([{"role": "user", "content": "again", "images": ["d29ybGQ="]}]))
+
+        self.assertEqual(post_mock.call_count, 3)
+        last_messages = post_mock.call_args.kwargs["json"]["messages"]
+        self.assertNotIn("images", last_messages[0])
+
     @patch("app.tools.web_search.time.sleep", return_value=None)
     @patch("app.tools.web_search.requests.get")
     def test_web_search_retries_on_connection_error_then_succeeds(
