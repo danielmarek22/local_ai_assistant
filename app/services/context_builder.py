@@ -11,13 +11,11 @@ class ContextBuilder:
     def __init__(
         self,
         system_prompt: str,
-        user_context,
         history_store,
         history_limit: int = 6,
         summary_store=None,
     ):
         self.system_prompt = system_prompt
-        self.user_context = user_context or {}
         self.history_store = history_store
         self.history_limit = history_limit
         self.summary_store = summary_store
@@ -158,10 +156,6 @@ class ContextBuilder:
             f"Current system datetime (local): {now_local_iso}",
         ]
 
-        # user_context_section = self._build_user_context_section()
-        # if user_context_section:
-            # sections.append(user_context_section)
-
         # Assemble the background context internally
         combined_context_parts = []
         if memory_context:
@@ -183,27 +177,6 @@ class ContextBuilder:
             sections.append(f"Summary of previous conversation:\n{summary}")
 
         return "\n\n---\n\n".join(section for section in sections if section)
-
-    def _build_user_context_section(self) -> str | None:
-        if not self.user_context:
-            return None
-
-        user_lines = []
-        for key, value in self.user_context.items():
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            if isinstance(value, str) and "\n" in value:
-                user_lines.append(f"- {key}:")
-                user_lines.extend(f"  {line}" for line in value.splitlines() if line.strip())
-            else:
-                user_lines.append(f"- {key}: {value}")
-
-        if not user_lines:
-            return None
-
-        return "User profile/context (configured):\n" + "\n".join(user_lines)
 
     def _normalize_history_attachments(
         self,

@@ -180,7 +180,6 @@ def build_orchestrator() -> Orchestrator:
             config.assistant["system_prompt"],
             gesture_catalog=gesture_catalog,
         ),
-        user_context=config.user_context,
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],

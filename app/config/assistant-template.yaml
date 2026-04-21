@@ -32,14 +32,6 @@ assistant:
   personality:
     default_emotion: neutral
 
-user_context:
-  name: user
-  preferences: concise, practical answers
-  profile: |
-    The user is a software engineer working on this local assistant project.
-    Prefer implementation-first suggestions with explicit tradeoffs.
-    Avoid long motivational language.
-    
 planner:
   mode: llm   # options: rule | llm | hybrid
   llm_enabled: true
