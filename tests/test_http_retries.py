@@ -158,6 +158,43 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(chunks, ["ok"])
         self.assertEqual(post_mock.call_count, 2)
         self.assertNotIn("images", post_mock.call_args.kwargs["json"]["messages"][0])
+        self.assertTrue(client.last_stream_dropped_current_images)
+        self.assertEqual(client.last_stream_dropped_current_images_count, 1)
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_stream_retries_without_images_on_http_500(self, post_mock):
+        error_response = requests.Response()
+        error_response.status_code = 500
+        error_response._content = b'{"error":"internal server error"}'
+
+        post_mock.side_effect = [
+            _FakeStreamResponse(
+                lines=[],
+                http_error=requests.HTTPError(response=error_response),
+            ),
+            _FakeStreamResponse(
+                lines=[
+                    b'{"message":{"content":"ok"},"done":false}',
+                    b'{"message":{},"done":true}',
+                ],
+            ),
+        ]
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        chunks = list(
+            client.stream_chat(
+                [{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]
+            )
+        )
+
+        self.assertEqual(chunks, ["ok"])
+        self.assertEqual(post_mock.call_count, 2)
+        self.assertNotIn("images", post_mock.call_args.kwargs["json"]["messages"][0])
+        self.assertTrue(client.last_stream_dropped_current_images)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_keeps_images_enabled_after_single_bad_image(self, post_mock):
@@ -227,6 +264,7 @@ class HttpRetryTests(unittest.TestCase):
         )
 
         list(client.stream_chat([{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]))
+        self.assertTrue(client.last_stream_dropped_current_images)
         list(client.stream_chat([{"role": "user", "content": "again", "images": ["d29ybGQ="]}]))
 
         self.assertEqual(post_mock.call_count, 3)

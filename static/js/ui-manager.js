@@ -379,6 +379,34 @@ export class UIManager {
         this.createMessageDiv('user', text, attachments);
     }
 
+    addNoticeToLastUserMessage(text, tone = 'warning') {
+        const noticeText = typeof text === 'string' ? text.trim() : '';
+        if (!noticeText) return;
+
+        const lastUserMessage = this.findLastUserMessage();
+        if (!lastUserMessage) return;
+
+        let notice = lastUserMessage.querySelector('.message-notice');
+        if (!notice) {
+            notice = document.createElement('div');
+            notice.className = 'message-notice';
+            lastUserMessage.prepend(notice);
+        }
+
+        notice.textContent = noticeText;
+        notice.classList.toggle('warning', tone === 'warning');
+        notice.classList.toggle('info', tone !== 'warning');
+
+        this.persistChatHistory();
+        this.scrollToBottom();
+    }
+
+    findLastUserMessage() {
+        const messages = this.chatHistory.querySelectorAll('.message.user');
+        if (!messages.length) return null;
+        return messages[messages.length - 1];
+    }
+
     startAiMessage() {
         if (!this.currentAiMessageDiv) {
             this.currentAiMessageDiv = this.createMessageDiv('astra', '');

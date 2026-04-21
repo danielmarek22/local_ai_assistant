@@ -469,6 +469,27 @@ body {
     white-space: pre-wrap;
 }
 
+.message-notice {
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.message-notice.warning {
+    background: rgba(255, 180, 66, 0.22);
+    border: 1px solid rgba(255, 180, 66, 0.46);
+    color: #3b2400;
+}
+
+.message-notice.info {
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #102234;
+}
+
 .message-attachments {
     margin-top: 10px;
     display: grid;

@@ -80,6 +80,9 @@ export class NetworkClient {
                 else if (data.type === 'assistant_end' && this.handlers.onEnd) {
                     this.handlers.onEnd(data.content);
                 }
+                else if (data.type === 'user_notice' && this.handlers.onUserNotice) {
+                    this.handlers.onUserNotice(data);
+                }
             };
 
         } catch (e) {

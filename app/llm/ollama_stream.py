@@ -62,6 +62,9 @@ class OllamaClient(LLMClient):
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
         self._multimodal_supported = True
+        self.last_stream_dropped_current_images = False
+        self.last_stream_dropped_current_images_count = 0
+        self.last_stream_image_fallback_strategy: str | None = None
 
         # Reuse a single TCP connection across all requests.
         self.session = requests.Session()
@@ -161,6 +164,9 @@ class OllamaClient(LLMClient):
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
         request_messages = messages
+        self.last_stream_dropped_current_images = False
+        self.last_stream_dropped_current_images_count = 0
+        self.last_stream_image_fallback_strategy = None
 
         if not self._multimodal_supported:
             request_messages, _ = self._strip_images_from_messages(request_messages)
@@ -197,7 +203,7 @@ class OllamaClient(LLMClient):
                 raise
 
             last_exc: requests.HTTPError = exc
-            for fallback_messages, strategy in fallback_candidates:
+            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
                 payload["messages"] = fallback_messages
                 logger.warning(
                     "Ollama stream rejected image payload (status=%s); retrying %s.",
@@ -211,10 +217,15 @@ class OllamaClient(LLMClient):
                         "status_code": getattr(last_exc.response, "status_code", None),
                         "response_text": self._http_error_text(last_exc),
                         "strategy": strategy,
+                        "dropped_current_images_count": dropped_current_images_count,
                     },
                 )
                 try:
                     yield from self._stream_payload(payload, collected_content, collected_thinking)
+                    self.last_stream_image_fallback_strategy = strategy
+                    if dropped_current_images_count > 0:
+                        self.last_stream_dropped_current_images = True
+                        self.last_stream_dropped_current_images_count = dropped_current_images_count
                     break
                 except requests.HTTPError as retry_exc:
                     if not self._should_retry_stream_without_images(retry_exc, fallback_messages):
@@ -428,8 +439,8 @@ class OllamaClient(LLMClient):
 
         return stripped, removed_images
 
-    def _build_image_fallback_messages(self, messages) -> list[tuple[list, str]]:
-        candidates: list[tuple[list, str]] = []
+    def _build_image_fallback_messages(self, messages) -> list[tuple[list, str, int]]:
+        candidates: list[tuple[list, str, int]] = []
         seen_keys: set[str] = set()
 
         image_message_indices = self._image_message_indices(messages)
@@ -461,6 +472,9 @@ class OllamaClient(LLMClient):
                             seen_keys,
                             candidate,
                             strategy=f"without image {image_index + 1} from message {message_index + 1}",
+                            dropped_current_images_count=(
+                                1 if message_index == current_image_message_index else 0
+                            ),
                         )
 
             candidate, removed = self._strip_message_images(
@@ -479,32 +493,42 @@ class OllamaClient(LLMClient):
                     seen_keys,
                     candidate,
                     strategy=label,
+                    dropped_current_images_count=(
+                        image_count if message_index == current_image_message_index else 0
+                    ),
                 )
 
         candidate, removed = self._strip_images_from_messages(messages)
         if removed:
+            current_images_total = (
+                self._image_count_for_message(messages, current_image_message_index)
+                if current_image_message_index is not None
+                else 0
+            )
             self._add_fallback_candidate(
                 candidates,
                 seen_keys,
                 candidate,
                 strategy="without all images",
+                dropped_current_images_count=current_images_total,
             )
 
         return candidates
 
     def _add_fallback_candidate(
         self,
-        candidates: list[tuple[list, str]],
+        candidates: list[tuple[list, str, int]],
         seen_keys: set[str],
         candidate_messages: list,
         strategy: str,
+        dropped_current_images_count: int,
     ) -> None:
         key = json.dumps(candidate_messages, sort_keys=True)
         if key in seen_keys:
             return
 
         seen_keys.add(key)
-        candidates.append((candidate_messages, strategy))
+        candidates.append((candidate_messages, strategy, dropped_current_images_count))
 
     def _image_message_indices(self, messages) -> list[int]:
         return [
@@ -527,7 +551,9 @@ class OllamaClient(LLMClient):
             return index
         return None
 
-    def _image_count_for_message(self, messages, message_index: int) -> int:
+    def _image_count_for_message(self, messages, message_index: int | None) -> int:
+        if message_index is None:
+            return 0
         if message_index < 0 or message_index >= len(messages):
             return 0
 
@@ -594,6 +620,15 @@ class OllamaClient(LLMClient):
             return False
 
         status_code = getattr(exc.response, "status_code", None)
+        if status_code is None:
+            return False
+
+        # Some Ollama backends report malformed/unsupported image payloads
+        # as 5xx instead of 4xx. If the request includes images, allow the
+        # image-stripping fallback path to try recovering.
+        if status_code >= 500:
+            return True
+
         if status_code not in {400, 415, 422}:
             return False
 

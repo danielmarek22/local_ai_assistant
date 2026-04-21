@@ -98,6 +98,11 @@ const handlers = {
     onAudio: (url) => {
         audioManager.queueAudio(url);
     },
+    onUserNotice: (payload) => {
+        if (payload?.scope === 'last_user_message' && typeof payload?.message === 'string') {
+            uiManager.addNoticeToLastUserMessage(payload.message, payload?.tone || 'warning');
+        }
+    },
     onEnd: (finalContent) => {
         uiManager.finalizeAiMessage(finalContent);
         assistantState = 'idle';

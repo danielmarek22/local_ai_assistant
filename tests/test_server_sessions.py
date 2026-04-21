@@ -323,6 +323,44 @@ class ServerSessionTests(unittest.TestCase):
             },
         )
 
+    def test_build_attachment_drop_notice_payload_returns_none_when_no_drop(self):
+        orchestrator = types.SimpleNamespace(
+            llm=types.SimpleNamespace(
+                last_stream_dropped_current_images=False,
+                last_stream_dropped_current_images_count=0,
+            )
+        )
+
+        payload = server_module._build_attachment_drop_notice_payload(
+            orchestrator=orchestrator,
+            original_attachment_count=1,
+        )
+
+        self.assertIsNone(payload)
+
+    def test_build_attachment_drop_notice_payload_describes_dropped_images(self):
+        orchestrator = types.SimpleNamespace(
+            llm=types.SimpleNamespace(
+                last_stream_dropped_current_images=True,
+                last_stream_dropped_current_images_count=2,
+            )
+        )
+
+        payload = server_module._build_attachment_drop_notice_payload(
+            orchestrator=orchestrator,
+            original_attachment_count=2,
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "type": "user_notice",
+                "scope": "last_user_message",
+                "tone": "warning",
+                "message": "Attached images were not sent to the model for this message.",
+            },
+        )
+
     def test_flush_pending_chunks_sends_buffered_text_in_order(self):
         ws = FakeWebSocket()
         pending_chunks = ["Hello", " world"]
