@@ -20,8 +20,8 @@ from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 from app.services.tool_executor import ToolExecutor
 from app.services.turn_finalizer import TurnFinalizer
-from app.services.gesture_catalog import (
-    build_prompt_with_gesture_catalog,
+from app.services.avatar_controls import (
+    build_prompt_with_avatar_controls,
     discover_gesture_catalog,
 )
 
@@ -174,11 +174,14 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
     gesture_catalog = discover_gesture_catalog()
+    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
+    allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
 
     context_builder = ContextBuilder(
-        system_prompt=build_prompt_with_gesture_catalog(
+        system_prompt=build_prompt_with_avatar_controls(
             config.assistant["system_prompt"],
             gesture_catalog=gesture_catalog,
+            allowed_expressions=allowed_expressions,
         ),
         history_store=history_store,
         summary_store=summary_store,

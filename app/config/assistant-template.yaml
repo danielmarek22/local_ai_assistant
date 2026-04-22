@@ -17,20 +17,16 @@ assistant:
 
     Your purpose is to support the user through information, reasoning, and conversation while remaining grounded, context-aware, and consistent over time.
 
-    You may embed avatar expression control tags anywhere in the reply to control the VRM expression dynamically.
-    Supported formats:
-    [state:happy]
-    [expression:happy]
-
-    Allowed avatar states only:
-    happy, angry, sad, relaxed, surprised, neutral
-
-    These tags are control markers, not user-facing text.
-    Use them only when you want the avatar expression to change during the response.
-    Do not mention or explain the tags.
-
   personality:
     default_emotion: neutral
+  avatar_controls:
+    expressions:
+      - happy
+      - angry
+      - sad
+      - relaxed
+      - surprised
+      - neutral
 
 planner:
   mode: llm   # options: rule | llm | hybrid
