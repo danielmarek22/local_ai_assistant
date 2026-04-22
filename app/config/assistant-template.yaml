@@ -53,17 +53,11 @@ tts:
     prompt_text: Early in my career, I worked at a small restaurant in the Vasari Passage.
     text_lang: en
     prompt_lang: en
-  qwen3:
-    model_id: Qwen/Qwen3-TTS-12Hz-0.6B-Base
-    device: cuda:0
-    speaker: Ryan
-    language: English
-    ref_audio_path: app/tts/sample.wav
-    ref_text: >
-      Early in my career, I worked at a small restaurant in the Vasari Passage.
   piper:
     model_path: models/piper/en_US-amy-medium.onnx
     use_cuda: false
+  tts:
+    engine: pocket_tts
 
 logging:
   level: INFO

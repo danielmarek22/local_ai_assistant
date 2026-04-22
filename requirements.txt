@@ -11,3 +11,4 @@ torch
 soundfile
 chromadb
 sentence-transformers
+pocket-tts

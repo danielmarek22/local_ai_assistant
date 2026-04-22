@@ -40,44 +40,20 @@ export class AudioManager {
             
             const track = this.audioContext.createMediaElementSource(this.audioEl);
             
-            // --- SUBTLE SCI-FI EFFECTS CHAIN ---
-            
-            // 1. Slight Distortion (WaveShaper)
-            const distortion = this.audioContext.createWaveShaper();
-            // A value of 5 gives it a slight digital "crunch" without ruining clarity
-            distortion.curve = this.makeDistortionCurve(5); 
-            distortion.oversample = '4x';
-
-            // 2. Metallic Ring (Comb Filter via a micro-delay)
-            const delay = this.audioContext.createDelay();
-            delay.delayTime.value = 0.015; // 15ms creates a resonant metallic pitch
-
-            const delayGain = this.audioContext.createGain();
-            delayGain.gain.value = 0.25; // Blend the robot ring in at only 25% volume
-
             // --- SIGNAL ROUTING ---
             
-            // Send raw audio to the lipsync analyser first so animations stay perfectly accurate
+            // 1. Send raw audio to the lipsync analyser first so animations stay perfectly accurate
             track.connect(this.analyser);
 
-            // Split the signal out of the analyser into two paths
-            this.analyser.connect(distortion); // Path A: Straight to distortion
-            this.analyser.connect(delay);      // Path B: To the delay node
+            // 2. Send the clean signal directly to the global speakers
+            this.analyser.connect(this.audioContext.destination);
 
-            // Bring Path B back into Path A
-            delay.connect(delayGain);
-            delayGain.connect(distortion);
-
-            // Send the final mixed, slightly robotic signal to the global speakers
-            distortion.connect(this.audioContext.destination);
-
-            console.log("Audio Context Initialized with Subtle Comm-Link Effects");
+            console.log("Audio Context Initialized with Clean Audio");
         } else if (this.audioContext.state === 'suspended') {
             this.audioContext.resume();
         }
     }
 
-    // Add this helper method anywhere inside your AudioManager class!
     makeDistortionCurve(amount) {
         let k = typeof amount === 'number' ? amount : 50;
         let n_samples = 44100;
