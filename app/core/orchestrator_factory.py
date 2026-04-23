@@ -52,25 +52,34 @@ def build_orchestrator() -> Orchestrator:
         config.llm.get("host"),
     )
 
+    llm_options = {
+        "temperature": config.llm["generation"]["temperature"],
+        "top_p": config.llm["generation"]["top_p"],
+        "num_predict": config.llm["generation"]["max_tokens"],
+    }
+    top_k = config.llm["generation"].get("top_k")
+    if top_k is not None:
+        llm_options["top_k"] = top_k
+    rep_pen = config.llm["generation"].get("rep_pen")
+    if rep_pen is not None:
+        llm_options["repeat_penalty"] = rep_pen
+
     llm = OllamaClient(
         model=config.llm["model"],
         host=config.llm["host"],
-        options={
-            "temperature": config.llm["generation"]["temperature"],
-            "top_p": config.llm["generation"]["top_p"],
-            "num_predict": config.llm["generation"]["max_tokens"],
-            "top_k": 64
-        },
+        options=llm_options,
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
     )
 
     logger.debug(
-        "LLM options: temperature=%.2f top_p=%.2f max_tokens=%d",
+        "LLM options: temperature=%.2f top_p=%.2f top_k=%s max_tokens=%d rep_pen=%s",
         config.llm["generation"]["temperature"],
         config.llm["generation"]["top_p"],
+        top_k,
         config.llm["generation"]["max_tokens"],
+        rep_pen,
     )
 
     llm.preload()

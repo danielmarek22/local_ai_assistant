@@ -9,6 +9,8 @@ llm:
   generation:
     temperature: 0.6
     top_p: 0.9
+    top_k: 64
+    rep_pen: 1.15
     max_tokens: 256
 
 assistant:

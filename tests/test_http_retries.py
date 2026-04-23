@@ -126,6 +126,29 @@ class HttpRetryTests(unittest.TestCase):
         )
 
     @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_stream_uses_configured_repeat_penalty(self, post_mock):
+        post_mock.return_value = _FakeStreamResponse(
+            lines=[
+                b'{"message":{"content":"ok"},"done":false}',
+                b'{"message":{},"done":true}',
+            ]
+        )
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            options={"repeat_penalty": 1.33},
+        )
+
+        chunks = list(client.stream_chat([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(chunks, ["ok"])
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["options"]["repeat_penalty"],
+            1.33,
+        )
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_retries_without_images_on_http_400(self, post_mock):
         error_response = requests.Response()
         error_response.status_code = 400
