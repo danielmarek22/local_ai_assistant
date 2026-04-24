@@ -5,12 +5,10 @@ import logging
 from typing import Iterator
 
 from .base import LLMClient
+from app.core.thinking_filter import ThinkingBlockSplitter
 from app.logging import trace_event
 
 logger = logging.getLogger("ollama_client")
-
-# Options that are OpenAI-specific and not understood by Ollama.
-_OPENAI_ONLY_OPTIONS = frozenset({"frequency_penalty", "presence_penalty"})
 
 # Stop sequences appended unconditionally to every streaming request to
 # prevent the model from rambling past a natural end-of-turn token.
@@ -24,8 +22,8 @@ _DEFAULT_REPEAT_PENALTY = 1.15
 _MAX_STREAM_TEMPERATURE = 1.5
 
 # Minimum context / prediction window sizes used when thinking is active.
-_THINKING_MIN_CTX = 65_536
-_THINKING_MIN_PREDICT = 32_768
+_THINKING_MIN_CTX = 8192
+_THINKING_MIN_PREDICT = 2048
 
 
 class OllamaClient(LLMClient):
@@ -48,16 +46,18 @@ class OllamaClient(LLMClient):
         options: dict | None = None,
         thinking_enabled: bool = False,
         thinking_level: str | None = None,
+        thinking_options: dict | None = None,
         timeout_s: float = 30.0,
         max_retries: int = 2,
         retry_backoff_s: float = 0.25,
     ):
         self.model = model
         self._preload_url = f"{host}/api/generate"
-        self.url = f"{host}/api/chat"
+        self.url = f"{host}/v1/chat/completions"
         self.options = options or {}
         self.thinking_enabled = thinking_enabled
         self.thinking_level = thinking_level
+        self.thinking_options = thinking_options or {}
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
@@ -117,17 +117,16 @@ class OllamaClient(LLMClient):
         if options_override:
             request_options.update(options_override)
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": request_options,
-            "think": think_value,
-        }
+        payload = self._build_payload(
+            messages,
+            stream=False,
+            think_value=think_value,
+            options=request_options,
+        )
 
         logger.info(
-            "Ollama chat request (stream=False, think=%r, messages=%d)",
-            think_value,
+            "Ollama chat request (stream=False, reasoning_effort=%r, messages=%d)",
+            payload.get("reasoning_effort"),
             len(messages),
         )
         trace_event("llm", "chat_request", payload=payload)
@@ -141,18 +140,19 @@ class OllamaClient(LLMClient):
         )
 
         data = r.json()
-        message = data.get("message", {})
+        choice = self._first_choice(data)
+        message = choice.get("message", {})
         trace_event(
             "llm",
             "chat_response",
             payload={
                 "content": message.get("content"),
-                "thinking": message.get("thinking"),
-                "done_reason": data.get("done_reason"),
+                "thinking": message.get("reasoning"),
+                "done_reason": choice.get("finish_reason"),
             },
         )
 
-        return message["content"]
+        return message.get("content", "")
 
     def stream_chat(self, messages, think_override=None) -> Iterator[str]:
         """
@@ -171,17 +171,16 @@ class OllamaClient(LLMClient):
         if not self._multimodal_supported:
             request_messages, _ = self._strip_images_from_messages(request_messages)
 
-        payload = {
-            "model": self.model,
-            "messages": request_messages,
-            "stream": True,
-            "options": request_options,
-            "think": think_value,
-        }
+        payload = self._build_payload(
+            request_messages,
+            stream=True,
+            think_value=think_value,
+            options=request_options,
+        )
 
         logger.info(
-            "Ollama chat request (stream=True, think=%r, messages=%d)",
-            think_value,
+            "Ollama chat request (stream=True, reasoning_effort=%r, messages=%d)",
+            payload.get("reasoning_effort"),
             len(messages),
         )
         trace_event("llm", "stream_request", payload=payload)
@@ -204,7 +203,7 @@ class OllamaClient(LLMClient):
 
             last_exc: requests.HTTPError = exc
             for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = fallback_messages
+                payload["messages"] = self._prepare_messages(fallback_messages)
                 logger.warning(
                     "Ollama stream rejected image payload (status=%s); retrying %s.",
                     getattr(last_exc.response, "status_code", None),
@@ -257,42 +256,75 @@ class OllamaClient(LLMClient):
         collected_thinking: list[str],
     ) -> Iterator[str]:
         in_thinking_block = False
+        inline_thinking_splitter = ThinkingBlockSplitter()
 
         with self._post_stream(payload) as r:
             for line in r.iter_lines():
                 if not line:
                     continue
 
-                chunk = json.loads(line.decode("utf-8"))
-                message = chunk.get("message", {})
-                content = message.get("content")
-                thinking = message.get("thinking")
+                decoded_line = line.decode("utf-8").strip()
+                if not decoded_line or decoded_line.startswith(":"):
+                    continue
+                if not decoded_line.startswith("data:"):
+                    continue
+
+                data_payload = decoded_line[5:].strip()
+                if not data_payload:
+                    continue
+                if data_payload == "[DONE]":
+                    self._flush_stream_tail(
+                        inline_thinking_splitter,
+                        collected_content,
+                        collected_thinking,
+                        in_thinking_block,
+                    )
+                    break
+
+                chunk = json.loads(data_payload)
+                choice = self._first_choice(chunk)
+                delta = choice.get("delta", {})
+                content = delta.get("content")
+                thinking = delta.get("reasoning") or delta.get("reasoning_content")
+                inline_visible = ""
+                inline_thinking = ""
+
+                if content:
+                    inline_visible, inline_thinking = inline_thinking_splitter.push(content)
+
+                combined_thinking = "".join(
+                    part for part in (thinking, inline_thinking) if part
+                )
 
                 # 1. Handle thinking tokens.
-                if thinking:
+                if combined_thinking:
                     if not in_thinking_block:
                         yield "<think>\n"
                         in_thinking_block = True
-                    collected_thinking.append(thinking)
-                    yield thinking
+                    collected_thinking.append(combined_thinking)
+                    yield combined_thinking
 
                 # 2. Close the thinking block when content starts arriving.
-                if content and in_thinking_block:
+                if inline_visible and in_thinking_block:
                     yield "\n</think>\n\n"
                     in_thinking_block = False
 
                 # 3. Handle content tokens.
-                if content:
-                    collected_content.append(content)
-                    yield content
+                if inline_visible:
+                    collected_content.append(inline_visible)
+                    yield inline_visible
 
                 # 4. End of stream.
-                if chunk.get("done"):
-                    if in_thinking_block:
-                        yield "\n</think>\n\n"
-                    if chunk.get("done_reason") == "length":
+                if choice.get("finish_reason") is not None:
+                    yield from self._flush_stream_tail(
+                        inline_thinking_splitter,
+                        collected_content,
+                        collected_thinking,
+                        in_thinking_block,
+                    )
+                    if choice.get("finish_reason") == "length":
                         logger.warning(
-                            "Ollama stream hit the token limit (num_predict) "
+                            "Ollama stream hit the token limit (max_tokens) "
                             "before finishing — response may be truncated."
                         )
                     break
@@ -303,25 +335,24 @@ class OllamaClient(LLMClient):
 
     def _build_stream_options(self, think_value) -> dict:
         """
-        Build the Ollama options dict for a streaming request.
+        Build the chat-completions request fields for a streaming request.
 
         Applies several safety defaults on top of the instance options:
-        - Renames max_tokens → num_predict (Ollama's key).
-        - Drops OpenAI-only keys Ollama does not understand.
+        - Applies thinking-specific overrides when thinking is active.
+        - Renames num_predict → max_tokens for the OpenAI-compatible API.
         - Clamps temperature to _MAX_STREAM_TEMPERATURE if it exceeds it.
         - Sets a default repeat_penalty if none is configured.
         - Appends built-in stop sequences.
         - Boosts context / prediction limits when thinking is active.
         """
         opts = self.options.copy()
+        if think_value:
+            opts = self._merge_options(opts, self.thinking_options)
 
-        # Rename OpenAI key to Ollama equivalent.
-        if "max_tokens" in opts:
-            opts["num_predict"] = opts.pop("max_tokens")
+        opts = self._drop_none_options(opts)
 
-        # Drop keys Ollama does not recognise.
-        for key in _OPENAI_ONLY_OPTIONS:
-            opts.pop(key, None)
+        if "num_predict" in opts and "max_tokens" not in opts:
+            opts["max_tokens"] = opts.pop("num_predict")
 
         # Default repetition penalty to discourage looping.
         opts.setdefault("repeat_penalty", _DEFAULT_REPEAT_PENALTY)
@@ -341,9 +372,46 @@ class OllamaClient(LLMClient):
         # Expand context window when thinking is active.
         if think_value:
             opts["num_ctx"] = max(opts.get("num_ctx", _THINKING_MIN_CTX), _THINKING_MIN_CTX)
-            opts["num_predict"] = max(opts.get("num_predict", _THINKING_MIN_PREDICT), _THINKING_MIN_PREDICT)
+            opts["max_tokens"] = max(opts.get("max_tokens", _THINKING_MIN_PREDICT), _THINKING_MIN_PREDICT)
 
         return opts
+
+    def _build_payload(
+        self,
+        messages,
+        stream: bool,
+        think_value,
+        options: dict | None = None,
+    ) -> dict:
+        payload = {
+            "model": self.model,
+            "messages": self._prepare_messages(messages),
+            "stream": stream,
+            "reasoning_effort": self._reasoning_effort(think_value),
+        }
+        if options:
+            payload.update(self._normalize_request_options(options))
+        return payload
+
+    def _merge_options(self, base_options: dict, override_options: dict | None) -> dict:
+        merged = dict(base_options)
+        if not override_options:
+            return merged
+
+        for key, value in override_options.items():
+            if value is None:
+                merged.pop(key, None)
+                continue
+            merged[key] = value
+
+        return merged
+
+    def _drop_none_options(self, options: dict) -> dict:
+        return {
+            key: value
+            for key, value in options.items()
+            if value is not None
+        }
 
     def _post_stream(self, payload: dict) -> requests.Response:
         """
@@ -418,6 +486,86 @@ class OllamaClient(LLMClient):
         if not self.thinking_enabled:
             return False
         return self.thinking_level or True
+
+    def _reasoning_effort(self, think_value) -> str:
+        if not think_value:
+            return "none"
+        if isinstance(think_value, str):
+            return think_value
+        return "medium"
+
+    def _normalize_request_options(self, options: dict) -> dict:
+        normalized = self._drop_none_options(options)
+        if "num_predict" in normalized and "max_tokens" not in normalized:
+            normalized["max_tokens"] = normalized.pop("num_predict")
+        return normalized
+
+    def _prepare_messages(self, messages) -> list:
+        prepared = []
+
+        for message in messages:
+            if not isinstance(message, dict):
+                prepared.append(message)
+                continue
+
+            updated_message = dict(message)
+            images = self._message_images(updated_message)
+            if images:
+                updated_message["content"] = self._build_multimodal_content(
+                    updated_message.get("content"),
+                    images,
+                )
+                updated_message.pop("images", None)
+            prepared.append(updated_message)
+
+        return prepared
+
+    def _build_multimodal_content(self, content, images: list) -> list[dict]:
+        parts: list[dict] = []
+
+        if isinstance(content, list):
+            parts.extend(content)
+        elif content not in (None, ""):
+            parts.append({"type": "text", "text": str(content)})
+
+        for image in images:
+            if not isinstance(image, str) or not image:
+                continue
+            image_url = image if image.startswith("data:") else f"data:image/png;base64,{image}"
+            parts.append({"type": "image_url", "image_url": image_url})
+
+        return parts
+
+    def _first_choice(self, payload: dict) -> dict:
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, dict):
+                return first_choice
+        return {}
+
+    def _flush_stream_tail(
+        self,
+        inline_thinking_splitter: ThinkingBlockSplitter,
+        collected_content: list[str],
+        collected_thinking: list[str],
+        in_thinking_block: bool,
+    ) -> Iterator[str]:
+        final_visible, final_thinking = inline_thinking_splitter.flush()
+        if final_thinking:
+            if not in_thinking_block:
+                yield "<think>\n"
+                in_thinking_block = True
+            collected_thinking.append(final_thinking)
+            yield final_thinking
+        if final_visible and in_thinking_block:
+            yield "\n</think>\n\n"
+            in_thinking_block = False
+        if final_visible:
+            collected_content.append(final_visible)
+            yield final_visible
+        if in_thinking_block:
+            yield "\n</think>\n\n"
 
     def _strip_images_from_messages(self, messages) -> tuple[list, bool]:
         stripped = []

@@ -2,7 +2,7 @@ import { CONFIG } from './config.js';
 
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onThinkingChunk, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -70,6 +70,9 @@ export class NetworkClient {
                 }
                 else if (data.type === 'assistant_animation' && this.handlers.onAnimation) {
                     this.handlers.onAnimation(data.animation);
+                }
+                else if (data.type === 'assistant_thinking_chunk' && this.handlers.onThinkingChunk) {
+                    this.handlers.onThinkingChunk(data.content);
                 }
                 else if (data.type === 'assistant_chunk' && this.handlers.onChunk) {
                     this.handlers.onChunk(data.content);

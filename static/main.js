@@ -92,6 +92,9 @@ const handlers = {
     onAnimation: (animation) => {
         avatarManager.queueGesture(animation);
     },
+    onThinkingChunk: (content) => {
+        uiManager.appendToThinkingMessage(content);
+    },
     onChunk: (content) => {
         uiManager.appendToAiMessage(content);
     },
@@ -104,6 +107,7 @@ const handlers = {
         }
     },
     onEnd: (finalContent) => {
+        uiManager.finalizeThinkingMessage();
         uiManager.finalizeAiMessage(finalContent);
         assistantState = 'idle';
         syncAssistantPresentation();

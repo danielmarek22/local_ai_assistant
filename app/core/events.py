@@ -13,6 +13,11 @@ class AssistantSpeechEvent(BaseEvent):
     is_final: bool = False
 
 
+class AssistantThinkingEvent(BaseEvent):
+    type: Literal["thinking"] = "thinking"
+    text: str
+
+
 class AssistantStateEvent(BaseEvent):
     type: Literal["state"] = "state"
     state: str
@@ -31,6 +36,7 @@ class AvatarAnimationEvent(BaseEvent):
 # Type alias for the generator signatures!
 TurnEvent = Union[
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,

@@ -36,6 +36,7 @@ export class UIManager {
         this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
 
         this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
         this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
@@ -376,6 +377,8 @@ export class UIManager {
     }
 
     appendUserMessage(text, attachments = []) {
+        this.currentThinkingMessageDiv = null;
+        this.currentAiMessageDiv = null;
         this.createMessageDiv('user', text, attachments);
     }
 
@@ -413,10 +416,26 @@ export class UIManager {
         }
     }
 
+    startThinkingMessage() {
+        if (!this.currentThinkingMessageDiv) {
+            this.currentThinkingMessageDiv = this.createMessageDiv('thinking', '');
+        }
+    }
+
     appendToAiMessage(text) {
         if (!this.currentAiMessageDiv) this.startAiMessage();
         const rawText = (this.currentAiMessageDiv.dataset.rawText || '') + text;
         this.setMessageContent(this.currentAiMessageDiv, rawText);
+        this.persistChatHistory();
+        this.scrollToBottom();
+    }
+
+    appendToThinkingMessage(text) {
+        if (!text) return;
+
+        if (!this.currentThinkingMessageDiv) this.startThinkingMessage();
+        const rawText = (this.currentThinkingMessageDiv.dataset.rawText || '') + text;
+        this.setMessageContent(this.currentThinkingMessageDiv, rawText);
         this.persistChatHistory();
         this.scrollToBottom();
     }
@@ -431,6 +450,10 @@ export class UIManager {
             this.persistChatHistory();
             this.currentAiMessageDiv = null;
         }
+    }
+
+    finalizeThinkingMessage() {
+        this.currentThinkingMessageDiv = null;
     }
 
     createMessageDiv(sender, text, attachments = []) {
@@ -460,7 +483,7 @@ export class UIManager {
             delete msgDiv.dataset.attachments;
         }
 
-        if (msgDiv.classList.contains('astra')) {
+        if (msgDiv.classList.contains('astra') || msgDiv.classList.contains('thinking')) {
             const unsafeHtml = marked.parse(text);
             const safeHtml = DOMPurify.sanitize(unsafeHtml, {
                 USE_PROFILES: { html: true }
@@ -592,6 +615,7 @@ export class UIManager {
         this.currentSessionId = sessionId;
         this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
         this.restoreChatHistory();
     }
 
@@ -687,12 +711,14 @@ export class UIManager {
         }));
 
         this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
         this.renderMessages(messages);
         this.persistChatHistory();
     }
 
     resetChatToDefault() {
         this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
         this.clearPendingAttachments();
         this.renderMessages(this.defaultMessages);
         this.persistChatHistory();

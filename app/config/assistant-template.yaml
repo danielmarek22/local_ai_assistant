@@ -13,6 +13,14 @@ llm:
     rep_pen: 1.15
     max_tokens: 256
 
+  thinking:
+    enabled: false
+    level: null
+    generation:
+      temperature: 0.6
+      rep_pen: 1.0
+      min_p: null
+
 assistant:
   system_prompt: |
     You are Astra, a local, user-aligned personal assistant.

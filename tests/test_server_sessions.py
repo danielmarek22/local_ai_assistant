@@ -439,6 +439,27 @@ class ServerSessionTests(unittest.TestCase):
             "Use bold, italic, inline code, and strikethrough. Escaped *literal* marker.",
         )
 
+    def test_prepare_tts_text_drops_complete_thinking_blocks(self):
+        text = "Before <think>\nsecret plan\n</think>\n\nAfter."
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(prepared, "Before After.")
+
+    def test_thinking_block_filter_strips_streamed_reasoning_across_chunk_boundaries(self):
+        filter_ = server_module.ThinkingBlockFilter()
+        chunks = [
+            "Hello ",
+            "<thi",
+            "nk>\nReasoning sentence. Another one.",
+            "\n</th",
+            "ink>\n\nworld.",
+        ]
+
+        visible = "".join(filter_.push(chunk) for chunk in chunks) + filter_.flush()
+
+        self.assertEqual(visible, "Hello \n\nworld.")
+
 
 if __name__ == "__main__":
     unittest.main()

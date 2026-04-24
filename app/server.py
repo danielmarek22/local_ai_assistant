@@ -18,6 +18,7 @@ from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.events import (
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
@@ -27,6 +28,7 @@ from app.perception.attachments import Attachment, attachment_from_payload
 from app.tts.factory import build_tts_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
+from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 
 config = Config()
 setup_logging_from_config(config.logging)
@@ -85,6 +87,7 @@ def _prepare_tts_text(text: str) -> str:
         return token
 
     cleaned = _MARKDOWN_ESCAPE_RE.sub(_protect_escaped, text)
+    cleaned = strip_complete_thinking_blocks(cleaned)
     cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", cleaned)
     cleaned = _MARKDOWN_REFERENCE_DEF_RE.sub(" ", cleaned)
     cleaned = _MARKDOWN_IMAGE_RE.sub(r"\1", cleaned)
@@ -504,6 +507,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # Buffer for sentence-based TTS
                 text_buffer = ""
+                thinking_filter = ThinkingBlockFilter()
                 pending_chunks: list[str] = []
                 text_released = False
                 tts_enabled = True
@@ -571,9 +575,18 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
 
                     # --- SPEECH EVENTS ---
+                    if isinstance(event, AssistantThinkingEvent):
+                        if event.text:
+                            await _send_ws_payload(ws, {
+                                "type": "assistant_thinking_chunk",
+                                "content": event.text,
+                            })
+                        continue
+
                     if isinstance(event, AssistantSpeechEvent):
                         if not event.is_final:
-                            text_buffer += event.text
+                            tts_chunk = thinking_filter.push(event.text)
+                            text_buffer += tts_chunk
 
                             if text_released:
                                 await _send_ws_payload(ws, {
@@ -629,6 +642,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     text_released = True
 
                         else:
+                            text_buffer += thinking_filter.flush()
                             if tts_enabled:
                                 tts_text = _prepare_tts_text(text_buffer)
                                 if tts_text:

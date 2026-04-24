@@ -5,6 +5,7 @@ from typing import Optional
 
 from app.core.events import (
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
@@ -13,6 +14,7 @@ from app.core.assistant_state import AssistantState
 from app.core.actions import ActionType
 from app.core.plan import Plan
 from app.core.stream_processor import StreamProcessor
+from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput
 from app.logging import trace_event
 from app.perception.attachments import Attachment
@@ -306,14 +308,40 @@ class Orchestrator:
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
         visible_buffer = ""
+        thinking_buffer = ""
         expression_initialized = False
         start_ts = time.perf_counter()
         processor = StreamProcessor(allowed_animations=self.allowed_animations)
+        thinking_splitter = ThinkingBlockSplitter()
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
+            visible_chunk, thinking_chunk = thinking_splitter.push(chunk)
+            if thinking_chunk:
+                thinking_buffer += thinking_chunk
+                yield AssistantThinkingEvent(text=thinking_chunk)
+            if not visible_chunk:
+                continue
+            if not visible_buffer and not visible_chunk.strip():
+                continue
             visible_buffer, expression_initialized = yield from self._emit_processor_events(
                 session_id,
-                processor.push(chunk),
+                processor.push(visible_chunk),
+                visible_buffer,
+                expression_initialized,
+            )
+
+        final_visible_chunk, final_thinking_chunk = thinking_splitter.flush()
+        if final_thinking_chunk:
+            thinking_buffer += final_thinking_chunk
+            yield AssistantThinkingEvent(text=final_thinking_chunk)
+        if final_visible_chunk:
+            if not visible_buffer and not final_visible_chunk.strip():
+                final_visible_chunk = ""
+
+        if final_visible_chunk:
+            visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                session_id,
+                processor.push(final_visible_chunk),
                 visible_buffer,
                 expression_initialized,
             )
@@ -330,16 +358,20 @@ class Orchestrator:
             yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
-            "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
+            "[%s] LLM response complete (chars=%d, thinking_chars=%d, duration=%.2f ms)",
             session_id,
             len(visible_buffer),
+            len(thinking_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )
         trace_event(
             "orchestrator",
             "llm_stream_complete",
             session_id=session_id,
-            payload={"visible_response": visible_buffer},
+            payload={
+                "visible_response": visible_buffer,
+                "reasoning_response": thinking_buffer,
+            },
         )
         return visible_buffer
 

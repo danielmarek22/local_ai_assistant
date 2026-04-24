@@ -544,26 +544,53 @@ body {
     border-bottom-left-radius: 2px;
 }
 
+.message.thinking {
+    align-self: flex-start;
+    max-width: 92%;
+    background: rgba(42, 150, 140, 0.16);
+    color: #d8fff8;
+    border: 1px dashed rgba(76, 214, 198, 0.34);
+    border-bottom-left-radius: 2px;
+    font-size: 13px;
+}
+
+.message.thinking::before {
+    content: 'Thinking';
+    display: block;
+    margin-bottom: 8px;
+    color: #92f3e5;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
 /* Markdown content in assistant bubbles */
-.message.astra p {
+.message.astra p,
+.message.thinking p {
     margin: 0 0 0.6em;
 }
 
-.message.astra p:last-child {
+.message.astra p:last-child,
+.message.thinking p:last-child {
     margin-bottom: 0;
 }
 
 .message.astra ul,
-.message.astra ol {
+.message.astra ol,
+.message.thinking ul,
+.message.thinking ol {
     margin: 0.3em 0 0.6em 1.2em;
     padding: 0;
 }
 
-.message.astra li + li {
+.message.astra li + li,
+.message.thinking li + li {
     margin-top: 0.2em;
 }
 
-.message.astra code {
+.message.astra code,
+.message.thinking code {
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     font-size: 0.9em;
     background: rgba(0, 0, 0, 0.35);
@@ -572,7 +599,8 @@ body {
     padding: 0.1em 0.35em;
 }
 
-.message.astra pre {
+.message.astra pre,
+.message.thinking pre {
     margin: 0.5em 0;
     padding: 0.75em;
     overflow-x: auto;
@@ -581,18 +609,21 @@ body {
     border-radius: 8px;
 }
 
-.message.astra pre code {
+.message.astra pre code,
+.message.thinking pre code {
     background: transparent;
     border: none;
     padding: 0;
     font-size: 0.88em;
 }
 
-.message.astra a {
+.message.astra a,
+.message.thinking a {
     color: #6fd6ff;
 }
 
-.message.astra blockquote {
+.message.astra blockquote,
+.message.thinking blockquote {
     margin: 0.5em 0;
     padding-left: 0.8em;
     border-left: 3px solid rgba(255, 255, 255, 0.25);

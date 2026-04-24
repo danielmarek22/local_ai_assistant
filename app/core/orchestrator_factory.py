@@ -28,6 +28,30 @@ from app.services.avatar_controls import (
 logger = logging.getLogger("orchestrator_factory")
 
 
+def _build_ollama_options(raw_generation: dict | None) -> dict:
+    generation = raw_generation if isinstance(raw_generation, dict) else {}
+    options: dict[str, object] = {}
+
+    field_map = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "min_p": "min_p",
+        "max_tokens": "num_predict",
+        "num_predict": "num_predict",
+        "rep_pen": "repeat_penalty",
+        "repeat_penalty": "repeat_penalty",
+        "num_ctx": "num_ctx",
+    }
+
+    for source_key, target_key in field_map.items():
+        if source_key not in generation:
+            continue
+        options[target_key] = generation[source_key]
+
+    return options
+
+
 def build_orchestrator() -> Orchestrator:
     logger.info("Building orchestrator")
 
@@ -52,22 +76,19 @@ def build_orchestrator() -> Orchestrator:
         config.llm.get("host"),
     )
 
-    llm_options = {
-        "temperature": config.llm["generation"]["temperature"],
-        "top_p": config.llm["generation"]["top_p"],
-        "num_predict": config.llm["generation"]["max_tokens"],
-    }
-    top_k = config.llm["generation"].get("top_k")
-    if top_k is not None:
-        llm_options["top_k"] = top_k
-    rep_pen = config.llm["generation"].get("rep_pen")
-    if rep_pen is not None:
-        llm_options["repeat_penalty"] = rep_pen
+    llm_generation = config.llm.get("generation", {})
+    llm_options = _build_ollama_options(llm_generation)
+    thinking_cfg = config.llm.get("thinking", {})
+    thinking_generation = thinking_cfg.get("generation", {}) if isinstance(thinking_cfg, dict) else {}
+    thinking_options = _build_ollama_options(thinking_generation)
 
     llm = OllamaClient(
         model=config.llm["model"],
         host=config.llm["host"],
         options=llm_options,
+        thinking_enabled=bool(thinking_cfg.get("enabled", False)) if isinstance(thinking_cfg, dict) else False,
+        thinking_level=thinking_cfg.get("level") if isinstance(thinking_cfg, dict) else None,
+        thinking_options=thinking_options,
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
@@ -75,11 +96,11 @@ def build_orchestrator() -> Orchestrator:
 
     logger.debug(
         "LLM options: temperature=%.2f top_p=%.2f top_k=%s max_tokens=%d rep_pen=%s",
-        config.llm["generation"]["temperature"],
-        config.llm["generation"]["top_p"],
-        top_k,
-        config.llm["generation"]["max_tokens"],
-        rep_pen,
+        llm_generation.get("temperature", 0.0),
+        llm_generation.get("top_p", 0.0),
+        llm_generation.get("top_k"),
+        llm_generation.get("max_tokens", llm_generation.get("num_predict", 0)),
+        llm_generation.get("rep_pen", llm_generation.get("repeat_penalty")),
     )
 
     llm.preload()
