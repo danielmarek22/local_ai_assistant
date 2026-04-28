@@ -8,6 +8,7 @@ import logging
 import re
 import uuid
 import time
+import emoji
 from pathlib import Path
 from dataclasses import dataclass
 from contextlib import suppress
@@ -100,6 +101,7 @@ def _prepare_tts_text(text: str) -> str:
     cleaned = _MARKDOWN_UNORDERED_LIST_RE.sub("", cleaned)
     cleaned = _MARKDOWN_ORDERED_LIST_RE.sub("", cleaned)
     cleaned = _MARKDOWN_HRULE_RE.sub(" ", cleaned)
+    cleaned = emoji.replace_emoji(cleaned, replace=" ")
 
     # Run a few passes so nested emphasis is progressively unwrapped.
     for _ in range(3):

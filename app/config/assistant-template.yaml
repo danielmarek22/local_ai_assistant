@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: ministral-3:8b
+  model: qwen3.5:9b
   timeout_s: 30.0
   max_retries: 2
   retry_backoff_s: 0.25
@@ -17,8 +17,8 @@ llm:
     enabled: false
     level: null
     generation:
-      temperature: 0.6
-      rep_pen: 1.0
+      temperature: 1
+      rep_pen: 1.1
       min_p: null
 
 assistant:
@@ -51,19 +51,17 @@ context:
   memory_limit: 5
 
 tts:
-  engine: gpt_sovits
+  engine: pocket-tts
   gpt_sovits:
     api_url: http://127.0.0.1:9880/tts
     # Make sure this absolute path matches exactly where your slice lives!
-    ref_audio_path: output/slicer_opt/my_voice.wav_0000000000_0000142720.wav
-    prompt_text: Early in my career, I worked at a small restaurant in the Vasari Passage.
+    ref_audio_path: ref.wav
+    prompt_text: ref text
     text_lang: en
     prompt_lang: en
   piper:
     model_path: models/piper/en_US-amy-medium.onnx
     use_cuda: false
-  tts:
-    engine: pocket_tts
 
 logging:
   level: INFO

@@ -12,3 +12,5 @@ soundfile
 chromadb
 sentence-transformers
 pocket-tts
+emoji
+faster-whisper
