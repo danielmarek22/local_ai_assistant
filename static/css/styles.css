@@ -297,6 +297,46 @@ body {
     opacity: 0.65;
 }
 
+.config-hotkey-btn {
+    min-height: 34px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: #eef5fb;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.config-hotkey-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.config-hotkey-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
+}
+
+.config-hotkey-btn.capturing {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.5);
+    color: #8fffd0;
+    animation: pulse 1s infinite;
+}
+
+.config-hotkey-display {
+    min-width: 48px;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: #00ff99;
+    font-family: 'Courier New', monospace;
+}
+
 .config-inline-status {
     flex: 1;
     text-align: left;
@@ -536,6 +576,10 @@ body {
     box-shadow: 0 2px 5px rgba(0,195,255,0.2);
 }
 
+.message.user.from-stt .message-body {
+    font-style: italic;
+}
+
 .message.astra {
     align-self: flex-start;
     background: rgba(255, 255, 255, 0.1);
@@ -547,9 +591,9 @@ body {
 .message.thinking {
     align-self: flex-start;
     max-width: 92%;
-    background: rgba(42, 150, 140, 0.16);
-    color: #d8fff8;
-    border: 1px dashed rgba(76, 214, 198, 0.34);
+    background: rgba(0, 255, 4, 0.08);
+    color: #0a6815e6;
+    border: 1px dashed rgba(60, 255, 0, 0.28);
     border-bottom-left-radius: 2px;
     font-size: 13px;
 }
@@ -558,7 +602,7 @@ body {
     content: 'Thinking';
     display: block;
     margin-bottom: 8px;
-    color: #92f3e5;
+    color: #6be87ae6;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.08em;
@@ -829,3 +873,42 @@ body {
     transition: transform 0.1s;
 }
 #send-btn:active { transform: scale(0.95); }
+
+.mic-btn {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #dfe7ee;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+    flex-shrink: 0;
+}
+
+.mic-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.mic-btn:active {
+    transform: scale(0.95);
+}
+
+.mic-btn.recording {
+    background: rgba(255, 80, 80, 0.2);
+    border-color: rgba(255, 80, 80, 0.5);
+    color: #ff7777;
+    box-shadow: 0 0 12px rgba(255, 80, 80, 0.4);
+    animation: pulse-recording 1.2s infinite;
+}
+
+@keyframes pulse-recording {
+    0%, 100% { box-shadow: 0 0 12px rgba(255, 80, 80, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(255, 80, 80, 0.6); }
+}

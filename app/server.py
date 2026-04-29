@@ -17,6 +17,7 @@ from app.config import Config
 
 from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
+from app.core.turn_input import InputModality
 from app.core.events import (
     AssistantSpeechEvent,
     AssistantThinkingEvent,
@@ -27,6 +28,7 @@ from app.core.events import (
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, attachment_from_payload
 from app.tts.factory import build_tts_engine
+from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
 from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
@@ -359,6 +361,7 @@ async def startup_event():
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
+    app.state.stt = build_stt_engine(config.stt)
 
 
 @app.on_event("shutdown")
@@ -494,16 +497,86 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            raw_message = await ws.receive_text()
-            try:
-                user_text, reasoning_override, attachments = parse_user_message(raw_message)
+            # receive() instead of receive_text() so we can handle both
+            # text frames (keyboard) and binary frames (microphone audio).
+            raw_message = await ws.receive()
 
+            # Starlette surfaces disconnects as a message dict rather than
+            # raising WebSocketDisconnect, so we must check before touching
+            # any keys — otherwise the next receive() call crashes.
+            if raw_message.get("type") == "websocket.disconnect":
+                logger.info("[%s] WebSocket disconnect received", connection_id)
+                break
+
+            try:
+                # ── VOICE PATH ────────────────────────────────────────────
+                # Check `is not None` rather than truthiness — an empty bytes
+                # value (b"") is falsy, which would wrongly fall through to
+                # the text branch and crash on raw_message["text"].
+                if raw_message.get("bytes") is not None:
+                    stt = getattr(app.state, "stt", None)
+                    if stt is None:
+                        await _send_turn_error(ws, "STT is not available.")
+                        continue
+
+                    audio_bytes = raw_message["bytes"]
+
+                    logger.info(
+                        "[%s] Received audio frame (%d bytes)",
+                        connection_id,
+                        len(audio_bytes),
+                    )
+
+                    loop = asyncio.get_running_loop()
+                    try:
+                        result = await loop.run_in_executor(
+                            None, stt.transcribe, audio_bytes
+                        )
+                    except Exception:
+                        logger.exception("[%s] STT transcription failed", connection_id)
+                        await _send_turn_error(ws, "Transcription failed.")
+                        continue
+
+                    if not result.text.strip():
+                        logger.debug("[%s] STT returned empty transcript (silence)", connection_id)
+                        await _send_ws_payload(ws, {"type": "stt_silence"})
+                        continue
+
+                    logger.info(
+                        "[%s] STT transcript: %r (lang=%s)",
+                        connection_id,
+                        result.text,
+                        result.language,
+                    )
+
+                    # Echo transcript to the UI so it can render the user bubble
+                    # before the assistant starts responding.
+                    await _send_ws_payload(ws, {
+                        "type": "stt_transcript",
+                        "text": result.text,
+                        "language": result.language,
+                    })
+
+                    user_text = result.text
+                    reasoning_override = None
+                    attachments = []
+                    input_modality = InputModality.VOICE
+
+                # ── TEXT PATH ─────────────────────────────────────────────
+                else:
+                    user_text, reasoning_override, attachments = parse_user_message(
+                        raw_message["text"]
+                    )
+                    input_modality = InputModality.TEXT
+
+                # ── SHARED PATH (both modalities reach here) ──────────────
                 logger.info(
-                    "[%s] Received user input (len=%d, images=%d, reasoning_override=%r)",
+                    "[%s] Received user input (len=%d, images=%d, reasoning_override=%r, modality=%s)",
                     connection_id,
                     len(user_text),
                     len(attachments),
                     reasoning_override,
+                    input_modality.value,
                 )
                 logger.debug("[%s] User input text: %r", connection_id, user_text)
 
@@ -521,6 +594,7 @@ async def websocket_endpoint(ws: WebSocket):
                         user_text,
                         think_override=reasoning_override,
                         attachments=attachments,
+                        input_modality=input_modality,
                     )
                 ):
                     if not image_notice_sent:
@@ -688,6 +762,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 "[%s] Assistant turn completed",
                                 connection_id,
                             )
+
             except WebSocketDisconnect:
                 raise
             except ValueError as exc:
@@ -715,7 +790,6 @@ async def websocket_endpoint(ws: WebSocket):
 
     finally:
         logger.debug("[%s] WebSocket cleanup complete", connection_id)
-
 
 @app.get("/")
 async def get_index():

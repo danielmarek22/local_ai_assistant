@@ -63,6 +63,12 @@ tts:
     model_path: models/piper/en_US-amy-medium.onnx
     use_cuda: false
 
+stt:
+  enabled: true
+  model_size: small   # tiny/base/small/medium — small is the sweet spot for local
+  device: cpu
+  compute_type: int8
+
 logging:
   level: INFO
   console_level: INFO

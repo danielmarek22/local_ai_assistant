@@ -111,7 +111,18 @@ const handlers = {
         uiManager.finalizeAiMessage(finalContent);
         assistantState = 'idle';
         syncAssistantPresentation();
-    }
+    },
+
+    // ── STT handlers ─────────────────────────────────────────────
+    // The server echoes the transcript back before it starts processing
+    // the turn, so we render the user bubble here rather than on send.
+    onSttTranscript: ({ text }) => {
+        audioManager.init();
+        uiManager.appendVoiceUserMessage(text);
+    },
+    // Silence detected — nothing to do in the UI, but the hook is here
+    // if you want to add a visual cue later (e.g. a brief mic flash).
+    onSttSilence: () => {},
 };
 
 const client = new NetworkClient(handlers);
@@ -133,6 +144,15 @@ uiManager.onSend((text, options) => {
     uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
 });
+
+// Wire mic button → binary WS frame.
+// The user bubble is rendered by onSttTranscript above, not here,
+// because we don't have the transcript text yet at send time.
+uiManager.onMicPress((audioBlob) => {
+    console.log('onMicPress fired, blob size:', audioBlob.size, 'type:', audioBlob.type);
+    client.sendAudio(audioBlob);
+});
+
 
 uiManager.onReflect(async () => {
     if (reflectionInFlight) {

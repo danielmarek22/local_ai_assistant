@@ -86,6 +86,15 @@ export class NetworkClient {
                 else if (data.type === 'user_notice' && this.handlers.onUserNotice) {
                     this.handlers.onUserNotice(data);
                 }
+                else if (data.type === 'stt_transcript' && this.handlers.onSttTranscript) {
+                    this.handlers.onSttTranscript({
+                        text: data.text,
+                        language: data.language,
+                    });
+                }
+                else if (data.type === 'stt_silence' && this.handlers.onSttSilence) {
+                    this.handlers.onSttSilence();
+                }
             };
 
         } catch (e) {
@@ -121,6 +130,10 @@ export class NetworkClient {
         }
 
         this.connect(options);
+    }
+
+    sendAudio(audioBlob) {
+        this.ws.send(audioBlob);  // binary frame — no JSON wrapping
     }
 
     sendMessage(text, options = {}) {

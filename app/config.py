@@ -45,6 +45,17 @@ class Config:
         # TTS
         self.tts = self._load_tts_config(self.raw.get("tts"))
 
+        # STT
+        self.stt = self.raw.get(
+            "stt",
+            {
+                "enabled": True,
+                "model_size": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+            },
+        )
+
         # Logging
         self.logging = self.raw.get(
             "logging",

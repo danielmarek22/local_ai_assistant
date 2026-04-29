@@ -23,11 +23,14 @@ export class UIManager {
         this.reasoningToggle = document.getElementById('reasoning-toggle');
         this.playbackVolumeInput = document.getElementById('playback-volume');
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
+        this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
+        this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
         this.sendBtn = document.getElementById('send-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
+        this.micBtn = document.getElementById('mic-btn');
         this.chatTabs = Array.from(document.querySelectorAll('.chat-tab'));
         this.tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
         this.historyList = document.getElementById('history-list');
@@ -43,13 +46,210 @@ export class UIManager {
         this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.defaultMessages = this.serializeChatHistory();
+
+        // STT recording state
+        this._mediaRecorder = null;
+        this._audioChunks = [];
+        this._isRecording = false;
+        this._onMicPressHandler = null;
+        this._micHotkey = this.loadMicHotkey();
+
         this.initAutoResize();
         this.initPanelControls();
         this.initTabs();
         this.initHistoryControls();
         this.initComposerControls();
         this.initConfigControls();
+        this.initMicControls();
     }
+
+    // ============================================================
+    // Mic / STT
+    // ============================================================
+
+    initMicControls() {
+        if (!this.micBtn) return;
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+            // Browser doesn't support mic access — hide the button silently.
+            this.micBtn.classList.add('hidden');
+            return;
+        }
+
+        // Load saved hotkey or use default
+        this._micHotkey = this.loadMicHotkey();
+
+        // Hold to record, release to send (pointer controls).
+        this.micBtn.addEventListener('pointerdown', (event) => {
+            event.preventDefault();
+            this.startRecording();
+        });
+
+        // Release on pointerup or pointerleave so a drag-off also stops recording.
+        const stopRecording = () => this.stopRecording();
+        this.micBtn.addEventListener('pointerup', stopRecording);
+        this.micBtn.addEventListener('pointerleave', stopRecording);
+
+        // Hotkey controls (spacebar by default).
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== this._micHotkey) return;
+            // Don't trigger if user is typing in the input field
+            if (document.activeElement === this.userInput) return;
+            if (this._isRecording) return;
+
+            event.preventDefault();
+            this.startRecording();
+        });
+
+        document.addEventListener('keyup', (event) => {
+            if (event.key !== this._micHotkey) return;
+            if (this._isRecording) {
+                event.preventDefault();
+                this.stopRecording();
+            }
+        });
+    }
+
+    async startRecording() {
+        if (this._isRecording) return;
+
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (err) {
+            console.warn('Microphone access denied:', err);
+            return;
+        }
+
+        this._audioChunks = [];
+        this._isRecording = true;
+        this.micBtn.classList.add('recording');
+        this.micBtn.setAttribute('aria-label', 'Recording… release to send');
+
+        // Prefer webm/opus; fall back to whatever the browser supports.
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : '';
+
+        this._mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+        this._mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) this._audioChunks.push(e.data);
+        };
+
+        this._mediaRecorder.onstop = () => {
+            stream.getTracks().forEach((t) => t.stop());
+            this._isRecording = false;
+            this.micBtn.classList.remove('recording');
+            this.micBtn.setAttribute('aria-label', 'Hold to speak');
+
+            const blob = new Blob(this._audioChunks, {
+                type: this._mediaRecorder.mimeType || 'audio/webm',
+            });
+            this._audioChunks = [];
+
+            if (this._onMicPressHandler) {
+                this._onMicPressHandler(blob);
+            }
+        };
+
+        this._mediaRecorder.start();
+    }
+
+    stopRecording() {
+        if (this._mediaRecorder && this._isRecording) {
+            this._mediaRecorder.stop();
+        }
+    }
+
+    loadMicHotkey() {
+        const stored = localStorage.getItem(CONFIG.UI.STORAGE_KEYS.MIC_HOTKEY);
+        return stored || CONFIG.UI.MIC_HOTKEY_DEFAULT;
+    }
+
+    saveMicHotkey(hotkey) {
+        this._micHotkey = hotkey;
+        localStorage.setItem(CONFIG.UI.STORAGE_KEYS.MIC_HOTKEY, hotkey);
+    }
+
+    onMicPress(callback) {
+        this._onMicPressHandler = callback;
+    }
+
+    onMicHotkeyChange(callback) {
+        this._onMicHotkeyChangeHandler = callback;
+    }
+
+    formatKeyDisplay(key) {
+        const keyMap = {
+            ' ': 'Space',
+            'Enter': 'Enter',
+            'Tab': 'Tab',
+            'Shift': 'Shift',
+            'Control': 'Ctrl',
+            'Alt': 'Alt',
+            'Meta': 'Cmd',
+            'ArrowUp': '↑',
+            'ArrowDown': '↓',
+            'ArrowLeft': '←',
+            'ArrowRight': '→',
+        };
+        return keyMap[key] || (key.length === 1 ? key.toUpperCase() : key);
+    }
+
+    updateHotkeyDisplay() {
+        if (this.micHotkeyCurrent) {
+            this.micHotkeyCurrent.textContent = this.formatKeyDisplay(this._micHotkey);
+        }
+    }
+
+    startHotkeyCapture() {
+        if (!this.micHotkeyBtn) return;
+        
+        this.micHotkeyBtn.textContent = 'Listening...';
+        this.micHotkeyBtn.disabled = true;
+        this.micHotkeyBtn.classList.add('capturing');
+
+        const handleKeyDown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const newHotkey = event.key;
+            this.saveMicHotkey(newHotkey);
+            this.updateHotkeyDisplay();
+
+            this.micHotkeyBtn.textContent = 'Press any key...';
+            this.micHotkeyBtn.disabled = false;
+            this.micHotkeyBtn.classList.remove('capturing');
+
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+
+        // Timeout after 5 seconds
+        setTimeout(() => {
+            document.removeEventListener('keydown', handleKeyDown);
+            if (this.micHotkeyBtn) {
+                this.micHotkeyBtn.textContent = 'Press any key...';
+                this.micHotkeyBtn.disabled = false;
+                this.micHotkeyBtn.classList.remove('capturing');
+            }
+        }, 5000);
+    }
+    
+
+    // Called by main.js when stt_transcript arrives from the server,
+    // so the user bubble appears before the assistant starts responding.
+    appendVoiceUserMessage(text) {
+        this.currentThinkingMessageDiv = null;
+        this.currentAiMessageDiv = null;
+        const msgDiv = this.createMessageDiv('user', text, []);
+        msgDiv.classList.add('from-stt');
+    }
+
+    // ============================================================
+    // Existing methods — unchanged below this line
+    // ============================================================
 
     initAutoResize() {
         this.userInput.addEventListener('input', () => {
@@ -285,6 +485,11 @@ export class UIManager {
                 const nextVolume = Number(this.playbackVolumeInput.value) / 100;
                 this.setPlaybackVolume(nextVolume, { persist: true, notify: true });
             });
+        }
+
+        if (this.micHotkeyBtn && this.micHotkeyCurrent) {
+            this.updateHotkeyDisplay();
+            this.micHotkeyBtn.addEventListener('click', () => this.startHotkeyCapture());
         }
 
         this.reflectNowBtn?.addEventListener('click', () => {

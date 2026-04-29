@@ -15,7 +15,7 @@ from app.core.actions import ActionType
 from app.core.plan import Plan
 from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
-from app.core.turn_input import TurnInput
+from app.core.turn_input import TurnInput, InputModality
 from app.logging import trace_event
 from app.perception.attachments import Attachment
 from app.perception.state import PerceptionState
@@ -67,6 +67,7 @@ class Orchestrator:
         user_text: str,
         think_override=None,
         attachments: list[Attachment] | None = None,
+        input_modality = InputModality.TEXT,
     ):
         start_ts = time.perf_counter()
         perception = PerceptionState()
@@ -74,6 +75,7 @@ class Orchestrator:
             user_text=user_text,
             attachments=attachments or [],
             think_override=think_override,
+            input_modality=input_modality,
         )
         retrieval_text = turn_input.retrieval_text()
         history_text = turn_input.history_text()
@@ -108,12 +110,10 @@ class Orchestrator:
                 PerceptionKey.USER_INPUT,
                 {
                     "text": turn_input.user_text,
-                    "source": "keyboard",
+                    "source": "microphone" if turn_input.input_modality == InputModality.VOICE else InputModality.TEXT,
+                    "modality": turn_input.input_modality.value,  # NEW
                     "image_count": len(turn_input.attachments),
-                    "attachments": [
-                        attachment.to_perception_payload()
-                        for attachment in turn_input.attachments
-                    ],
+                    "attachments": [...],
                 },
             )
 
