@@ -15,23 +15,6 @@ def _resolve_engine_name(tts_config: dict) -> str:
 def build_tts_engine(tts_config: dict) -> TTS:
     engine = _resolve_engine_name(tts_config)
 
-    if engine == "qwen3":
-        from app.tts.qwen3_tts import Qwen3TTS
-
-        settings = tts_config.get("qwen3", tts_config)
-        return Qwen3TTS(
-            model_id=settings["model_id"],
-            device=settings.get("device", "cuda:0"),
-            speaker=settings.get("speaker", "Ryan"),
-            language=settings.get("language", "English"),
-            ref_audio_path=(
-                Path(settings["ref_audio_path"])
-                if settings.get("ref_audio_path")
-                else None
-            ),
-            ref_text=settings.get("ref_text"),
-        )
-
     if engine == "piper":
         from app.tts.piper_tts import PiperTTS
 
@@ -40,6 +23,11 @@ def build_tts_engine(tts_config: dict) -> TTS:
             model_path=Path(settings["model_path"]),
             use_cuda=settings.get("use_cuda", True),
         )
+    
+    if engine in ("pocket_tts", "pocket-tts", "pocket"):
+        from app.tts.pocket_tts import PocketTTSWrapper
+        print("\n[DEBUG] Native Pocket TTS Engine loaded.\n")
+        return PocketTTSWrapper()
 
     if engine in ("gpt_sovits", "gpt-sovits", "sovits"):
         from app.tts.gpt_sovits_tts import GPTSoVITSTTS

@@ -11,7 +11,6 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
-        self.user_context = self.raw.get("user_context", {})
 
         # Planner
         self.planner = self.raw.get(
@@ -45,6 +44,17 @@ class Config:
 
         # TTS
         self.tts = self._load_tts_config(self.raw.get("tts"))
+
+        # STT
+        self.stt = self.raw.get(
+            "stt",
+            {
+                "enabled": True,
+                "model_size": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+            },
+        )
 
         # Logging
         self.logging = self.raw.get(

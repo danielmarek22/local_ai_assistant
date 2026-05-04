@@ -5,14 +5,17 @@ from typing import Optional
 
 from app.core.events import (
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
+    AvatarAnimationEvent,
 )
 from app.core.assistant_state import AssistantState
 from app.core.actions import ActionType
 from app.core.plan import Plan
 from app.core.stream_processor import StreamProcessor
-from app.core.turn_input import TurnInput
+from app.core.thinking_filter import ThinkingBlockSplitter
+from app.core.turn_input import TurnInput, InputModality
 from app.logging import trace_event
 from app.perception.attachments import Attachment
 from app.perception.state import PerceptionState
@@ -38,6 +41,7 @@ class Orchestrator:
         memory_retriever,
         memory_action_handler,
         turn_finalizer,
+        gesture_catalog: dict[str, str] | None = None,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -48,6 +52,8 @@ class Orchestrator:
         self.memory_retriever = memory_retriever
         self.memory_action_handler = memory_action_handler
         self.turn_finalizer = turn_finalizer
+        self.gesture_catalog = dict(gesture_catalog or {})
+        self.allowed_animations = set(self.gesture_catalog.keys())
 
         logger.info("Orchestrator initialized")
 
@@ -61,6 +67,7 @@ class Orchestrator:
         user_text: str,
         think_override=None,
         attachments: list[Attachment] | None = None,
+        input_modality = InputModality.TEXT,
     ):
         start_ts = time.perf_counter()
         perception = PerceptionState()
@@ -68,6 +75,7 @@ class Orchestrator:
             user_text=user_text,
             attachments=attachments or [],
             think_override=think_override,
+            input_modality=input_modality,
         )
         retrieval_text = turn_input.retrieval_text()
         history_text = turn_input.history_text()
@@ -102,7 +110,8 @@ class Orchestrator:
                 PerceptionKey.USER_INPUT,
                 {
                     "text": turn_input.user_text,
-                    "source": "keyboard",
+                    "source": "microphone" if turn_input.input_modality == InputModality.VOICE else InputModality.TEXT,
+                    "modality": turn_input.input_modality.value,
                     "image_count": len(turn_input.attachments),
                     "attachments": [
                         attachment.to_perception_payload()
@@ -302,14 +311,40 @@ class Orchestrator:
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
         visible_buffer = ""
+        thinking_buffer = ""
         expression_initialized = False
         start_ts = time.perf_counter()
-        processor = StreamProcessor()
+        processor = StreamProcessor(allowed_animations=self.allowed_animations)
+        thinking_splitter = ThinkingBlockSplitter()
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
+            visible_chunk, thinking_chunk = thinking_splitter.push(chunk)
+            if thinking_chunk:
+                thinking_buffer += thinking_chunk
+                yield AssistantThinkingEvent(text=thinking_chunk)
+            if not visible_chunk:
+                continue
+            if not visible_buffer and not visible_chunk.strip():
+                continue
             visible_buffer, expression_initialized = yield from self._emit_processor_events(
                 session_id,
-                processor.push(chunk),
+                processor.push(visible_chunk),
+                visible_buffer,
+                expression_initialized,
+            )
+
+        final_visible_chunk, final_thinking_chunk = thinking_splitter.flush()
+        if final_thinking_chunk:
+            thinking_buffer += final_thinking_chunk
+            yield AssistantThinkingEvent(text=final_thinking_chunk)
+        if final_visible_chunk:
+            if not visible_buffer and not final_visible_chunk.strip():
+                final_visible_chunk = ""
+
+        if final_visible_chunk:
+            visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                session_id,
+                processor.push(final_visible_chunk),
                 visible_buffer,
                 expression_initialized,
             )
@@ -326,16 +361,20 @@ class Orchestrator:
             yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
 
         logger.info(
-            "[%s] LLM response complete (chars=%d, duration=%.2f ms)",
+            "[%s] LLM response complete (chars=%d, thinking_chars=%d, duration=%.2f ms)",
             session_id,
             len(visible_buffer),
+            len(thinking_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )
         trace_event(
             "orchestrator",
             "llm_stream_complete",
             session_id=session_id,
-            payload={"visible_response": visible_buffer},
+            payload={
+                "visible_response": visible_buffer,
+                "reasoning_response": thinking_buffer,
+            },
         )
         return visible_buffer
 
@@ -351,6 +390,11 @@ class Orchestrator:
                 expression_initialized = True
                 logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
                 yield AvatarExpressionEvent(expression=value)
+                continue
+
+            if event_type == "animation":
+                logger.info("[%s] Model selected avatar animation '%s'", session_id, value)
+                yield AvatarAnimationEvent(animation=value)
                 continue
 
             if not value:

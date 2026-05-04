@@ -8,22 +8,30 @@ import logging
 import re
 import uuid
 import time
+import emoji
 from pathlib import Path
 from dataclasses import dataclass
 from contextlib import suppress
+from pydantic import BaseModel, Field
 from app.config import Config
 
 from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
+from app.core.turn_input import InputModality
 from app.core.events import (
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
+    AvatarAnimationEvent,
 )
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, attachment_from_payload
 from app.tts.factory import build_tts_engine
+from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
+from app.services.memory_reflector import MemoryReflector
+from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 
 config = Config()
 setup_logging_from_config(config.logging)
@@ -37,32 +45,76 @@ AUDIO_DIR = Path("static/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
-tts = build_tts_engine(config.tts)
+tts = None
 
 logger.info("Starting FastAPI server")
 
 _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
-_FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+_MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
-_MARKDOWN_MARKER_RE = re.compile(r"[*_~`>#]")
+_MARKDOWN_REFERENCE_LINK_RE = re.compile(r"\[([^\]]+)\]\[[^\]]*\]")
+_MARKDOWN_AUTOLINK_RE = re.compile(r"<https?://[^>]+>")
+_MARKDOWN_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
+_MARKDOWN_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)
+_MARKDOWN_UNORDERED_LIST_RE = re.compile(r"^\s{0,3}[-*+]\s+", re.MULTILINE)
+_MARKDOWN_ORDERED_LIST_RE = re.compile(r"^\s{0,3}\d+\.\s+", re.MULTILINE)
+_MARKDOWN_HRULE_RE = re.compile(r"^\s{0,3}(?:[-*_]\s*){3,}$", re.MULTILINE)
+_MARKDOWN_BOLD_RE = re.compile(r"(\*\*|__)(.*?)\1")
+_MARKDOWN_ITALIC_RE = re.compile(r"(?<!\w)(\*|_)(.+?)\1(?!\w)")
+_MARKDOWN_STRIKE_RE = re.compile(r"~~(.+?)~~")
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _prepare_tts_text(text: str) -> str:
     """
-    Lightweight markdown skipping for TTS:
+    Convert markdown-ish text into plain text suitable for TTS:
     - drop fenced code blocks
-    - keep link labels, drop URLs
-    - remove common markdown marker chars
+    - keep link/image labels, drop URLs
+    - remove block markers (headings, lists, quotes, rulers)
+    - unwrap inline emphasis/code markers
     """
     if not text:
         return ""
 
-    cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", text)
+    escaped_markers: dict[str, str] = {}
+
+    def _protect_escaped(match: re.Match[str]) -> str:
+        token = f"TTSESCAPED{len(escaped_markers)}TOKEN"
+        escaped_markers[token] = match.group(1)
+        return token
+
+    cleaned = _MARKDOWN_ESCAPE_RE.sub(_protect_escaped, text)
+    cleaned = strip_complete_thinking_blocks(cleaned)
+    cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", cleaned)
+    cleaned = _MARKDOWN_REFERENCE_DEF_RE.sub(" ", cleaned)
+    cleaned = _MARKDOWN_IMAGE_RE.sub(r"\1", cleaned)
     cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
-    cleaned = _MARKDOWN_MARKER_RE.sub("", cleaned)
-    return cleaned.strip()
+    cleaned = _MARKDOWN_REFERENCE_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_AUTOLINK_RE.sub(" ", cleaned)
+    cleaned = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_HEADING_RE.sub("", cleaned)
+    cleaned = _MARKDOWN_BLOCKQUOTE_RE.sub("", cleaned)
+    cleaned = _MARKDOWN_UNORDERED_LIST_RE.sub("", cleaned)
+    cleaned = _MARKDOWN_ORDERED_LIST_RE.sub("", cleaned)
+    cleaned = _MARKDOWN_HRULE_RE.sub(" ", cleaned)
+    cleaned = emoji.replace_emoji(cleaned, replace=" ")
+
+    # Run a few passes so nested emphasis is progressively unwrapped.
+    for _ in range(3):
+        cleaned = _MARKDOWN_BOLD_RE.sub(r"\2", cleaned)
+        cleaned = _MARKDOWN_ITALIC_RE.sub(r"\2", cleaned)
+        cleaned = _MARKDOWN_STRIKE_RE.sub(r"\1", cleaned)
+
+    for token, marker in escaped_markers.items():
+        cleaned = cleaned.replace(token, marker)
+
+    return _WHITESPACE_RE.sub(" ", cleaned).strip()
 
 
 def resolve_session_id(
@@ -130,6 +182,10 @@ class TTSJob:
     session_id: str
 
 
+class ReflectRequest(BaseModel):
+    days_old: int = Field(default=14, ge=0)
+
+
 def _next_or_sentinel(iterator: Iterator[Any]):
     try:
         return next(iterator)
@@ -172,6 +228,9 @@ async def tts_worker(queue: asyncio.Queue):
             if job is _TTS_STOP:
                 logger.info("TTS worker stopping")
                 return
+
+            if tts is None:
+                raise RuntimeError("TTS engine has not been initialized")
 
             tts_start = time.perf_counter()
             await loop.run_in_executor(
@@ -228,22 +287,87 @@ async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> Non
     pending_chunks.clear()
 
 
+async def _send_turn_error(ws: WebSocket, message: str) -> None:
+    with suppress(Exception):
+        await _send_ws_payload(ws, {
+            "type": "assistant_state",
+            "state": AssistantState.IDLE,
+        })
+
+    with suppress(Exception):
+        await _send_ws_payload(ws, {
+            "type": "assistant_end",
+            "content": message,
+        })
+
+
+def _build_session_init_payload(
+    server_instance_id: str,
+    session_id: str,
+    gesture_catalog: dict[str, str] | None = None,
+) -> dict:
+    return {
+        "type": "session_init",
+        "server_instance_id": server_instance_id,
+        "session_id": session_id,
+        "gesture_catalog": dict(gesture_catalog or {}),
+    }
+
+
+def _build_attachment_drop_notice_payload(
+    orchestrator,
+    original_attachment_count: int,
+) -> dict | None:
+    if original_attachment_count <= 0:
+        return None
+
+    llm = getattr(orchestrator, "llm", None)
+    if llm is None:
+        return None
+
+    if not getattr(llm, "last_stream_dropped_current_images", False):
+        return None
+
+    dropped_count = getattr(llm, "last_stream_dropped_current_images_count", 0)
+    if not isinstance(dropped_count, int) or dropped_count <= 0:
+        dropped_count = original_attachment_count
+
+    dropped_count = min(dropped_count, original_attachment_count)
+    noun = "image" if dropped_count == 1 else "images"
+    verb = "was" if dropped_count == 1 else "were"
+
+    return {
+        "type": "user_notice",
+        "scope": "last_user_message",
+        "tone": "warning",
+        "message": f"Attached {noun} {verb} not sent to the model for this message.",
+    }
+
+
 def _should_forward_state(state: str) -> bool:
     return state != AssistantState.RESPONDING
 
 
 @app.on_event("startup")
 async def startup_event():
+    global tts
+
     app.state.server_instance_id = uuid.uuid4().hex[:8]
     app.state.orchestrator = build_orchestrator()
+    app.state.memory_reflector = MemoryReflector(
+        llm=app.state.orchestrator.llm,
+        memory_store=app.state.orchestrator.memory_retriever.memory,
+    )
     logger.info(
         "Orchestrator initialized at startup (server_instance_id=%s)",
         app.state.server_instance_id,
     )
 
+    tts = build_tts_engine(config.tts)
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
+    app.state.stt = build_stt_engine(config.stt)
 
 
 @app.on_event("shutdown")
@@ -313,6 +437,33 @@ async def delete_session(session_id: str):
     return {"deleted": True, "session_id": session_id}
 
 
+@app.post("/api/admin/reflect")
+async def run_memory_reflection(payload: ReflectRequest):
+    reflector = getattr(app.state, "memory_reflector", None)
+    if reflector is None:
+        orchestrator = app.state.orchestrator
+        reflector = MemoryReflector(
+            llm=orchestrator.llm,
+            memory_store=orchestrator.memory_retriever.memory,
+        )
+        app.state.memory_reflector = reflector
+
+    logger.info("Manual memory reflection requested (days_old=%d)", payload.days_old)
+
+    result = reflector.reflect_and_prune(payload.days_old)
+
+    if not result.get("success", True):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Memory reflection failed",
+                "error": result.get("error"),
+            },
+        )
+
+    return result
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     connection_id = uuid.uuid4().hex[:8]
@@ -336,142 +487,207 @@ async def websocket_endpoint(ws: WebSocket):
         session_id,
         session_mode,
     )
-    await ws.send_text(json.dumps({
-        "type": "session_init",
-        "server_instance_id": server_instance_id,
-        "session_id": session_id,
-    }))
+    await ws.send_text(json.dumps(_build_session_init_payload(
+        server_instance_id=server_instance_id,
+        session_id=session_id,
+        gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+    )))
 
     orchestrator = app.state.orchestrator
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     try:
         while True:
-            raw_message = await ws.receive_text()
-            user_text, reasoning_override, attachments = parse_user_message(raw_message)
+            # receive() instead of receive_text() so we can handle both
+            # text frames (keyboard) and binary frames (microphone audio).
+            raw_message = await ws.receive()
 
-            logger.info(
-                "[%s] Received user input (len=%d, images=%d, reasoning_override=%r)",
-                connection_id,
-                len(user_text),
-                len(attachments),
-                reasoning_override,
-            )
-            logger.debug("[%s] User input text: %r", connection_id, user_text)
+            # Starlette surfaces disconnects as a message dict rather than
+            # raising WebSocketDisconnect, so we must check before touching
+            # any keys — otherwise the next receive() call crashes.
+            if raw_message.get("type") == "websocket.disconnect":
+                logger.info("[%s] WebSocket disconnect received", connection_id)
+                break
 
-            # Buffer for sentence-based TTS
-            text_buffer = ""
-            pending_chunks: list[str] = []
-            text_released = False
-            tts_enabled = True
-
-            async for event in run_generator(
-                orchestrator.handle_user_input(
-                    session_id,
-                    user_text,
-                    think_override=reasoning_override,
-                    attachments=attachments,
-                )
-            ):
-                # --- STATE EVENTS ---
-                if isinstance(event, AssistantStateEvent):
-                    if not _should_forward_state(event.state):
-                        logger.debug(
-                            "[%s] Holding assistant state at thinking until audio is ready",
-                            connection_id,
-                        )
+            try:
+                # ── VOICE PATH ────────────────────────────────────────────
+                # Check `is not None` rather than truthiness — an empty bytes
+                # value (b"") is falsy, which would wrongly fall through to
+                # the text branch and crash on raw_message["text"].
+                if raw_message.get("bytes") is not None:
+                    stt = getattr(app.state, "stt", None)
+                    if stt is None:
+                        await _send_turn_error(ws, "STT is not available.")
                         continue
 
-                    logger.debug(
-                        "[%s] Assistant state -> %s",
+                    audio_bytes = raw_message["bytes"]
+
+                    logger.info(
+                        "[%s] Received audio frame (%d bytes)",
                         connection_id,
-                        event.state,
+                        len(audio_bytes),
                     )
-                    await _send_ws_payload(ws, {
-                        "type": "assistant_state",
-                        "state": event.state,
-                    })
-                    continue
 
-                if isinstance(event, AvatarExpressionEvent):
-                    logger.debug(
-                        "[%s] Avatar expression -> %s",
+                    loop = asyncio.get_running_loop()
+                    try:
+                        result = await loop.run_in_executor(
+                            None, stt.transcribe, audio_bytes
+                        )
+                    except Exception:
+                        logger.exception("[%s] STT transcription failed", connection_id)
+                        await _send_turn_error(ws, "Transcription failed.")
+                        continue
+
+                    if not result.text.strip():
+                        logger.debug("[%s] STT returned empty transcript (silence)", connection_id)
+                        await _send_ws_payload(ws, {"type": "stt_silence"})
+                        continue
+
+                    logger.info(
+                        "[%s] STT transcript: %r (lang=%s)",
                         connection_id,
-                        event.expression,
+                        result.text,
+                        result.language,
                     )
+
+                    # Echo transcript to the UI so it can render the user bubble
+                    # before the assistant starts responding.
                     await _send_ws_payload(ws, {
-                        "type": "assistant_expression",
-                        "expression": event.expression,
+                        "type": "stt_transcript",
+                        "text": result.text,
+                        "language": result.language,
                     })
-                    continue
 
-                # --- SPEECH EVENTS ---
-                if isinstance(event, AssistantSpeechEvent):
-                    if not event.is_final:
-                        text_buffer += event.text
+                    user_text = result.text
+                    reasoning_override = None
+                    attachments = []
+                    input_modality = InputModality.VOICE
 
-                        if text_released:
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_chunk",
-                                "content": event.text,
-                            })
-                        else:
-                            pending_chunks.append(event.text)
+                # ── TEXT PATH ─────────────────────────────────────────────
+                else:
+                    user_text, reasoning_override, attachments = parse_user_message(
+                        raw_message["text"]
+                    )
+                    input_modality = InputModality.TEXT
 
-                        sentences, text_buffer = split_sentences(text_buffer)
+                # ── SHARED PATH (both modalities reach here) ──────────────
+                logger.info(
+                    "[%s] Received user input (len=%d, images=%d, reasoning_override=%r, modality=%s)",
+                    connection_id,
+                    len(user_text),
+                    len(attachments),
+                    reasoning_override,
+                    input_modality.value,
+                )
+                logger.debug("[%s] User input text: %r", connection_id, user_text)
 
-                        if not tts_enabled:
+                # Buffer for sentence-based TTS
+                text_buffer = ""
+                thinking_filter = ThinkingBlockFilter()
+                pending_chunks: list[str] = []
+                text_released = False
+                tts_enabled = True
+                image_notice_sent = False
+
+                async for event in run_generator(
+                    orchestrator.handle_user_input(
+                        session_id,
+                        user_text,
+                        think_override=reasoning_override,
+                        attachments=attachments,
+                        input_modality=input_modality,
+                    )
+                ):
+                    if not image_notice_sent:
+                        notice_payload = _build_attachment_drop_notice_payload(
+                            orchestrator=orchestrator,
+                            original_attachment_count=len(attachments),
+                        )
+                        if notice_payload is not None:
+                            await _send_ws_payload(ws, notice_payload)
+                            image_notice_sent = True
+
+                    # --- STATE EVENTS ---
+                    if isinstance(event, AssistantStateEvent):
+                        if not _should_forward_state(event.state):
+                            logger.debug(
+                                "[%s] Holding assistant state at thinking until audio is ready",
+                                connection_id,
+                            )
                             continue
 
-                        for sentence in sentences:
-                            tts_text = _prepare_tts_text(sentence)
-                            if not tts_text:
+                        logger.debug(
+                            "[%s] Assistant state -> %s",
+                            connection_id,
+                            event.state,
+                        )
+                        await _send_ws_payload(ws, {
+                            "type": "assistant_state",
+                            "state": event.state,
+                        })
+                        continue
+
+                    if isinstance(event, AvatarExpressionEvent):
+                        logger.debug(
+                            "[%s] Avatar expression -> %s",
+                            connection_id,
+                            event.expression,
+                        )
+                        await _send_ws_payload(ws, {
+                            "type": "assistant_expression",
+                            "expression": event.expression,
+                        })
+                        continue
+
+                    if isinstance(event, AvatarAnimationEvent):
+                        logger.debug(
+                            "[%s] Avatar animation -> %s",
+                            connection_id,
+                            event.animation,
+                        )
+                        await _send_ws_payload(ws, {
+                            "type": "assistant_animation",
+                            "animation": event.animation,
+                        })
+                        continue
+
+                    # --- SPEECH EVENTS ---
+                    if isinstance(event, AssistantThinkingEvent):
+                        if event.text:
+                            await _send_ws_payload(ws, {
+                                "type": "assistant_thinking_chunk",
+                                "content": event.text,
+                            })
+                        continue
+
+                    if isinstance(event, AssistantSpeechEvent):
+                        if not event.is_final:
+                            tts_chunk = thinking_filter.push(event.text)
+                            text_buffer += tts_chunk
+
+                            if text_released:
+                                await _send_ws_payload(ws, {
+                                    "type": "assistant_chunk",
+                                    "content": event.text,
+                                })
+                            else:
+                                pending_chunks.append(event.text)
+
+                            sentences, text_buffer = split_sentences(text_buffer)
+
+                            if not tts_enabled:
                                 continue
 
-                            audio_id = uuid.uuid4().hex
-                            audio_path = AUDIO_DIR / f"{audio_id}.wav"
+                            for sentence in sentences:
+                                tts_text = _prepare_tts_text(sentence)
+                                if not tts_text:
+                                    continue
 
-                            logger.debug(
-                                "[%s] TTS synth sentence (%d chars)",
-                                connection_id,
-                                len(tts_text),
-                            )
-
-                            try:
-                                await synthesize_async(
-                                    text=tts_text,
-                                    output_path=audio_path,
-                                    session_id=connection_id,
-                                )
-                            except Exception:
-                                tts_enabled = False
-                                logger.warning(
-                                    "[%s] TTS failed mid-turn; falling back to text-only streaming",
-                                    connection_id,
-                                )
-                                if not text_released:
-                                    await _flush_pending_chunks(ws, pending_chunks)
-                                    text_released = True
-                                break
-
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_audio",
-                                "url": f"/static/audio/{audio_id}.wav",
-                            })
-
-                            if not text_released:
-                                await _flush_pending_chunks(ws, pending_chunks)
-                                text_released = True
-
-                    else:
-                        if tts_enabled:
-                            tts_text = _prepare_tts_text(text_buffer)
-                            if tts_text:
                                 audio_id = uuid.uuid4().hex
                                 audio_path = AUDIO_DIR / f"{audio_id}.wav"
 
                                 logger.debug(
-                                    "[%s] TTS final fragment (%d chars)",
+                                    "[%s] TTS synth sentence (%d chars)",
                                     connection_id,
                                     len(tts_text),
                                 )
@@ -485,28 +701,83 @@ async def websocket_endpoint(ws: WebSocket):
                                 except Exception:
                                     tts_enabled = False
                                     logger.warning(
-                                        "[%s] TTS failed for final fragment; sending text without audio",
+                                        "[%s] TTS failed mid-turn; falling back to text-only streaming",
                                         connection_id,
                                     )
-                                else:
-                                    await _send_ws_payload(ws, {
-                                        "type": "assistant_audio",
-                                        "url": f"/static/audio/{audio_id}.wav",
-                                    })
+                                    if not text_released:
+                                        await _flush_pending_chunks(ws, pending_chunks)
+                                        text_released = True
+                                    break
 
-                        if not text_released:
-                            await _flush_pending_chunks(ws, pending_chunks)
-                            text_released = True
+                                await _send_ws_payload(ws, {
+                                    "type": "assistant_audio",
+                                    "url": f"/static/audio/{audio_id}.wav",
+                                })
 
-                        await _send_ws_payload(ws, {
-                            "type": "assistant_end",
-                            "content": event.text,
-                        })
+                                if not text_released:
+                                    await _flush_pending_chunks(ws, pending_chunks)
+                                    text_released = True
 
-                        logger.info(
-                            "[%s] Assistant turn completed",
-                            connection_id,
-                        )
+                        else:
+                            text_buffer += thinking_filter.flush()
+                            if tts_enabled:
+                                tts_text = _prepare_tts_text(text_buffer)
+                                if tts_text:
+                                    audio_id = uuid.uuid4().hex
+                                    audio_path = AUDIO_DIR / f"{audio_id}.wav"
+
+                                    logger.debug(
+                                        "[%s] TTS final fragment (%d chars)",
+                                        connection_id,
+                                        len(tts_text),
+                                    )
+
+                                    try:
+                                        await synthesize_async(
+                                            text=tts_text,
+                                            output_path=audio_path,
+                                            session_id=connection_id,
+                                        )
+                                    except Exception:
+                                        tts_enabled = False
+                                        logger.warning(
+                                            "[%s] TTS failed for final fragment; sending text without audio",
+                                            connection_id,
+                                        )
+                                    else:
+                                        await _send_ws_payload(ws, {
+                                            "type": "assistant_audio",
+                                            "url": f"/static/audio/{audio_id}.wav",
+                                        })
+
+                            if not text_released:
+                                await _flush_pending_chunks(ws, pending_chunks)
+                                text_released = True
+
+                            await _send_ws_payload(ws, {
+                                "type": "assistant_end",
+                                "content": event.text,
+                            })
+
+                            logger.info(
+                                "[%s] Assistant turn completed",
+                                connection_id,
+                            )
+
+            except WebSocketDisconnect:
+                raise
+            except ValueError as exc:
+                logger.warning("[%s] Rejected user message: %s", connection_id, exc)
+                await _send_turn_error(
+                    ws,
+                    f"Couldn't process that message: {exc}",
+                )
+            except Exception:
+                logger.exception("[%s] Turn failed; keeping websocket alive", connection_id)
+                await _send_turn_error(
+                    ws,
+                    "Sorry, something went wrong while processing that message. Please try again.",
+                )
 
     except WebSocketDisconnect:
         logger.info(
@@ -520,7 +791,6 @@ async def websocket_endpoint(ws: WebSocket):
 
     finally:
         logger.debug("[%s] WebSocket cleanup complete", connection_id)
-
 
 @app.get("/")
 async def get_index():

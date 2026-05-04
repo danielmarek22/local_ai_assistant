@@ -24,7 +24,7 @@ body {
     position: absolute;
     top: 20px;
     left: 20px;
-    width: 350px;
+    width: 450px;
     height: calc(100vh - 40px);
     min-width: 280px;
     min-height: 260px;
@@ -122,6 +122,7 @@ body {
 /* Status Colors */
 .status-idle .status-dot { background-color: #00ff99; box-shadow: 0 0 10px #00ff99; }
 .status-thinking .status-dot { background-color: #ffcc00; animation: pulse 1s infinite; }
+.status-dreaming .status-dot { background-color: #7fd6ff; animation: pulse 1.2s infinite; box-shadow: 0 0 12px rgba(127, 214, 255, 0.9); }
 .status-searching .status-dot { background-color: #00ccff; animation: pulse 1s infinite; }
 .status-responding .status-dot { background-color: #00ff99; }
 
@@ -256,6 +257,11 @@ body {
     gap: 12px;
 }
 
+.config-control-actions {
+    align-items: center;
+    justify-content: space-between;
+}
+
 .config-control-input input[type="range"] {
     flex: 1;
     accent-color: #00c3ff;
@@ -267,6 +273,86 @@ body {
     font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: #dfe7ee;
+}
+
+.config-action-btn {
+    min-height: 34px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: #eef5fb;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.config-action-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.config-action-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
+}
+
+.config-hotkey-btn {
+    min-height: 34px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: #eef5fb;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.config-hotkey-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.config-hotkey-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
+}
+
+.config-hotkey-btn.capturing {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.5);
+    color: #8fffd0;
+    animation: pulse 1s infinite;
+}
+
+.config-hotkey-display {
+    min-width: 48px;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: #00ff99;
+    font-family: 'Courier New', monospace;
+}
+
+.config-inline-status {
+    flex: 1;
+    text-align: left;
+    min-width: 0;
+    margin-left: 8px;
+    font-size: 12px;
+    line-height: 1.3;
+    color: #d7dee5;
+}
+
+.config-inline-status.success {
+    color: #8fffd0;
+}
+
+.config-inline-status.error {
+    color: #ffb8b8;
 }
 
 .history-panel,
@@ -423,6 +509,27 @@ body {
     white-space: pre-wrap;
 }
 
+.message-notice {
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.message-notice.warning {
+    background: rgba(255, 180, 66, 0.22);
+    border: 1px solid rgba(255, 180, 66, 0.46);
+    color: #3b2400;
+}
+
+.message-notice.info {
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #102234;
+}
+
 .message-attachments {
     margin-top: 10px;
     display: grid;
@@ -469,6 +576,10 @@ body {
     box-shadow: 0 2px 5px rgba(0,195,255,0.2);
 }
 
+.message.user.from-stt .message-body {
+    font-style: italic;
+}
+
 .message.astra {
     align-self: flex-start;
     background: rgba(255, 255, 255, 0.1);
@@ -477,26 +588,53 @@ body {
     border-bottom-left-radius: 2px;
 }
 
+.message.thinking {
+    align-self: flex-start;
+    max-width: 92%;
+    background: rgba(0, 255, 4, 0.08);
+    color: #0a6815e6;
+    border: 1px dashed rgba(60, 255, 0, 0.28);
+    border-bottom-left-radius: 2px;
+    font-size: 13px;
+}
+
+.message.thinking::before {
+    content: 'Thinking';
+    display: block;
+    margin-bottom: 8px;
+    color: #6be87ae6;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
 /* Markdown content in assistant bubbles */
-.message.astra p {
+.message.astra p,
+.message.thinking p {
     margin: 0 0 0.6em;
 }
 
-.message.astra p:last-child {
+.message.astra p:last-child,
+.message.thinking p:last-child {
     margin-bottom: 0;
 }
 
 .message.astra ul,
-.message.astra ol {
+.message.astra ol,
+.message.thinking ul,
+.message.thinking ol {
     margin: 0.3em 0 0.6em 1.2em;
     padding: 0;
 }
 
-.message.astra li + li {
+.message.astra li + li,
+.message.thinking li + li {
     margin-top: 0.2em;
 }
 
-.message.astra code {
+.message.astra code,
+.message.thinking code {
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     font-size: 0.9em;
     background: rgba(0, 0, 0, 0.35);
@@ -505,7 +643,8 @@ body {
     padding: 0.1em 0.35em;
 }
 
-.message.astra pre {
+.message.astra pre,
+.message.thinking pre {
     margin: 0.5em 0;
     padding: 0.75em;
     overflow-x: auto;
@@ -514,18 +653,21 @@ body {
     border-radius: 8px;
 }
 
-.message.astra pre code {
+.message.astra pre code,
+.message.thinking pre code {
     background: transparent;
     border: none;
     padding: 0;
     font-size: 0.88em;
 }
 
-.message.astra a {
+.message.astra a,
+.message.thinking a {
     color: #6fd6ff;
 }
 
-.message.astra blockquote {
+.message.astra blockquote,
+.message.thinking blockquote {
     margin: 0.5em 0;
     padding-left: 0.8em;
     border-left: 3px solid rgba(255, 255, 255, 0.25);
@@ -731,3 +873,42 @@ body {
     transition: transform 0.1s;
 }
 #send-btn:active { transform: scale(0.95); }
+
+.mic-btn {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #dfe7ee;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+    flex-shrink: 0;
+}
+
+.mic-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.mic-btn:active {
+    transform: scale(0.95);
+}
+
+.mic-btn.recording {
+    background: rgba(255, 80, 80, 0.2);
+    border-color: rgba(255, 80, 80, 0.5);
+    color: #ff7777;
+    box-shadow: 0 0 12px rgba(255, 80, 80, 0.4);
+    animation: pulse-recording 1.2s infinite;
+}
+
+@keyframes pulse-recording {
+    0%, 100% { box-shadow: 0 0 12px rgba(255, 80, 80, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(255, 80, 80, 0.6); }
+}

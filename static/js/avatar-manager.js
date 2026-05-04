@@ -21,6 +21,17 @@ export class AvatarManager {
         this.animations = {}; 
         this.currentAction = null;
         this.stateAnimations = {}; 
+        this.gestureCatalog = {};
+        this.gestureAnimations = {};
+        this.gestureQueue = [];
+        this.isGesturePlaying = false;
+        this.activeGestureName = null;
+        this.dreamingPhase = null; // intro | holding | outro
+        this.pendingDreamingOutroStart = false;
+        this.dreamingOutroPromise = null;
+        this.dreamingOutroResolver = null;
+        this.dreamingOutroTimeoutId = null;
+        this.forceEyesClosed = false;
         
         // Blink State Management
         this.blinkState = 'open'; 
@@ -99,6 +110,10 @@ export class AvatarManager {
 
                 // Listen for animation loops to trigger variety
                 this.mixer.addEventListener('loop', (e) => {
+                    if (this.currentState === 'dreaming' || this.isGesturePlaying) {
+                        return;
+                    }
+
                     // Default 30% chance to switch for idle, thinking, etc.
                     let switchChance = 0.3; 
                     
@@ -109,6 +124,57 @@ export class AvatarManager {
 
                     if (Math.random() < switchChance) {
                         this.playRandomVariant(this.currentState);
+                    }
+                });
+
+                this.mixer.addEventListener('finished', (event) => {
+                    if (this.isGesturePlaying && this.activeGestureName) {
+                        const gestureKey = this.gestureAnimations[this.activeGestureName];
+                        const gestureAction = gestureKey ? this.animations[gestureKey] : null;
+                        if (gestureAction && event.action === gestureAction) {
+                            this.isGesturePlaying = false;
+                            this.activeGestureName = null;
+
+                            this.processGestureQueue();
+                            if (!this.isGesturePlaying) {
+                                this.playRandomVariant(this.currentState);
+                            }
+                            return;
+                        }
+                    }
+
+                    if (this.currentState !== 'dreaming') {
+                        return;
+                    }
+
+                    const introKey = this.stateAnimations.dreaming?.[0];
+                    const outroKey = this.stateAnimations.dreaming?.[1];
+                    const introAction = introKey ? this.animations[introKey] : null;
+                    const outroAction = outroKey ? this.animations[outroKey] : null;
+
+                    if (this.dreamingPhase === 'intro' && introAction && event.action === introAction) {
+                        this.dreamingPhase = 'holding';
+                        this.forceEyesClosed = true;
+                        if (this.pendingDreamingOutroStart) {
+                            this.pendingDreamingOutroStart = false;
+                            this.startDreamingOutroPlayback();
+                        }
+                        return;
+                    }
+
+                    if (this.dreamingPhase === 'outro' && outroAction && event.action === outroAction) {
+                        this.dreamingPhase = null;
+                        this.forceEyesClosed = false;
+                        if (this.dreamingOutroTimeoutId) {
+                            clearTimeout(this.dreamingOutroTimeoutId);
+                            this.dreamingOutroTimeoutId = null;
+                        }
+                        const resolve = this.dreamingOutroResolver;
+                        this.dreamingOutroResolver = null;
+                        this.dreamingOutroPromise = null;
+                        if (resolve) {
+                            resolve(true);
+                        }
                     }
                 });
 
@@ -125,6 +191,7 @@ export class AvatarManager {
                         this.loadAnimation(path, animKey, playImmediately);
                     });
                 });
+                this.loadGestureAnimations();
             },
             (progress) => {},
             (error) => console.error("Error loading VRM:", error)
@@ -132,12 +199,15 @@ export class AvatarManager {
     }
 
     // --- Mixamo FBX Loader Method ---
-    loadAnimation(url, name, playImmediately = false) {
+    loadAnimation(url, name, playImmediately = false, onLoaded = null) {
         loadMixamoAnimation(url, this.currentVrm)
             .then((clip) => {
                 if (clip) {
                     const action = this.mixer.clipAction(clip);
                     this.animations[name] = action;
+                    if (onLoaded) {
+                        onLoaded(action);
+                    }
 
                     if (playImmediately) {
                         this.fadeToAction(name, 0.0); 
@@ -145,6 +215,80 @@ export class AvatarManager {
                 }
             })
             .catch((error) => console.error(`Failed to load Mixamo animation "${name}":`, error));
+    }
+
+    setGestureCatalog(gestureCatalog = {}) {
+        this.gestureCatalog = {};
+        this.gestureAnimations = {};
+        this.gestureQueue = [];
+        this.isGesturePlaying = false;
+        this.activeGestureName = null;
+
+        for (const [name, url] of Object.entries(gestureCatalog)) {
+            if (!url) continue;
+            const normalizedName = String(name).trim().toLowerCase();
+            if (!normalizedName) continue;
+            this.gestureCatalog[normalizedName] = url;
+        }
+
+        this.loadGestureAnimations();
+    }
+
+    loadGestureAnimations() {
+        if (!this.currentVrm || !this.mixer) {
+            return;
+        }
+
+        for (const [gestureName, url] of Object.entries(this.gestureCatalog)) {
+            if (this.gestureAnimations[gestureName]) {
+                continue;
+            }
+
+            const animationKey = `gesture_${gestureName}`;
+            this.gestureAnimations[gestureName] = animationKey;
+            this.loadAnimation(url, animationKey, false, () => {
+                this.processGestureQueue();
+            });
+        }
+    }
+
+    queueGesture(animationName) {
+        const normalized = String(animationName || '').trim().toLowerCase();
+        if (!normalized) {
+            return;
+        }
+
+        if (!this.gestureCatalog[normalized]) {
+            console.debug(`Ignoring unknown gesture animation "${normalized}"`);
+            return;
+        }
+
+        this.gestureQueue.push(normalized);
+        this.processGestureQueue();
+    }
+
+    processGestureQueue() {
+        if (this.isGesturePlaying) {
+            return;
+        }
+
+        const nextGestureName = this.gestureQueue[0];
+        if (!nextGestureName) {
+            return;
+        }
+
+        const animationKey = this.gestureAnimations[nextGestureName];
+        const action = animationKey ? this.animations[animationKey] : null;
+        if (!action) {
+            return;
+        }
+
+        this.gestureQueue.shift();
+        this.isGesturePlaying = true;
+        this.activeGestureName = nextGestureName;
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        this.fadeToAction(animationKey, 0.35);
     }
 
     fadeToAction(name, duration = 0.5) {
@@ -170,8 +314,39 @@ export class AvatarManager {
     }
 
     // --- Random Variant Selector ---
+    getPlayableAnimationKeys(state) {
+        const keys = this.stateAnimations[state] || [];
+        return keys.filter((key) => Boolean(this.animations[key]));
+    }
+
+    resolveAnimationState(state) {
+        const hasStateAnimations = this.getPlayableAnimationKeys(state).length > 0;
+        if (hasStateAnimations) {
+            return state;
+        }
+
+        if (state === 'dreaming') {
+            const hasThinkingAnimations = this.getPlayableAnimationKeys('thinking').length > 0;
+            if (hasThinkingAnimations) {
+                return 'thinking';
+            }
+        }
+
+        const hasIdleAnimations = this.getPlayableAnimationKeys('idle').length > 0;
+        if (hasIdleAnimations) {
+            return 'idle';
+        }
+
+        return state;
+    }
+
     playRandomVariant(state) {
-        const availableAnimations = this.stateAnimations[state];
+        if (this.isGesturePlaying) {
+            return;
+        }
+
+        const resolvedState = this.resolveAnimationState(state);
+        const availableAnimations = this.getPlayableAnimationKeys(resolvedState);
         
         if (availableAnimations && availableAnimations.length > 0) {
             let selectedAnimKey;
@@ -183,14 +358,137 @@ export class AvatarManager {
             } else {
                 selectedAnimKey = availableAnimations[0];
             }
+            const action = this.animations[selectedAnimKey];
+            if (action) {
+                action.setLoop(THREE.LoopRepeat, Infinity);
+                action.clampWhenFinished = false;
+            }
             this.fadeToAction(selectedAnimKey, 0.8);
         }
     }
 
     setState(state) {
         if (this.currentState === state) return;
+        const previousState = this.currentState;
         this.currentState = state;
+
+        if (state === 'dreaming') {
+            this.startDreamingIntro();
+            return;
+        }
+
+        if (previousState === 'dreaming') {
+            this.dreamingPhase = null;
+            this.pendingDreamingOutroStart = false;
+            this.forceEyesClosed = false;
+            if (this.dreamingOutroTimeoutId) {
+                clearTimeout(this.dreamingOutroTimeoutId);
+                this.dreamingOutroTimeoutId = null;
+            }
+            if (this.dreamingOutroResolver) {
+                this.dreamingOutroResolver(false);
+                this.dreamingOutroResolver = null;
+            }
+            this.dreamingOutroPromise = null;
+        }
+
+        if (this.isGesturePlaying) {
+            return;
+        }
+
         this.playRandomVariant(state);
+    }
+
+    startDreamingIntro() {
+        this.dreamingPhase = 'intro';
+        this.pendingDreamingOutroStart = false;
+        this.forceEyesClosed = false;
+        if (this.dreamingOutroTimeoutId) {
+            clearTimeout(this.dreamingOutroTimeoutId);
+            this.dreamingOutroTimeoutId = null;
+        }
+        this.dreamingOutroPromise = null;
+        this.dreamingOutroResolver = null;
+
+        const introKey = this.stateAnimations.dreaming?.[0];
+        if (!introKey || !this.playAnimationOnce(introKey, 0.5)) {
+            this.dreamingPhase = 'holding';
+            return;
+        }
+    }
+
+    playDreamingOutro() {
+        if (this.currentState !== 'dreaming') {
+            return Promise.resolve(false);
+        }
+
+        if (this.dreamingOutroPromise) {
+            return this.dreamingOutroPromise;
+        }
+
+        this.dreamingOutroPromise = new Promise((resolve) => {
+            this.dreamingOutroResolver = resolve;
+        });
+
+        if (this.dreamingPhase === 'intro') {
+            this.pendingDreamingOutroStart = true;
+            return this.dreamingOutroPromise;
+        }
+
+        this.startDreamingOutroPlayback();
+        return this.dreamingOutroPromise;
+    }
+
+    startDreamingOutroPlayback() {
+        if (this.currentState !== 'dreaming') {
+            return false;
+        }
+
+        this.pendingDreamingOutroStart = false;
+        this.forceEyesClosed = false;
+        this.dreamingPhase = 'outro';
+
+        const outroKey = this.stateAnimations.dreaming?.[1];
+        if (!outroKey || !this.playAnimationOnce(outroKey, 0.35)) {
+            this.dreamingPhase = null;
+            const resolve = this.dreamingOutroResolver;
+            this.dreamingOutroResolver = null;
+            this.dreamingOutroPromise = null;
+            if (resolve) {
+                resolve(false);
+            }
+            return false;
+        }
+
+        const outroAction = this.animations[outroKey];
+        const outroDurationSeconds = Number(outroAction?.getClip?.().duration) || 0;
+        const timeoutMs = Math.max(3000, Math.ceil((outroDurationSeconds * 1000) + 1200));
+
+        // Safety net: never let UI remain stuck waiting for a missing finished event.
+        this.dreamingOutroTimeoutId = setTimeout(() => {
+            this.dreamingOutroTimeoutId = null;
+            this.dreamingPhase = null;
+            this.forceEyesClosed = false;
+            const pendingResolve = this.dreamingOutroResolver;
+            this.dreamingOutroResolver = null;
+            this.dreamingOutroPromise = null;
+            if (pendingResolve) {
+                pendingResolve(false);
+            }
+        }, timeoutMs);
+        return true;
+    }
+
+    playAnimationOnce(animationKey, duration = 0.5) {
+        const action = this.animations[animationKey];
+        if (!action) {
+            return false;
+        }
+
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        this.fadeToAction(animationKey, duration);
+        return true;
     }
 
     setExpression(expression) {
@@ -233,7 +531,9 @@ export class AvatarManager {
             }
 
             // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
-            if (this.currentAction && this.currentState === 'thinking') {
+            // Never pause one-shot gesture clips; they must reach `finished`
+            // so we can resume queued/default state animations.
+            if (this.currentAction && this.currentState === 'thinking' && !this.isGesturePlaying) {
                 const duration = this.currentAction.getClip().duration;
                 
                 // Freeze at the 50% mark. Tweak this 0.5 value if her hand hasn't 
@@ -301,6 +601,15 @@ export class AvatarManager {
     }
 
     updateBlinking(deltaTime) {
+        if (!this.currentVrm?.expressionManager) {
+            return;
+        }
+
+        if (this.forceEyesClosed) {
+            this.currentVrm.expressionManager.setValue('blink', 1.0);
+            return;
+        }
+
         const blinkSpeed = 15.0; 
         let currentBlink = this.currentVrm.expressionManager.getValue('blink');
 

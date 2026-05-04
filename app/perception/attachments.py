@@ -57,6 +57,10 @@ class ImageAttachment(Attachment):
             raise ValueError("Image attachment is missing base64 data")
 
         normalized_data = cls._normalize_base64(raw_data)
+        normalized_bytes = cls._decode_and_repair_image_bytes(
+            normalized_data,
+            mime_type,
+        )
 
         size_bytes = payload.get("size_bytes")
         if size_bytes is None:
@@ -67,9 +71,9 @@ class ImageAttachment(Attachment):
         return cls(
             name=name.strip(),
             mime_type=mime_type,
-            base64_data=normalized_data,
+            base64_data=base64.b64encode(normalized_bytes).decode("ascii"),
             size_bytes=size_bytes,
-            sha256=hashlib.sha256(base64.b64decode(normalized_data)).hexdigest(),
+            sha256=hashlib.sha256(normalized_bytes).hexdigest(),
         )
 
     @classmethod
@@ -104,10 +108,12 @@ class ImageAttachment(Attachment):
 
     def as_bytes(self) -> bytes:
         if self.base64_data:
-            return base64.b64decode(self.base64_data)
+            decoded = base64.b64decode(self.base64_data)
+            return self._repair_image_bytes(decoded, self.mime_type)
 
         if self.storage_path:
-            return Path(self.storage_path).read_bytes()
+            decoded = Path(self.storage_path).read_bytes()
+            return self._repair_image_bytes(decoded, self.mime_type)
 
         raise ValueError("Image attachment does not contain data or storage path")
 
@@ -116,6 +122,31 @@ class ImageAttachment(Attachment):
             return self.base64_data
 
         return base64.b64encode(self.as_bytes()).decode("ascii")
+
+    @classmethod
+    def _decode_and_repair_image_bytes(cls, base64_value: str, mime_type: str) -> bytes:
+        decoded = base64.b64decode(base64_value)
+        return cls._repair_image_bytes(decoded, mime_type)
+
+    @staticmethod
+    def _repair_image_bytes(payload: bytes, mime_type: str) -> bytes:
+        # Some clipboard providers prepend a few bytes before the real image
+        # signature. Strip this prefix when we can confidently detect it.
+        signature_map = {
+            "image/png": b"\x89PNG\r\n\x1a\n",
+            "image/jpeg": b"\xff\xd8\xff",
+            "image/gif": b"GIF8",
+        }
+        signature = signature_map.get(mime_type)
+        if signature is None or payload.startswith(signature):
+            return payload
+
+        max_prefix_scan = 32
+        offset = payload.find(signature, 1, max_prefix_scan + len(signature))
+        if offset <= 0:
+            return payload
+
+        return payload[offset:]
 
 
 def attachment_from_payload(payload: dict[str, Any]) -> Attachment:

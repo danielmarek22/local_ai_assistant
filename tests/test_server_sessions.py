@@ -1,4 +1,5 @@
 import importlib
+import base64
 import json
 import shutil
 import sys
@@ -62,9 +63,38 @@ server_module = _load_server_module()
 
 
 class FakeOrchestrator:
-    def __init__(self, history_store, summary_store):
+    def __init__(self, history_store, summary_store, gesture_catalog=None):
         self.history = history_store
         self.summary_store = summary_store
+        self.gesture_catalog = gesture_catalog or {}
+
+
+class FakeMemoryReflector:
+    def __init__(self):
+        self.calls = []
+        self.next_result = {
+            "success": True,
+            "days_old": 0,
+            "stale_count": 3,
+            "deleted_count": 1,
+            "kept_count": 2,
+            "created_count": 1,
+            "delete_ids": ["mem-1"],
+            "keep_ids": ["mem-2", "mem-3"],
+            "new_memories": [
+                {
+                    "content": "Consolidated preference",
+                    "category": "preference",
+                    "importance": 3,
+                }
+            ],
+            "error": None,
+        }
+
+    def reflect_and_prune(self, days_old):
+        self.calls.append(days_old)
+        return self.next_result
+
 
 class FakeCollection:
     def __init__(self):
@@ -114,9 +144,12 @@ class ServerSessionTests(unittest.TestCase):
         self.fake_orchestrator = FakeOrchestrator(
             history_store=self.history,
             summary_store=self.summary_store,
+            gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
         )
+        self.fake_reflector = FakeMemoryReflector()
         server_module.app.state.orchestrator = self.fake_orchestrator
         server_module.app.state.server_instance_id = "server-1"
+        server_module.app.state.memory_reflector = self.fake_reflector
 
     def test_list_sessions_returns_saved_sessions(self):
         response = server_module.asyncio.run(server_module.list_sessions())
@@ -193,6 +226,19 @@ class ServerSessionTests(unittest.TestCase):
         )
         self.assertFalse(attachment_dir.exists())
 
+    def test_run_memory_reflection_returns_reflector_summary(self):
+        payload = server_module.asyncio.run(
+            server_module.run_memory_reflection(
+                server_module.ReflectRequest(days_old=0)
+            )
+        )
+
+        self.assertEqual(self.fake_reflector.calls, [0])
+        self.assertEqual(payload["days_old"], 0)
+        self.assertEqual(payload["stale_count"], 3)
+        self.assertEqual(payload["deleted_count"], 1)
+        self.assertEqual(payload["created_count"], 1)
+
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):
         session_id = server_module.resolve_session_id(
             session_mode="resume",
@@ -244,6 +290,22 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0].mime_type, "image/png")
         self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
 
+    def test_parse_user_message_repairs_prefixed_png_clipboard_payload(self):
+        broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        broken_png_b64 = base64.b64encode(broken_png).decode("ascii")
+
+        text, reasoning, attachments = server_module.parse_user_message(
+            '{"type":"user_message","text":"look","attachments":[{"name":"image.png","mime_type":"image/png","data":"'
+            + broken_png_b64
+            + '"}]}'
+        )
+
+        self.assertEqual(text, "look")
+        self.assertIsNone(reasoning)
+        self.assertEqual(len(attachments), 1)
+        decoded = base64.b64decode(attachments[0].base64_data)
+        self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_parse_user_message_rejects_empty_payload_without_text_or_images(self):
         with self.assertRaises(ValueError):
             server_module.parse_user_message(
@@ -261,6 +323,61 @@ class ServerSessionTests(unittest.TestCase):
         self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
         self.assertTrue(server_module._should_forward_state(server_module.AssistantState.THINKING))
 
+    def test_build_session_init_payload_includes_gesture_catalog(self):
+        payload = server_module._build_session_init_payload(
+            server_instance_id="server-1",
+            session_id="session-a",
+            gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "type": "session_init",
+                "server_instance_id": "server-1",
+                "session_id": "session-a",
+                "gesture_catalog": {"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            },
+        )
+
+    def test_build_attachment_drop_notice_payload_returns_none_when_no_drop(self):
+        orchestrator = types.SimpleNamespace(
+            llm=types.SimpleNamespace(
+                last_stream_dropped_current_images=False,
+                last_stream_dropped_current_images_count=0,
+            )
+        )
+
+        payload = server_module._build_attachment_drop_notice_payload(
+            orchestrator=orchestrator,
+            original_attachment_count=1,
+        )
+
+        self.assertIsNone(payload)
+
+    def test_build_attachment_drop_notice_payload_describes_dropped_images(self):
+        orchestrator = types.SimpleNamespace(
+            llm=types.SimpleNamespace(
+                last_stream_dropped_current_images=True,
+                last_stream_dropped_current_images_count=2,
+            )
+        )
+
+        payload = server_module._build_attachment_drop_notice_payload(
+            orchestrator=orchestrator,
+            original_attachment_count=2,
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "type": "user_notice",
+                "scope": "last_user_message",
+                "tone": "warning",
+                "message": "Attached images were not sent to the model for this message.",
+            },
+        )
+
     def test_flush_pending_chunks_sends_buffered_text_in_order(self):
         ws = FakeWebSocket()
         pending_chunks = ["Hello", " world"]
@@ -275,6 +392,73 @@ class ServerSessionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(pending_chunks, [])
+
+    def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
+        text = (
+            "# Title\n"
+            "- First item\n"
+            "1. Second item\n"
+            "> Quoted line\n"
+            "---\n"
+            "After."
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(
+            prepared,
+            "Title First item Second item Quoted line After.",
+        )
+
+    def test_prepare_tts_text_keeps_labels_and_drops_markdown_urls(self):
+        text = (
+            "Read [docs](https://example.com/docs) and "
+            "![logo](https://example.com/logo.png). "
+            "Reference [guide][guide-ref]. "
+            "<https://example.com/raw>\n"
+            "[guide-ref]: https://example.com/guide"
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(prepared, "Read docs and logo. Reference guide.")
+
+    def test_prepare_tts_text_drops_fenced_code_and_unwraps_inline_styles(self):
+        text = (
+            "Use **bold**, _italic_, `inline code`, and ~~strikethrough~~.\n"
+            "```python\n"
+            "print('hidden')\n"
+            "```\n"
+            "Escaped \\*literal\\* marker."
+        )
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(
+            prepared,
+            "Use bold, italic, inline code, and strikethrough. Escaped *literal* marker.",
+        )
+
+    def test_prepare_tts_text_drops_complete_thinking_blocks(self):
+        text = "Before <think>\nsecret plan\n</think>\n\nAfter."
+
+        prepared = server_module._prepare_tts_text(text)
+
+        self.assertEqual(prepared, "Before After.")
+
+    def test_thinking_block_filter_strips_streamed_reasoning_across_chunk_boundaries(self):
+        filter_ = server_module.ThinkingBlockFilter()
+        chunks = [
+            "Hello ",
+            "<thi",
+            "nk>\nReasoning sentence. Another one.",
+            "\n</th",
+            "ink>\n\nworld.",
+        ]
+
+        visible = "".join(filter_.push(chunk) for chunk in chunks) + filter_.flush()
+
+        self.assertEqual(visible, "Hello \n\nworld.")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ export const CONFIG = {
                 // '/static/animations/Thinking/Thinking_3.fbx',
                 // '/static/animations/Thinking/Thinking_4.fbx'
             ],
+            dreaming:   [
+                '/static/animations/Dreaming/Dreaming_1.fbx',
+                '/static/animations/Dreaming/Dreaming_2.fbx'
+            ],
             searching:  [
                 '/static/animations/Typing_Or_Searching.fbx'
             ],
@@ -50,13 +54,16 @@ export const CONFIG = {
         STORAGE_KEYS: {
             CHAT_HISTORY: 'astra-chat-history',
             CURRENT_SESSION: 'astra-current-session',
-            AUDIO_VOLUME: 'astra-audio-volume'
+            AUDIO_VOLUME: 'astra-audio-volume',
+            MIC_HOTKEY: 'astra-mic-hotkey'
         },
         STATUS_TEXT: {
             idle:       "Astra is Idle",
             thinking:   "Astra is Thinking...",
+            dreaming:   "Astra is Dreaming...",
             searching:  "Searching Knowledge Base...",
             responding: "Astra is Responding"
-        }
+        },
+        MIC_HOTKEY_DEFAULT: ' '  // spacebar
     }
 };

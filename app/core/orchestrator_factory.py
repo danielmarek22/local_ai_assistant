@@ -20,8 +20,36 @@ from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 from app.services.tool_executor import ToolExecutor
 from app.services.turn_finalizer import TurnFinalizer
+from app.services.avatar_controls import (
+    build_prompt_with_avatar_controls,
+    discover_gesture_catalog,
+)
 
 logger = logging.getLogger("orchestrator_factory")
+
+
+def _build_ollama_options(raw_generation: dict | None) -> dict:
+    generation = raw_generation if isinstance(raw_generation, dict) else {}
+    options: dict[str, object] = {}
+
+    field_map = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "min_p": "min_p",
+        "max_tokens": "num_predict",
+        "num_predict": "num_predict",
+        "rep_pen": "repeat_penalty",
+        "repeat_penalty": "repeat_penalty",
+        "num_ctx": "num_ctx",
+    }
+
+    for source_key, target_key in field_map.items():
+        if source_key not in generation:
+            continue
+        options[target_key] = generation[source_key]
+
+    return options
 
 
 def build_orchestrator() -> Orchestrator:
@@ -48,25 +76,34 @@ def build_orchestrator() -> Orchestrator:
         config.llm.get("host"),
     )
 
+    llm_generation = config.llm.get("generation", {})
+    llm_options = _build_ollama_options(llm_generation)
+    thinking_cfg = config.llm.get("thinking", {})
+    thinking_generation = thinking_cfg.get("generation", {}) if isinstance(thinking_cfg, dict) else {}
+    thinking_options = _build_ollama_options(thinking_generation)
+
     llm = OllamaClient(
         model=config.llm["model"],
         host=config.llm["host"],
-        options={
-            "temperature": config.llm["generation"]["temperature"],
-            "top_p": config.llm["generation"]["top_p"],
-            "num_predict": config.llm["generation"]["max_tokens"],
-        },
+        options=llm_options,
+        thinking_enabled=bool(thinking_cfg.get("enabled", False)) if isinstance(thinking_cfg, dict) else False,
+        thinking_level=thinking_cfg.get("level") if isinstance(thinking_cfg, dict) else None,
+        thinking_options=thinking_options,
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
     )
 
     logger.debug(
-        "LLM options: temperature=%.2f top_p=%.2f max_tokens=%d",
-        config.llm["generation"]["temperature"],
-        config.llm["generation"]["top_p"],
-        config.llm["generation"]["max_tokens"],
+        "LLM options: temperature=%.2f top_p=%.2f top_k=%s max_tokens=%d rep_pen=%s",
+        llm_generation.get("temperature", 0.0),
+        llm_generation.get("top_p", 0.0),
+        llm_generation.get("top_k"),
+        llm_generation.get("max_tokens", llm_generation.get("num_predict", 0)),
+        llm_generation.get("rep_pen", llm_generation.get("repeat_penalty")),
     )
+
+    llm.preload()
 
     # --------------------------------------------------
     # Storage
@@ -166,10 +203,16 @@ def build_orchestrator() -> Orchestrator:
     # Context builder
     # --------------------------------------------------
     logger.info("Setting up context builder")
+    gesture_catalog = discover_gesture_catalog()
+    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
+    allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
 
     context_builder = ContextBuilder(
-        system_prompt=config.assistant["system_prompt"],
-        user_context=config.user_context,
+        system_prompt=build_prompt_with_avatar_controls(
+            config.assistant["system_prompt"],
+            gesture_catalog=gesture_catalog,
+            allowed_expressions=allowed_expressions,
+        ),
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
@@ -195,6 +238,7 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         memory_action_handler=memory_action_handler,
         turn_finalizer=turn_finalizer,
+        gesture_catalog=gesture_catalog,
     )
 
     logger.info(

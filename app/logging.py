@@ -78,6 +78,12 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "summary_get",
         "summary_set",
     ),
+    "memory_reflector": (
+        "reflection_input",
+        "llm_output",
+        "reflection_complete",
+        "reflection_parse_error",
+    ),
 }
 
 

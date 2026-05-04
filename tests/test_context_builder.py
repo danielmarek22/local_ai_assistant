@@ -37,7 +37,6 @@ class ContextBuilderTests(unittest.TestCase):
 
         builder = ContextBuilder(
             system_prompt="System prompt",
-            user_context={},
             history_store=history,
             summary_store=summary,
             history_limit=6,
@@ -91,7 +90,6 @@ class ContextBuilderTests(unittest.TestCase):
 
         builder = ContextBuilder(
             system_prompt="System prompt",
-            user_context={},
             history_store=history,
             summary_store=summary,
             history_limit=6,
@@ -135,7 +133,6 @@ class ContextBuilderTests(unittest.TestCase):
 
         builder = ContextBuilder(
             system_prompt="System prompt",
-            user_context={},
             history_store=history,
             summary_store=summary,
             history_limit=6,
@@ -150,42 +147,12 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(messages[-2]["content"], "Earlier screenshot")
         self.assertEqual(messages[-2]["images"], ["aGVsbG8="])
 
-    def test_build_includes_configured_user_context(self):
-        history = FakeHistoryStore([])
-        summary = FakeSummaryStore(None)
-
-        builder = ContextBuilder(
-            system_prompt="System prompt",
-            user_context={
-                "name": "Bob",
-                "preferences": "concise answers",
-            },
-            history_store=history,
-            summary_store=summary,
-            history_limit=6,
-        )
-
-        messages = builder.build(
-            session_id="abc123",
-            user_text="Hello",
-            # injected_context removed from here completely
-        )
-
-        system_messages = [m for m in messages if m["role"] == "system"]
-        self.assertEqual(len(system_messages), 1)
-
-        system_content = system_messages[0]["content"]
-        self.assertIn("User profile/context (configured):", system_content)
-        self.assertIn("- name: Bob", system_content)
-        self.assertIn("- preferences: concise answers", system_content)
-
     def test_build_unwraps_summary_store_tuple(self):
         history = FakeHistoryStore([])
         summary = FakeSummaryStore(("Conversation summary.", 4))
 
         builder = ContextBuilder(
             system_prompt="System prompt",
-            user_context={},
             history_store=history,
             summary_store=summary,
             history_limit=6,
@@ -226,7 +193,6 @@ class ContextBuilderTests(unittest.TestCase):
 
         builder = ContextBuilder(
             system_prompt="System prompt",
-            user_context={},
             history_store=history,
             summary_store=summary,
             history_limit=6,

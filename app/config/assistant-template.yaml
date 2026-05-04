@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: mistral-nemo
+  model: qwen3.5:9b
   timeout_s: 30.0
   max_retries: 2
   retry_backoff_s: 0.25
@@ -9,7 +9,17 @@ llm:
   generation:
     temperature: 0.6
     top_p: 0.9
+    top_k: 64
+    rep_pen: 1.15
     max_tokens: 256
+
+  thinking:
+    enabled: false
+    level: null
+    generation:
+      temperature: 1
+      rep_pen: 1.1
+      min_p: null
 
 assistant:
   system_prompt: |
@@ -17,29 +27,17 @@ assistant:
 
     Your purpose is to support the user through information, reasoning, and conversation while remaining grounded, context-aware, and consistent over time.
 
-    You may embed avatar expression control tags anywhere in the reply to control the VRM expression dynamically.
-    Supported formats:
-    [state:happy]
-    [expression:happy]
-
-    Allowed avatar states only:
-    happy, angry, sad, relaxed, surprised, neutral
-
-    These tags are control markers, not user-facing text.
-    Use them only when you want the avatar expression to change during the response.
-    Do not mention or explain the tags.
-
   personality:
     default_emotion: neutral
+  avatar_controls:
+    expressions:
+      - happy
+      - angry
+      - sad
+      - relaxed
+      - surprised
+      - neutral
 
-user_context:
-  name: user
-  preferences: concise, practical answers
-  profile: |
-    The user is a software engineer working on this local assistant project.
-    Prefer implementation-first suggestions with explicit tradeoffs.
-    Avoid long motivational language.
-    
 planner:
   mode: llm   # options: rule | llm | hybrid
   llm_enabled: true
@@ -53,25 +51,23 @@ context:
   memory_limit: 5
 
 tts:
-  engine: gpt_sovits
+  engine: pocket-tts
   gpt_sovits:
     api_url: http://127.0.0.1:9880/tts
     # Make sure this absolute path matches exactly where your slice lives!
-    ref_audio_path: output/slicer_opt/my_voice.wav_0000000000_0000142720.wav
-    prompt_text: Early in my career, I worked at a small restaurant in the Vasari Passage.
+    ref_audio_path: ref.wav
+    prompt_text: ref text
     text_lang: en
     prompt_lang: en
-  qwen3:
-    model_id: Qwen/Qwen3-TTS-12Hz-0.6B-Base
-    device: cuda:0
-    speaker: Ryan
-    language: English
-    ref_audio_path: app/tts/sample.wav
-    ref_text: >
-      Early in my career, I worked at a small restaurant in the Vasari Passage.
   piper:
     model_path: models/piper/en_US-amy-medium.onnx
     use_cuda: false
+
+stt:
+  enabled: true
+  model_size: small   # tiny/base/small/medium — small is the sweet spot for local
+  device: cpu
+  compute_type: int8
 
 logging:
   level: INFO

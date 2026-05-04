@@ -81,6 +81,16 @@
                             </button>
                         </div>
                     </div>
+                    <!-- Mic button: hold to record, release to send -->
+                    <button
+                        id="mic-btn"
+                        class="mic-btn"
+                        type="button"
+                        aria-label="Hold to speak"
+                        title="Hold to speak"
+                    >
+                        🎤
+                    </button>
                     <button id="send-btn">Send</button>
                 </div>
             </section>
@@ -104,6 +114,26 @@
                                 <span id="playback-volume-value">100%</span>
                             </div>
                         </label>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Microphone hotkey</span>
+                                <span class="config-control-description">Press a key to configure the hotkey for starting/stopping recording.</span>
+                            </div>
+                            <div class="config-control-input">
+                                <button id="mic-hotkey-btn" class="config-hotkey-btn" type="button">Press any key...</button>
+                                <span id="mic-hotkey-current" class="config-hotkey-display">Space</span>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Memory Reflection</span>
+                                <span class="config-control-description">Run a full memory consolidation pass across all memories.</span>
+                            </div>
+                            <div class="config-control-input config-control-actions">
+                                <button id="reflect-now-btn" class="config-action-btn" type="button">Run Reflection</button>
+                                <span id="reflect-status" class="config-inline-status hidden" aria-live="polite"></span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>

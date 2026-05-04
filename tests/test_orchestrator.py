@@ -1,11 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
+    AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
+    AvatarAnimationEvent,
 )
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
@@ -182,6 +185,7 @@ class OrchestratorTests(unittest.TestCase):
             memory_retriever=memory_retriever,
             memory_action_handler=memory_action_handler,
             turn_finalizer=turn_finalizer,
+            gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
@@ -385,6 +389,232 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[:-1], ["Nice."])
         self.assertEqual(speech_texts[-1], "Nice.")
         self.assertEqual(history.records[1][2], "Nice.")
+
+    def test_thinking_tags_do_not_trigger_expression_or_animation_events(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=[
+                "<think>\n[state:happy][animation:greeting]secret\n</think>\n\n",
+                "Hello there.",
+            ],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        expression_values = [
+            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["neutral"])
+
+        animation_values = [
+            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
+        ]
+        self.assertEqual(animation_values, [])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hello there."])
+        self.assertEqual(speech_texts[-1], "Hello there.")
+        self.assertEqual(history.records[1][2], "Hello there.")
+
+    def test_thinking_text_is_streamed_as_separate_events(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=[
+                "<thi",
+                "nk>\nStep 1",
+                "\nStep 2",
+                "\n</think>\n\n",
+                "Answer.",
+            ],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        thinking_texts = [e.text for e in events if isinstance(e, AssistantThinkingEvent)]
+        self.assertEqual(thinking_texts, ["\nStep 1", "\nStep 2", "\n"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Answer."])
+        self.assertEqual(speech_texts[-1], "Answer.")
+        self.assertEqual(history.records[1][2], "Answer.")
+
+    @patch("app.core.orchestrator.trace_event")
+    def test_trace_logs_reasoning_response_alongside_visible_response(self, trace_event_mock):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=[
+                "<think>\nReasoning bit 1",
+                "\nReasoning bit 2\n</think>\n\n",
+                "Visible answer.",
+            ],
+            summary_trigger=999,
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        llm_stream_complete_call = next(
+            call for call in trace_event_mock.call_args_list
+            if call.args[:2] == ("orchestrator", "llm_stream_complete")
+        )
+
+        payload = llm_stream_complete_call.kwargs["payload"]
+        self.assertEqual(payload["visible_response"], "Visible answer.")
+        self.assertEqual(payload["reasoning_response"], "\nReasoning bit 1\nReasoning bit 2\n")
+
+    def test_response_animation_tag_is_extracted_from_stream(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["Hello [animation:greeting]there."],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        animation_values = [
+            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
+        ]
+        self.assertEqual(animation_values, ["greeting"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hello ", "there."])
+        self.assertEqual(speech_texts[-1], "Hello there.")
+        self.assertEqual(history.records[1][2], "Hello there.")
+
+    def test_response_animation_alias_tag_is_supported(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["[gesture:greeting]Hi."],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        animation_values = [
+            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
+        ]
+        self.assertEqual(animation_values, ["greeting"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hi."])
+        self.assertEqual(speech_texts[-1], "Hi.")
+        self.assertEqual(history.records[1][2], "Hi.")
+
+    def test_response_bare_animation_name_in_brackets_is_supported(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["[greeting]Hi."],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        animation_values = [
+            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
+        ]
+        self.assertEqual(animation_values, ["greeting"])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hi."])
+        self.assertEqual(speech_texts[-1], "Hi.")
+        self.assertEqual(history.records[1][2], "Hi.")
+
+    def test_unknown_animation_tag_is_stripped_without_event(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["Hi [animation:unknown]there."],
+            summary_trigger=999,
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        animation_values = [
+            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
+        ]
+        self.assertEqual(animation_values, [])
+
+        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
+        self.assertEqual(speech_texts[:-1], ["Hi ", "there."])
+        self.assertEqual(speech_texts[-1], "Hi there.")
+        self.assertEqual(history.records[1][2], "Hi there.")
 
     def test_image_only_turn_updates_perception_history_and_context(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
