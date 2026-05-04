@@ -1,9 +1,15 @@
 # app/stt/factory.py
-from .whisper_engine import WhisperSTTEngine
+from typing import TYPE_CHECKING
 
-def build_stt_engine(stt_config: dict) -> WhisperSTTEngine | None:
+if TYPE_CHECKING:
+    from .whisper_engine import WhisperSTTEngine
+
+
+def build_stt_engine(stt_config: dict) -> "WhisperSTTEngine | None":
     if not stt_config.get("enabled", False):
         return None
+    from .whisper_engine import WhisperSTTEngine
+
     return WhisperSTTEngine(
         model_size=stt_config.get("model_size", "small"),
         device=stt_config.get("device", "cpu"),

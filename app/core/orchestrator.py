@@ -111,9 +111,12 @@ class Orchestrator:
                 {
                     "text": turn_input.user_text,
                     "source": "microphone" if turn_input.input_modality == InputModality.VOICE else InputModality.TEXT,
-                    "modality": turn_input.input_modality.value,  # NEW
+                    "modality": turn_input.input_modality.value,
                     "image_count": len(turn_input.attachments),
-                    "attachments": [...],
+                    "attachments": [
+                        attachment.to_perception_payload()
+                        for attachment in turn_input.attachments
+                    ],
                 },
             )
 

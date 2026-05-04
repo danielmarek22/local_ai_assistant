@@ -45,7 +45,7 @@ AUDIO_DIR = Path("static/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
 
-tts = build_tts_engine(config.tts)
+tts = None
 
 logger.info("Starting FastAPI server")
 
@@ -229,6 +229,9 @@ async def tts_worker(queue: asyncio.Queue):
                 logger.info("TTS worker stopping")
                 return
 
+            if tts is None:
+                raise RuntimeError("TTS engine has not been initialized")
+
             tts_start = time.perf_counter()
             await loop.run_in_executor(
                 None,
@@ -347,6 +350,8 @@ def _should_forward_state(state: str) -> bool:
 
 @app.on_event("startup")
 async def startup_event():
+    global tts
+
     app.state.server_instance_id = uuid.uuid4().hex[:8]
     app.state.orchestrator = build_orchestrator()
     app.state.memory_reflector = MemoryReflector(
@@ -358,6 +363,7 @@ async def startup_event():
         app.state.server_instance_id,
     )
 
+    tts = build_tts_engine(config.tts)
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
@@ -444,12 +450,7 @@ async def run_memory_reflection(payload: ReflectRequest):
 
     logger.info("Manual memory reflection requested (days_old=%d)", payload.days_old)
 
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        reflector.reflect_and_prune,
-        payload.days_old,
-    )
+    result = reflector.reflect_and_prune(payload.days_old)
 
     if not result.get("success", True):
         raise HTTPException(
