@@ -54,6 +54,7 @@ class Orchestrator:
         self.turn_finalizer = turn_finalizer
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
+        self.perception = PerceptionState()
 
         logger.info("Orchestrator initialized")
 
@@ -70,7 +71,6 @@ class Orchestrator:
         input_modality = InputModality.TEXT,
     ):
         start_ts = time.perf_counter()
-        perception = PerceptionState()
         turn_input = TurnInput(
             user_text=user_text,
             attachments=attachments or [],
@@ -80,6 +80,7 @@ class Orchestrator:
         retrieval_text = turn_input.retrieval_text()
         history_text = turn_input.history_text()
         idle_emitted = False
+        is_closing = False
 
         try:
             logger.info(
@@ -106,7 +107,7 @@ class Orchestrator:
             # --------------------------------------------------------
             # 1. Update perception with raw input
             # --------------------------------------------------------
-            perception.update(
+            self.perception.update(
                 PerceptionKey.USER_INPUT,
                 {
                     "text": turn_input.user_text,
@@ -135,7 +136,7 @@ class Orchestrator:
                     "perception_value": retrieval.perception_value,
                 },
             )
-            perception.update(
+            self.perception.update(
                 PerceptionKey.MEMORY_RETRIEVED,
                 {"value": retrieval.perception_value},
             )
@@ -153,7 +154,7 @@ class Orchestrator:
             # --------------------------------------------------------
             # 4. Planning (decide actions)
             # --------------------------------------------------------
-            perception_snapshot = perception.snapshot()
+            perception_snapshot = self.perception.snapshot()
             plan = self._plan(
                 session_id=session_id,
                 user_text=retrieval_text or turn_input.user_text,
@@ -245,8 +246,102 @@ class Orchestrator:
 
             idle_emitted = True
             yield AssistantStateEvent(state=AssistantState.IDLE)
+        except GeneratorExit:
+            is_closing = True
+            raise
         finally:
-            if not idle_emitted:
+            if not idle_emitted and not is_closing:
+                idle_emitted = True
+                yield AssistantStateEvent(state=AssistantState.IDLE)
+
+    def handle_proactive_event(
+        self,
+        session_id: str,
+        event_text: str = (
+            "A local vision watchdog detected a significant visual event. "
+            "Briefly and proactively help the user based on the attached frame."
+        ),
+        attachments: list[Attachment] | None = None,
+    ):
+        start_ts = time.perf_counter()
+        attachments = attachments or []
+        idle_emitted = False
+        is_closing = False
+
+        try:
+            logger.info(
+                "[%s] Proactive vision event received (images=%d)",
+                session_id,
+                len(attachments),
+            )
+            trace_event(
+                "orchestrator",
+                "proactive_event",
+                session_id=session_id,
+                payload={
+                    "event_text": event_text,
+                    "attachments": [
+                        attachment.to_perception_payload()
+                        for attachment in attachments
+                    ],
+                },
+            )
+
+            yield AssistantStateEvent(state=AssistantState.THINKING)
+
+            retrieval = self.memory_retriever.retrieve(event_text, session_id)
+            memory_context = retrieval.memory_context
+            self.perception.update(
+                PerceptionKey.MEMORY_RETRIEVED,
+                {"value": retrieval.perception_value},
+            )
+
+            messages = self._build_context(
+                session_id=session_id,
+                user_text="",
+                memory_context=memory_context,
+                tool_context=None,
+                attachments=attachments,
+            )
+            self._inject_hidden_system_message(
+                messages,
+                (
+                    "Hidden proactive vision event. This message is system context, "
+                    "not a user message and not visible to the user. "
+                    f"{event_text}"
+                ),
+            )
+
+            response = yield from self._stream_response(
+                session_id,
+                messages,
+                think_override=None,
+            )
+
+            self.history.add(session_id, "assistant", response)
+            trace_event(
+                "orchestrator",
+                "assistant_response",
+                session_id=session_id,
+                payload={"response": response, "source": "proactive_vision"},
+            )
+
+            yield AssistantSpeechEvent(text=response, is_final=True)
+            self.turn_finalizer.finalize(session_id)
+
+            logger.info(
+                "[%s] Proactive turn completed (duration=%.2f ms)",
+                session_id,
+                (time.perf_counter() - start_ts) * 1000,
+            )
+
+            idle_emitted = True
+            yield AssistantStateEvent(state=AssistantState.IDLE)
+        except GeneratorExit:
+            is_closing = True
+            raise
+        finally:
+            if not idle_emitted and not is_closing:
                 idle_emitted = True
                 yield AssistantStateEvent(state=AssistantState.IDLE)
 
@@ -305,6 +400,16 @@ class Orchestrator:
             bool(tool_context),
         )
         return messages
+
+    def _inject_hidden_system_message(self, messages: list[dict], content: str) -> None:
+        payload = {
+            "role": "system",
+            "content": content,
+        }
+        if messages and messages[0].get("role") == "system":
+            messages.insert(1, payload)
+        else:
+            messages.insert(0, payload)
 
     def _stream_response(self, session_id: str, messages, think_override=None):
         logger.info("[%s] Calling LLM (streaming)", session_id)

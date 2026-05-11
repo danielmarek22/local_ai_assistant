@@ -669,6 +669,57 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(llm.calls), 1)
         self.assertIs(llm.calls[0][1], True)
 
+    def test_proactive_event_is_hidden_system_context_not_user_history(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            planner,
+            _tool_executor,
+            context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        attachment = ImageAttachment(
+            name="screen.jpg",
+            mime_type="image/jpeg",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+        event_text = "The watchdog saw a disruptive screen event."
+
+        list(orch.handle_proactive_event(
+            self.SESSION_ID,
+            event_text=event_text,
+            attachments=[attachment],
+        ))
+
+        self.assertEqual(planner.calls, [])
+        self.assertEqual(context_builder.calls[0]["user_text"], "")
+        self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
+        self.assertEqual(len(llm.calls), 1)
+
+        messages = llm.calls[0][0]
+        hidden_system_messages = [
+            message
+            for message in messages
+            if message["role"] == "system" and event_text in message["content"]
+        ]
+        self.assertEqual(len(hidden_system_messages), 1)
+
+        user_messages = [
+            message
+            for message in messages
+            if message["role"] == "user" and event_text in message["content"]
+        ]
+        self.assertEqual(user_messages, [])
+        self.assertEqual(len(history.records), 1)
+        self.assertEqual(history.records[0][1], "assistant")
+        self.assertEqual(history.records[0][2], "Hello world")
+
     def test_turn_emits_idle_when_llm_stream_raises(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
@@ -697,6 +748,42 @@ class OrchestratorTests(unittest.TestCase):
             event.state for event in events if isinstance(event, AssistantStateEvent)
         ]
         self.assertEqual(state_values[-1], AssistantState.IDLE)
+
+    def test_user_input_generator_close_does_not_yield_during_generatorexit(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        gen = orch.handle_user_input(self.SESSION_ID, "hello")
+        self.assertEqual(next(gen).state, AssistantState.THINKING)
+        gen.close()
+
+    def test_proactive_generator_close_does_not_yield_during_generatorexit(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        gen = orch.handle_proactive_event(self.SESSION_ID)
+        self.assertEqual(next(gen).state, AssistantState.THINKING)
+        gen.close()
 
     def test_shared_orchestrator_does_not_leak_session_between_turns(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

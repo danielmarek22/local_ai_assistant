@@ -4,6 +4,8 @@ rich
 pyyaml
 fastapi
 uvicorn[standard]
+Pillow
+transformers
 piper-tts
 onnxruntime-gpu
 qwen-tts

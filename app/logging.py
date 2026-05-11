@@ -24,6 +24,7 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "assistant_response",
         "planner_input",
         "llm_stream_complete",
+        "proactive_event",
     ),
     "context_builder": ("context_built",),
     "llm_planner": (
@@ -35,8 +36,10 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
     "llm": (
         "chat_request",
         "chat_response",
+        "chat_retry_without_images",
         "stream_request",
         "stream_response",
+        "stream_retry_without_images",
     ),
     "web_search": (
         "probe_start",

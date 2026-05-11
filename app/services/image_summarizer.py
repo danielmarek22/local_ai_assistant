@@ -1,10 +1,14 @@
+import logging
+
 from app.logging import trace_event
+
+logger = logging.getLogger("image_summarizer")
 
 class ImageSummarizer:
     def __init__(self, llm):
         self.llm = llm
 
-    def summarize(self, attachment, message_text: str = "") -> str:
+    def summarize(self, attachment, message_text: str = "") -> str | None:
         prompt = [
             {
                 "role": "system",
@@ -38,6 +42,13 @@ class ImageSummarizer:
                 "num_predict": 160,
             },
         ).strip()
+        if getattr(self.llm, "last_chat_dropped_current_images", False):
+            logger.warning(
+                "Skipping image summary for %r because Ollama rejected the image payload.",
+                attachment.name,
+            )
+            return None
+
         trace_event(
             "image_summarizer",
             "summary_generated",

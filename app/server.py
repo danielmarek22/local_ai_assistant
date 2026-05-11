@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 import asyncio
 from typing import Iterator, Any
+import hashlib
 import json
 import logging
 import re
@@ -27,10 +28,12 @@ from app.core.events import (
 )
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, attachment_from_payload
+from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
+from app.services.vision_watchdog import VisionWatchdog
 from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 
 config = Config()
@@ -52,6 +55,7 @@ logger.info("Starting FastAPI server")
 _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
+VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -348,6 +352,218 @@ def _should_forward_state(state: str) -> bool:
     return state != AssistantState.RESPONDING
 
 
+def _append_recent_vision_attachments(
+    orchestrator,
+    attachments: list[Attachment],
+    *,
+    max_age_seconds: float = VISION_CONTEXT_MAX_AGE_SECONDS,
+) -> int:
+    # Only inject fallback frames if frontend didn't bundle fresh ones.
+    # This ensures synchronized frames from the user message take precedence
+    # and prevents mixing fresh bundled frames with stale background polling frames.
+    if attachments:
+        return 0
+
+    appended_count = 0
+    known_hashes = {
+        attachment.sha256
+        for attachment in attachments
+        if getattr(attachment, "sha256", None)
+    }
+
+    for key in (PerceptionKey.SCREEN_SCENE, PerceptionKey.WEBCAM_SCENE):
+        entry = orchestrator.perception.get(key)
+        if entry is None or entry.age > max_age_seconds:
+            continue
+
+        payload = entry.value
+        if not isinstance(payload, dict):
+            continue
+
+        try:
+            attachment = attachment_from_payload(payload)
+        except ValueError as exc:
+            logger.debug("Skipping recent %s perception attachment: %s", key.value, exc)
+            continue
+
+        if attachment.sha256 and attachment.sha256 in known_hashes:
+            continue
+
+        attachments.append(attachment)
+        appended_count += 1
+        if attachment.sha256:
+            known_hashes.add(attachment.sha256)
+
+    return appended_count
+
+
+async def _stream_orchestrator_events(
+    ws: WebSocket,
+    orchestrator,
+    event_iterator: Iterator[Any],
+    connection_id: str,
+    original_attachment_count: int,
+    state_tracker: dict[str, str],
+) -> None:
+    text_buffer = ""
+    thinking_filter = ThinkingBlockFilter()
+    pending_chunks: list[str] = []
+    text_released = False
+    tts_enabled = True
+    image_notice_sent = False
+
+    async for event in run_generator(event_iterator):
+        if not image_notice_sent:
+            notice_payload = _build_attachment_drop_notice_payload(
+                orchestrator=orchestrator,
+                original_attachment_count=original_attachment_count,
+            )
+            if notice_payload is not None:
+                await _send_ws_payload(ws, notice_payload)
+                image_notice_sent = True
+
+        if isinstance(event, AssistantStateEvent):
+            state_tracker["state"] = event.state
+            if not _should_forward_state(event.state):
+                logger.debug(
+                    "[%s] Holding assistant state at thinking until audio is ready",
+                    connection_id,
+                )
+                continue
+
+            logger.debug("[%s] Assistant state -> %s", connection_id, event.state)
+            await _send_ws_payload(ws, {
+                "type": "assistant_state",
+                "state": event.state,
+            })
+            continue
+
+        if isinstance(event, AvatarExpressionEvent):
+            logger.debug("[%s] Avatar expression -> %s", connection_id, event.expression)
+            await _send_ws_payload(ws, {
+                "type": "assistant_expression",
+                "expression": event.expression,
+            })
+            continue
+
+        if isinstance(event, AvatarAnimationEvent):
+            logger.debug("[%s] Avatar animation -> %s", connection_id, event.animation)
+            await _send_ws_payload(ws, {
+                "type": "assistant_animation",
+                "animation": event.animation,
+            })
+            continue
+
+        if isinstance(event, AssistantThinkingEvent):
+            if event.text:
+                await _send_ws_payload(ws, {
+                    "type": "assistant_thinking_chunk",
+                    "content": event.text,
+                })
+            continue
+
+        if isinstance(event, AssistantSpeechEvent):
+            if not event.is_final:
+                tts_chunk = thinking_filter.push(event.text)
+                text_buffer += tts_chunk
+
+                if text_released:
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_chunk",
+                        "content": event.text,
+                    })
+                else:
+                    pending_chunks.append(event.text)
+
+                sentences, text_buffer = split_sentences(text_buffer)
+
+                if not tts_enabled:
+                    continue
+
+                for sentence in sentences:
+                    tts_text = _prepare_tts_text(sentence)
+                    if not tts_text:
+                        continue
+
+                    audio_id = uuid.uuid4().hex
+                    audio_path = AUDIO_DIR / f"{audio_id}.wav"
+
+                    logger.debug(
+                        "[%s] TTS synth sentence (%d chars)",
+                        connection_id,
+                        len(tts_text),
+                    )
+
+                    try:
+                        await synthesize_async(
+                            text=tts_text,
+                            output_path=audio_path,
+                            session_id=connection_id,
+                        )
+                    except Exception:
+                        tts_enabled = False
+                        logger.warning(
+                            "[%s] TTS failed mid-turn; falling back to text-only streaming",
+                            connection_id,
+                        )
+                        if not text_released:
+                            await _flush_pending_chunks(ws, pending_chunks)
+                            text_released = True
+                        break
+
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_audio",
+                        "url": f"/static/audio/{audio_id}.wav",
+                    })
+
+                    if not text_released:
+                        await _flush_pending_chunks(ws, pending_chunks)
+                        text_released = True
+
+            else:
+                text_buffer += thinking_filter.flush()
+                if tts_enabled:
+                    tts_text = _prepare_tts_text(text_buffer)
+                    if tts_text:
+                        audio_id = uuid.uuid4().hex
+                        audio_path = AUDIO_DIR / f"{audio_id}.wav"
+
+                        logger.debug(
+                            "[%s] TTS final fragment (%d chars)",
+                            connection_id,
+                            len(tts_text),
+                        )
+
+                        try:
+                            await synthesize_async(
+                                text=tts_text,
+                                output_path=audio_path,
+                                session_id=connection_id,
+                            )
+                        except Exception:
+                            tts_enabled = False
+                            logger.warning(
+                                "[%s] TTS failed for final fragment; sending text without audio",
+                                connection_id,
+                            )
+                        else:
+                            await _send_ws_payload(ws, {
+                                "type": "assistant_audio",
+                                "url": f"/static/audio/{audio_id}.wav",
+                            })
+
+                if not text_released:
+                    await _flush_pending_chunks(ws, pending_chunks)
+                    text_released = True
+
+                await _send_ws_payload(ws, {
+                    "type": "assistant_end",
+                    "content": event.text,
+                })
+
+                logger.info("[%s] Assistant turn completed", connection_id)
+
+
 @app.on_event("startup")
 async def startup_event():
     global tts
@@ -357,6 +573,19 @@ async def startup_event():
     app.state.memory_reflector = MemoryReflector(
         llm=app.state.orchestrator.llm,
         memory_store=app.state.orchestrator.memory_retriever.memory,
+    )
+    vision_config = config.raw.get("vision_watchdog", {})
+    app.state.vision_watchdog = VisionWatchdog(
+        model=str(vision_config.get("model", "HuggingFaceTB/SmolVLM-256M-Instruct")),
+        device=str(vision_config.get("device", "auto")),
+        torch_dtype=str(vision_config.get("torch_dtype", "auto")),
+        attn_implementation=str(vision_config.get("attn_implementation", "auto")),
+        max_new_tokens=int(vision_config.get("max_new_tokens", 8)),
+        timeout_seconds=(
+            float(vision_config["timeout_seconds"])
+            if vision_config.get("timeout_seconds") is not None
+            else None
+        ),
     )
     logger.info(
         "Orchestrator initialized at startup (server_instance_id=%s)",
@@ -494,7 +723,114 @@ async def websocket_endpoint(ws: WebSocket):
     )))
 
     orchestrator = app.state.orchestrator
+    watchdog = getattr(app.state, "vision_watchdog", None)
+    assistant_state_tracker = {"state": AssistantState.IDLE}
+    last_screen_detection = 0.0
+    last_webcam_detection = 0.0
+    last_screen_hash: str | None = None
+    last_webcam_hash: str | None = None
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
+
+    async def handle_vision_payload(payload: dict) -> None:
+        nonlocal last_screen_detection
+        nonlocal last_webcam_detection
+        nonlocal last_screen_hash
+        nonlocal last_webcam_hash
+
+        frame_type = payload.get("type")
+        if frame_type == "screen_frame":
+            key = PerceptionKey.SCREEN_SCENE
+            source = "screen"
+        elif frame_type == "webcam_frame":
+            key = PerceptionKey.WEBCAM_SCENE
+            source = "webcam"
+        else:
+            return
+
+        attachment_payload = payload.get("attachment")
+        if not isinstance(attachment_payload, dict):
+            raise ValueError(f"{frame_type} payload is missing attachment")
+
+        attachment = attachment_from_payload(attachment_payload)
+        base64_data = getattr(attachment, "base64_data", None)
+        image_hash = attachment.sha256
+        if image_hash is None:
+            raw_base64 = attachment_payload.get("base64_data") or attachment_payload.get("data") or ""
+            image_hash = hashlib.sha256(str(raw_base64).encode("utf-8")).hexdigest()
+
+        perception_payload = {
+            **attachment.to_perception_payload(),
+            "sha256": image_hash,
+            "source": source,
+        }
+        if base64_data:
+            perception_payload["base64_data"] = base64_data
+
+        orchestrator.perception.update(
+            key,
+            perception_payload,
+        )
+
+        if frame_type == "screen_frame":
+            if image_hash == last_screen_hash:
+                return
+            last_screen_hash = image_hash
+            last_detection = last_screen_detection
+            evaluate = watchdog.evaluate_screen if watchdog else None
+        else:
+            if image_hash == last_webcam_hash:
+                return
+            last_webcam_hash = image_hash
+            last_detection = last_webcam_detection
+            evaluate = watchdog.evaluate_webcam if watchdog else None
+
+        now = time.monotonic()
+        if now - last_detection < 5.0:
+            return
+
+        if assistant_state_tracker["state"] != AssistantState.IDLE:
+            return
+
+        if evaluate is None:
+            logger.debug("[%s] Vision watchdog unavailable; stored %s perception only", connection_id, source)
+            return
+
+        if not base64_data:
+            return
+
+        if frame_type == "screen_frame":
+            last_screen_detection = now
+        else:
+            last_webcam_detection = now
+
+        should_react = await evaluate(base64_data)
+        if not should_react:
+            return
+
+        if frame_type == "screen_frame":
+            event_text = (
+                "The local screen watchdog detected a clear visual event in the "
+                "latest screenshot. Proactively help the user, briefly and concretely."
+            )
+        else:
+            event_text = (
+                "The local webcam watchdog detected that the user may need attention. "
+                "Proactively check in briefly and helpfully."
+            )
+
+        logger.info("[%s] Vision watchdog triggered proactive %s turn", connection_id, source)
+        await _stream_orchestrator_events(
+            ws=ws,
+            orchestrator=orchestrator,
+            event_iterator=orchestrator.handle_proactive_event(
+                session_id=session_id,
+                event_text=event_text,
+                attachments=[attachment],
+            ),
+            connection_id=connection_id,
+            original_attachment_count=1,
+            state_tracker=assistant_state_tracker,
+        )
 
     try:
         while True:
@@ -565,12 +901,37 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # ── TEXT PATH ─────────────────────────────────────────────
                 else:
+                    text_payload = raw_message["text"]
+                    try:
+                        parsed_payload = json.loads(text_payload)
+                    except json.JSONDecodeError:
+                        parsed_payload = None
+
+                    if (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") in {"screen_frame", "webcam_frame"}
+                    ):
+                        await handle_vision_payload(parsed_payload)
+                        continue
+
                     user_text, reasoning_override, attachments = parse_user_message(
-                        raw_message["text"]
+                        text_payload
                     )
                     input_modality = InputModality.TEXT
 
                 # ── SHARED PATH (both modalities reach here) ──────────────
+                original_attachment_count = len(attachments)
+                vision_attachment_count = _append_recent_vision_attachments(
+                    orchestrator,
+                    attachments,
+                )
+                if vision_attachment_count:
+                    logger.debug(
+                        "[%s] Added %d recent vision frame(s) to user turn context",
+                        connection_id,
+                        vision_attachment_count,
+                    )
+
                 logger.info(
                     "[%s] Received user input (len=%d, images=%d, reasoning_override=%r, modality=%s)",
                     connection_id,
@@ -581,188 +942,20 @@ async def websocket_endpoint(ws: WebSocket):
                 )
                 logger.debug("[%s] User input text: %r", connection_id, user_text)
 
-                # Buffer for sentence-based TTS
-                text_buffer = ""
-                thinking_filter = ThinkingBlockFilter()
-                pending_chunks: list[str] = []
-                text_released = False
-                tts_enabled = True
-                image_notice_sent = False
-
-                async for event in run_generator(
-                    orchestrator.handle_user_input(
+                await _stream_orchestrator_events(
+                    ws=ws,
+                    orchestrator=orchestrator,
+                    event_iterator=orchestrator.handle_user_input(
                         session_id,
                         user_text,
                         think_override=reasoning_override,
                         attachments=attachments,
                         input_modality=input_modality,
-                    )
-                ):
-                    if not image_notice_sent:
-                        notice_payload = _build_attachment_drop_notice_payload(
-                            orchestrator=orchestrator,
-                            original_attachment_count=len(attachments),
-                        )
-                        if notice_payload is not None:
-                            await _send_ws_payload(ws, notice_payload)
-                            image_notice_sent = True
-
-                    # --- STATE EVENTS ---
-                    if isinstance(event, AssistantStateEvent):
-                        if not _should_forward_state(event.state):
-                            logger.debug(
-                                "[%s] Holding assistant state at thinking until audio is ready",
-                                connection_id,
-                            )
-                            continue
-
-                        logger.debug(
-                            "[%s] Assistant state -> %s",
-                            connection_id,
-                            event.state,
-                        )
-                        await _send_ws_payload(ws, {
-                            "type": "assistant_state",
-                            "state": event.state,
-                        })
-                        continue
-
-                    if isinstance(event, AvatarExpressionEvent):
-                        logger.debug(
-                            "[%s] Avatar expression -> %s",
-                            connection_id,
-                            event.expression,
-                        )
-                        await _send_ws_payload(ws, {
-                            "type": "assistant_expression",
-                            "expression": event.expression,
-                        })
-                        continue
-
-                    if isinstance(event, AvatarAnimationEvent):
-                        logger.debug(
-                            "[%s] Avatar animation -> %s",
-                            connection_id,
-                            event.animation,
-                        )
-                        await _send_ws_payload(ws, {
-                            "type": "assistant_animation",
-                            "animation": event.animation,
-                        })
-                        continue
-
-                    # --- SPEECH EVENTS ---
-                    if isinstance(event, AssistantThinkingEvent):
-                        if event.text:
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_thinking_chunk",
-                                "content": event.text,
-                            })
-                        continue
-
-                    if isinstance(event, AssistantSpeechEvent):
-                        if not event.is_final:
-                            tts_chunk = thinking_filter.push(event.text)
-                            text_buffer += tts_chunk
-
-                            if text_released:
-                                await _send_ws_payload(ws, {
-                                    "type": "assistant_chunk",
-                                    "content": event.text,
-                                })
-                            else:
-                                pending_chunks.append(event.text)
-
-                            sentences, text_buffer = split_sentences(text_buffer)
-
-                            if not tts_enabled:
-                                continue
-
-                            for sentence in sentences:
-                                tts_text = _prepare_tts_text(sentence)
-                                if not tts_text:
-                                    continue
-
-                                audio_id = uuid.uuid4().hex
-                                audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                                logger.debug(
-                                    "[%s] TTS synth sentence (%d chars)",
-                                    connection_id,
-                                    len(tts_text),
-                                )
-
-                                try:
-                                    await synthesize_async(
-                                        text=tts_text,
-                                        output_path=audio_path,
-                                        session_id=connection_id,
-                                    )
-                                except Exception:
-                                    tts_enabled = False
-                                    logger.warning(
-                                        "[%s] TTS failed mid-turn; falling back to text-only streaming",
-                                        connection_id,
-                                    )
-                                    if not text_released:
-                                        await _flush_pending_chunks(ws, pending_chunks)
-                                        text_released = True
-                                    break
-
-                                await _send_ws_payload(ws, {
-                                    "type": "assistant_audio",
-                                    "url": f"/static/audio/{audio_id}.wav",
-                                })
-
-                                if not text_released:
-                                    await _flush_pending_chunks(ws, pending_chunks)
-                                    text_released = True
-
-                        else:
-                            text_buffer += thinking_filter.flush()
-                            if tts_enabled:
-                                tts_text = _prepare_tts_text(text_buffer)
-                                if tts_text:
-                                    audio_id = uuid.uuid4().hex
-                                    audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                                    logger.debug(
-                                        "[%s] TTS final fragment (%d chars)",
-                                        connection_id,
-                                        len(tts_text),
-                                    )
-
-                                    try:
-                                        await synthesize_async(
-                                            text=tts_text,
-                                            output_path=audio_path,
-                                            session_id=connection_id,
-                                        )
-                                    except Exception:
-                                        tts_enabled = False
-                                        logger.warning(
-                                            "[%s] TTS failed for final fragment; sending text without audio",
-                                            connection_id,
-                                        )
-                                    else:
-                                        await _send_ws_payload(ws, {
-                                            "type": "assistant_audio",
-                                            "url": f"/static/audio/{audio_id}.wav",
-                                        })
-
-                            if not text_released:
-                                await _flush_pending_chunks(ws, pending_chunks)
-                                text_released = True
-
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_end",
-                                "content": event.text,
-                            })
-
-                            logger.info(
-                                "[%s] Assistant turn completed",
-                                connection_id,
-                            )
+                    ),
+                    connection_id=connection_id,
+                    original_attachment_count=original_attachment_count,
+                    state_tracker=assistant_state_tracker,
+                )
 
             except WebSocketDisconnect:
                 raise
@@ -772,12 +965,14 @@ async def websocket_endpoint(ws: WebSocket):
                     ws,
                     f"Couldn't process that message: {exc}",
                 )
+                assistant_state_tracker["state"] = AssistantState.IDLE
             except Exception:
                 logger.exception("[%s] Turn failed; keeping websocket alive", connection_id)
                 await _send_turn_error(
                     ws,
                     "Sorry, something went wrong while processing that message. Please try again.",
                 )
+                assistant_state_tracker["state"] = AssistantState.IDLE
 
     except WebSocketDisconnect:
         logger.info(

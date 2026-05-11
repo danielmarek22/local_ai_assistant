@@ -81,13 +81,13 @@
                             </button>
                         </div>
                     </div>
-                    <!-- Mic button: hold to record, release to send -->
+                    <!-- Mic button: click to toggle always listening, or use spacebar hotkey for manual recording -->
                     <button
                         id="mic-btn"
                         class="mic-btn"
                         type="button"
-                        aria-label="Hold to speak"
-                        title="Hold to speak"
+                        aria-label="Click to enable always listening"
+                        title="Click to enable always listening (or hold Spacebar for manual recording)"
                     >
                         🎤
                     </button>
@@ -134,6 +134,16 @@
                                 <span id="reflect-status" class="config-inline-status hidden" aria-live="polite"></span>
                             </div>
                         </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Proactive vision</span>
+                                <span class="config-control-description">Explicitly opt in before sending local screen or webcam frames.</span>
+                            </div>
+                            <div class="config-control-input config-control-actions vision-control-actions">
+                                <button id="screen-share-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Screen Share</button>
+                                <button id="webcam-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Webcam</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -158,6 +168,11 @@
     </div>
 
     <button id="chat-open-btn" class="chat-open-btn" type="button" aria-label="Open chat panel">Chat</button>
+
+    <video id="screen-capture-video" class="hidden" autoplay muted playsinline></video>
+    <canvas id="screen-capture-canvas" class="hidden"></canvas>
+    <video id="webcam-capture-video" class="hidden" autoplay muted playsinline></video>
+    <canvas id="webcam-capture-canvas" class="hidden"></canvas>
 
     <script type="module" src="/static/main.js"></script>
 </body>

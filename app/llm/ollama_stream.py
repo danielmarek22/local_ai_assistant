@@ -10,10 +10,6 @@ from app.logging import trace_event
 
 logger = logging.getLogger("ollama_client")
 
-# Stop sequences appended unconditionally to every streaming request to
-# prevent the model from rambling past a natural end-of-turn token.
-_BUILTIN_STOP_SEQUENCES = ["<|eot_id|>", "<|im_end|>", "<|end_of_sentence|>"]
-
 # Default repetition penalty applied when the caller has not set one.
 _DEFAULT_REPEAT_PENALTY = 1.15
 
@@ -25,14 +21,23 @@ _MAX_STREAM_TEMPERATURE = 1.5
 _THINKING_MIN_CTX = 8192
 _THINKING_MIN_PREDICT = 2048
 
+# Stop sequences appended unconditionally to every streaming request to
+# prevent the model from rambling past a natural end-of-turn token.
+#
+# NOTE: The native /api/chat endpoint does not support OpenAI-style `stop`
+# sequences at the top level; they must be passed inside `options`. See
+# _build_stream_options for where these are injected.
+_BUILTIN_STOP_SEQUENCES = ["<|eot_id|>", "<|im_end|>", "<|end_of_sentence|>"]
+
 
 class OllamaClient(LLMClient):
     """
-    Ollama-backed LLM client.
+    Ollama-backed LLM client using the native /api/chat endpoint exclusively.
 
-    Supports both blocking (chat) and streaming (stream_chat) call patterns.
-    Thinking tokens (extended reasoning) are an opt-in feature controlled by
-    `thinking_enabled` and `thinking_level`.
+    Supports both blocking (chat) and streaming (stream_chat) call patterns,
+    as well as multimodal (image) inputs.  Thinking tokens (extended
+    reasoning) are an opt-in feature controlled by `thinking_enabled` and
+    `thinking_level`.
 
     Call `preload()` after construction if you want the model weights loaded
     into VRAM before the first real request. This is intentionally not done
@@ -53,7 +58,7 @@ class OllamaClient(LLMClient):
     ):
         self.model = model
         self._preload_url = f"{host}/api/generate"
-        self.url = f"{host}/v1/chat/completions"
+        self.url = f"{host}/api/chat"
         self.options = options or {}
         self.thinking_enabled = thinking_enabled
         self.thinking_level = thinking_level
@@ -62,6 +67,9 @@ class OllamaClient(LLMClient):
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
         self._multimodal_supported = True
+        self.last_chat_dropped_current_images = False
+        self.last_chat_dropped_current_images_count = 0
+        self.last_chat_image_fallback_strategy: str | None = None
         self.last_stream_dropped_current_images = False
         self.last_stream_dropped_current_images_count = 0
         self.last_stream_image_fallback_strategy: str | None = None
@@ -117,38 +125,103 @@ class OllamaClient(LLMClient):
         if options_override:
             request_options.update(options_override)
 
+        request_messages = messages
+        self.last_chat_dropped_current_images = False
+        self.last_chat_dropped_current_images_count = 0
+        self.last_chat_image_fallback_strategy = None
+
+        if not self._multimodal_supported:
+            request_messages, _ = self._strip_images_from_messages(request_messages)
+
         payload = self._build_payload(
-            messages,
+            request_messages,
             stream=False,
             think_value=think_value,
             options=request_options,
         )
 
         logger.info(
-            "Ollama chat request (stream=False, reasoning_effort=%r, messages=%d)",
-            payload.get("reasoning_effort"),
+            "Ollama chat request (stream=False, think=%r, messages=%d)",
+            think_value,
             len(messages),
         )
         trace_event("llm", "chat_request", payload=payload)
 
-        # _post_with_retry already calls raise_for_status() internally.
-        r = self._post_with_retry(
-            payload,
-            stream=False,
-            timeout_override=timeout_override,
-            max_retries_override=max_retries_override,
-        )
+        try:
+            r = self._post_with_retry(
+                payload,
+                stream=False,
+                timeout_override=timeout_override,
+                max_retries_override=self._resolve_image_request_retries(
+                    request_messages,
+                    max_retries_override,
+                ),
+            )
+        except requests.HTTPError as exc:
+            if not self._should_retry_without_images(exc, request_messages):
+                raise
+
+            response_text = self._http_error_text(exc)
+            if self._error_indicates_model_without_images(response_text):
+                self._multimodal_supported = False
+
+            fallback_candidates = self._build_image_fallback_messages(request_messages)
+            if not fallback_candidates:
+                raise
+
+            last_exc: requests.HTTPError = exc
+            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
+                payload["messages"] = fallback_messages
+                logger.warning(
+                    "Ollama chat rejected image payload (status=%s); retrying %s.",
+                    getattr(last_exc.response, "status_code", None),
+                    strategy,
+                )
+                trace_event(
+                    "llm",
+                    "chat_retry_without_images",
+                    payload={
+                        "status_code": getattr(last_exc.response, "status_code", None),
+                        "response_text": self._http_error_text(last_exc),
+                        "strategy": strategy,
+                        "dropped_current_images_count": dropped_current_images_count,
+                    },
+                )
+                try:
+                    r = self._post_with_retry(
+                        payload,
+                        stream=False,
+                        timeout_override=timeout_override,
+                        max_retries_override=self._resolve_image_request_retries(
+                            fallback_messages,
+                            max_retries_override,
+                        ),
+                    )
+                    self.last_chat_image_fallback_strategy = strategy
+                    if dropped_current_images_count > 0:
+                        self.last_chat_dropped_current_images = True
+                        self.last_chat_dropped_current_images_count = dropped_current_images_count
+                    break
+                except requests.HTTPError as retry_exc:
+                    if not self._should_retry_without_images(retry_exc, fallback_messages):
+                        raise
+                    last_exc = retry_exc
+                    if self._error_indicates_model_without_images(self._http_error_text(retry_exc)):
+                        self._multimodal_supported = False
+            else:
+                raise last_exc
 
         data = r.json()
-        choice = self._first_choice(data)
-        message = choice.get("message", {})
+        message = data.get("message", {})
+        finish_reason = data.get("done_reason")
+
         trace_event(
             "llm",
             "chat_response",
             payload={
                 "content": message.get("content"),
-                "thinking": message.get("reasoning"),
-                "done_reason": choice.get("finish_reason"),
+                "thinking": message.get("thinking"),
+                "done_reason": finish_reason,
             },
         )
 
@@ -179,8 +252,8 @@ class OllamaClient(LLMClient):
         )
 
         logger.info(
-            "Ollama chat request (stream=True, reasoning_effort=%r, messages=%d)",
-            payload.get("reasoning_effort"),
+            "Ollama chat request (stream=True, think=%r, messages=%d)",
+            think_value,
             len(messages),
         )
         trace_event("llm", "stream_request", payload=payload)
@@ -190,7 +263,7 @@ class OllamaClient(LLMClient):
         try:
             yield from self._stream_payload(payload, collected_content, collected_thinking)
         except requests.HTTPError as exc:
-            if not self._should_retry_stream_without_images(exc, request_messages):
+            if not self._should_retry_without_images(exc, request_messages):
                 raise
 
             response_text = self._http_error_text(exc)
@@ -203,7 +276,7 @@ class OllamaClient(LLMClient):
 
             last_exc: requests.HTTPError = exc
             for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = self._prepare_messages(fallback_messages)
+                payload["messages"] = fallback_messages
                 logger.warning(
                     "Ollama stream rejected image payload (status=%s); retrying %s.",
                     getattr(last_exc.response, "status_code", None),
@@ -227,7 +300,7 @@ class OllamaClient(LLMClient):
                         self.last_stream_dropped_current_images_count = dropped_current_images_count
                     break
                 except requests.HTTPError as retry_exc:
-                    if not self._should_retry_stream_without_images(retry_exc, fallback_messages):
+                    if not self._should_retry_without_images(retry_exc, fallback_messages):
                         raise
                     last_exc = retry_exc
                     if self._error_indicates_model_without_images(self._http_error_text(retry_exc)):
@@ -249,100 +322,98 @@ class OllamaClient(LLMClient):
             },
         )
 
+    # ------------------------------------------------------------------
+    # Private — streaming
+    # ------------------------------------------------------------------
+
     def _stream_payload(
         self,
         payload: dict,
         collected_content: list[str],
         collected_thinking: list[str],
     ) -> Iterator[str]:
+        """
+        Consume a streaming response from /api/chat (native NDJSON format).
+
+        Each line is a self-contained JSON object; there is no SSE framing.
+        Thinking tokens arrive in `message.thinking`; content in
+        `message.content`. Streaming ends when `chunk["done"]` is True.
+        """
         in_thinking_block = False
-        inline_thinking_splitter = ThinkingBlockSplitter()
 
         with self._post_stream(payload) as r:
             for line in r.iter_lines():
                 if not line:
                     continue
 
-                decoded_line = line.decode("utf-8").strip()
-                if not decoded_line or decoded_line.startswith(":"):
-                    continue
-                if not decoded_line.startswith("data:"):
-                    continue
+                chunk = json.loads(line.decode("utf-8"))
+                message = chunk.get("message", {})
+                content = message.get("content")
+                thinking = message.get("thinking")
 
-                data_payload = decoded_line[5:].strip()
-                if not data_payload:
-                    continue
-                if data_payload == "[DONE]":
-                    self._flush_stream_tail(
-                        inline_thinking_splitter,
-                        collected_content,
-                        collected_thinking,
-                        in_thinking_block,
-                    )
-                    break
-
-                chunk = json.loads(data_payload)
-                choice = self._first_choice(chunk)
-                delta = choice.get("delta", {})
-                content = delta.get("content")
-                thinking = delta.get("reasoning") or delta.get("reasoning_content")
-                inline_visible = ""
-                inline_thinking = ""
-
-                if content:
-                    inline_visible, inline_thinking = inline_thinking_splitter.push(content)
-
-                combined_thinking = "".join(
-                    part for part in (thinking, inline_thinking) if part
-                )
-
-                # 1. Handle thinking tokens.
-                if combined_thinking:
+                if thinking:
                     if not in_thinking_block:
                         yield "<think>\n"
                         in_thinking_block = True
-                    collected_thinking.append(combined_thinking)
-                    yield combined_thinking
+                    collected_thinking.append(thinking)
+                    yield thinking
 
-                # 2. Close the thinking block when content starts arriving.
-                if inline_visible and in_thinking_block:
+                if content and in_thinking_block:
                     yield "\n</think>\n\n"
                     in_thinking_block = False
 
-                # 3. Handle content tokens.
-                if inline_visible:
-                    collected_content.append(inline_visible)
-                    yield inline_visible
+                if content:
+                    collected_content.append(content)
+                    yield content
 
-                # 4. End of stream.
-                if choice.get("finish_reason") is not None:
-                    yield from self._flush_stream_tail(
-                        inline_thinking_splitter,
-                        collected_content,
-                        collected_thinking,
-                        in_thinking_block,
-                    )
-                    if choice.get("finish_reason") == "length":
+                if chunk.get("done"):
+                    if in_thinking_block:
+                        yield "\n</think>\n\n"
+                    if chunk.get("done_reason") == "length":
                         logger.warning(
-                            "Ollama stream hit the token limit (max_tokens) "
+                            "Ollama stream hit the token limit (num_predict) "
                             "before finishing — response may be truncated."
                         )
                     break
 
     # ------------------------------------------------------------------
-    # Private — request helpers
+    # Private — request builders
     # ------------------------------------------------------------------
+
+    def _build_payload(
+        self,
+        messages,
+        stream: bool,
+        think_value,
+        options: dict | None = None,
+    ) -> dict:
+        """
+        Build a request payload for the native /api/chat endpoint.
+
+        Images are passed as a list of base64 strings directly on each
+        message dict under the `images` key — exactly the format Ollama
+        expects. No content-part conversion is needed.
+        """
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "think": think_value,
+        }
+        if options:
+            payload["options"] = self._normalize_options(options)
+        return payload
 
     def _build_stream_options(self, think_value) -> dict:
         """
-        Build the chat-completions request fields for a streaming request.
+        Build the options dict for a streaming request.
 
         Applies several safety defaults on top of the instance options:
         - Applies thinking-specific overrides when thinking is active.
-        - Renames num_predict → max_tokens for the OpenAI-compatible API.
+        - Renames max_tokens → num_predict for the native API.
         - Clamps temperature to _MAX_STREAM_TEMPERATURE if it exceeds it.
         - Sets a default repeat_penalty if none is configured.
-        - Appends built-in stop sequences.
+        - Appends built-in stop sequences inside options.
         - Boosts context / prediction limits when thinking is active.
         """
         opts = self.options.copy()
@@ -351,8 +422,9 @@ class OllamaClient(LLMClient):
 
         opts = self._drop_none_options(opts)
 
-        if "num_predict" in opts and "max_tokens" not in opts:
-            opts["max_tokens"] = opts.pop("num_predict")
+        # Native endpoint uses num_predict, not max_tokens.
+        if "max_tokens" in opts and "num_predict" not in opts:
+            opts["num_predict"] = opts.pop("max_tokens")
 
         # Default repetition penalty to discourage looping.
         opts.setdefault("repeat_penalty", _DEFAULT_REPEAT_PENALTY)
@@ -372,61 +444,41 @@ class OllamaClient(LLMClient):
         # Expand context window when thinking is active.
         if think_value:
             opts["num_ctx"] = max(opts.get("num_ctx", _THINKING_MIN_CTX), _THINKING_MIN_CTX)
-            opts["max_tokens"] = max(opts.get("max_tokens", _THINKING_MIN_PREDICT), _THINKING_MIN_PREDICT)
+            opts["num_predict"] = max(
+                opts.get("num_predict", _THINKING_MIN_PREDICT), _THINKING_MIN_PREDICT
+            )
 
         return opts
 
-    def _build_payload(
-        self,
-        messages,
-        stream: bool,
-        think_value,
-        options: dict | None = None,
-    ) -> dict:
-        payload = {
-            "model": self.model,
-            "messages": self._prepare_messages(messages),
-            "stream": stream,
-            "reasoning_effort": self._reasoning_effort(think_value),
-        }
-        if options:
-            payload.update(self._normalize_request_options(options))
-        return payload
+    def _normalize_options(self, options: dict) -> dict:
+        """
+        Normalise an options dict for the native endpoint:
+        - Drop None values.
+        - Rename max_tokens → num_predict.
+        """
+        normalized = self._drop_none_options(options)
+        if "max_tokens" in normalized and "num_predict" not in normalized:
+            normalized["num_predict"] = normalized.pop("max_tokens")
+        return normalized
 
-    def _merge_options(self, base_options: dict, override_options: dict | None) -> dict:
-        merged = dict(base_options)
-        if not override_options:
-            return merged
-
-        for key, value in override_options.items():
-            if value is None:
-                merged.pop(key, None)
-                continue
-            merged[key] = value
-
-        return merged
-
-    def _drop_none_options(self, options: dict) -> dict:
-        return {
-            key: value
-            for key, value in options.items()
-            if value is not None
-        }
+    # ------------------------------------------------------------------
+    # Private — HTTP
+    # ------------------------------------------------------------------
 
     def _post_stream(self, payload: dict) -> requests.Response:
         """
-        Issue a streaming POST. Returns the raw Response used as a context
-        manager so the caller can iterate lines while the connection is open.
+        Issue a streaming POST to the native chat endpoint. Returns the raw
+        Response used as a context manager so the caller can iterate lines
+        while the connection is open.
 
         Separated from _post_with_retry because streaming responses cannot be
         retried transparently — partial output may already have been yielded.
         """
-        request_timeout = self.timeout_s
         response = self.session.post(
             self.url,
             json=payload,
             stream=True,
-            timeout=request_timeout,
+            timeout=self.timeout_s,
         )
         response.raise_for_status()
         return response
@@ -487,85 +539,111 @@ class OllamaClient(LLMClient):
             return False
         return self.thinking_level or True
 
-    def _reasoning_effort(self, think_value) -> str:
-        if not think_value:
-            return "none"
-        if isinstance(think_value, str):
-            return think_value
-        return "medium"
-
-    def _normalize_request_options(self, options: dict) -> dict:
-        normalized = self._drop_none_options(options)
-        if "num_predict" in normalized and "max_tokens" not in normalized:
-            normalized["max_tokens"] = normalized.pop("num_predict")
-        return normalized
-
-    def _prepare_messages(self, messages) -> list:
-        prepared = []
-
-        for message in messages:
-            if not isinstance(message, dict):
-                prepared.append(message)
+    def _merge_options(self, base_options: dict, override_options: dict | None) -> dict:
+        merged = dict(base_options)
+        if not override_options:
+            return merged
+        for key, value in override_options.items():
+            if value is None:
+                merged.pop(key, None)
                 continue
+            merged[key] = value
+        return merged
 
-            updated_message = dict(message)
-            images = self._message_images(updated_message)
-            if images:
-                updated_message["content"] = self._build_multimodal_content(
-                    updated_message.get("content"),
-                    images,
-                )
-                updated_message.pop("images", None)
-            prepared.append(updated_message)
+    def _drop_none_options(self, options: dict) -> dict:
+        return {key: value for key, value in options.items() if value is not None}
 
-        return prepared
+    def _is_retryable(self, exc: requests.RequestException) -> bool:
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            return True
+        if isinstance(exc, requests.HTTPError):
+            status_code = getattr(exc.response, "status_code", None)
+            return status_code is not None and status_code >= 500
+        return False
 
-    def _build_multimodal_content(self, content, images: list) -> list[dict]:
-        parts: list[dict] = []
-
-        if isinstance(content, list):
-            parts.extend(content)
-        elif content not in (None, ""):
-            parts.append({"type": "text", "text": str(content)})
-
-        for image in images:
-            if not isinstance(image, str) or not image:
-                continue
-            image_url = image if image.startswith("data:") else f"data:image/png;base64,{image}"
-            parts.append({"type": "image_url", "image_url": image_url})
-
-        return parts
-
-    def _first_choice(self, payload: dict) -> dict:
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first_choice = choices[0]
-            if isinstance(first_choice, dict):
-                return first_choice
-        return {}
-
-    def _flush_stream_tail(
+    def _resolve_image_request_retries(
         self,
-        inline_thinking_splitter: ThinkingBlockSplitter,
-        collected_content: list[str],
-        collected_thinking: list[str],
-        in_thinking_block: bool,
-    ) -> Iterator[str]:
-        final_visible, final_thinking = inline_thinking_splitter.flush()
-        if final_thinking:
-            if not in_thinking_block:
-                yield "<think>\n"
-                in_thinking_block = True
-            collected_thinking.append(final_thinking)
-            yield final_thinking
-        if final_visible and in_thinking_block:
-            yield "\n</think>\n\n"
-            in_thinking_block = False
-        if final_visible:
-            collected_content.append(final_visible)
-            yield final_visible
-        if in_thinking_block:
-            yield "\n</think>\n\n"
+        messages,
+        max_retries_override: int | None,
+    ) -> int | None:
+        if max_retries_override is not None:
+            return max_retries_override
+        if self._messages_include_images(messages):
+            return 0
+        return None
+
+    # ------------------------------------------------------------------
+    # Private — image fallback helpers
+    # ------------------------------------------------------------------
+
+    def _should_retry_without_images(
+        self,
+        exc: requests.HTTPError,
+        messages,
+    ) -> bool:
+        if not self._multimodal_supported:
+            return False
+
+        _, has_images = self._strip_images_from_messages(messages)
+        if not has_images:
+            return False
+
+        status_code = getattr(exc.response, "status_code", None)
+        if status_code is None:
+            return False
+
+        if status_code >= 500:
+            return True
+
+        if status_code not in {400, 415, 422}:
+            return False
+
+        error_text = self._http_error_text(exc)
+        if not error_text:
+            return True
+
+        image_error_markers = (
+            "image",
+            "vision",
+            "multimodal",
+            "unsupported",
+            "not support",
+            "base64",
+        )
+        return any(marker in error_text for marker in image_error_markers)
+
+    def _error_indicates_model_without_images(self, error_text: str) -> bool:
+        if not error_text:
+            return False
+
+        capability_markers = (
+            "does not support image",
+            "doesn't support image",
+            "vision is not supported",
+            "multimodal is not supported",
+            "model does not support vision",
+        )
+        return any(marker in error_text for marker in capability_markers)
+
+    def _http_error_text(self, exc: requests.HTTPError) -> str:
+        response = getattr(exc, "response", None)
+        if response is None:
+            return ""
+
+        try:
+            text = response.text
+        except Exception:
+            text = ""
+
+        if not text:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                text = str(payload.get("error") or payload.get("message") or "")
+
+        return str(text).strip().lower()
 
     def _strip_images_from_messages(self, messages) -> tuple[list, bool]:
         stripped = []
@@ -584,6 +662,89 @@ class OllamaClient(LLMClient):
             message_without_images.pop("images", None)
             stripped.append(message_without_images)
             removed_images = True
+
+        return stripped, removed_images
+
+    def _message_images(self, message: dict) -> list:
+        images = message.get("images")
+        if not isinstance(images, list):
+            return []
+        return images
+
+    def _messages_include_images(self, messages) -> bool:
+        return any(
+            isinstance(message, dict) and bool(self._message_images(message))
+            for message in messages
+        )
+
+    def _image_message_indices(self, messages) -> list[int]:
+        return [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict) and self._message_images(message)
+        ]
+
+    def _current_user_message_index_with_images(self, messages) -> int | None:
+        if not messages:
+            return None
+
+        index = len(messages) - 1
+        message = messages[index]
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and self._message_images(message)
+        ):
+            return index
+        return None
+
+    def _image_count_for_message(self, messages, message_index: int | None) -> int:
+        if message_index is None:
+            return 0
+        if message_index < 0 or message_index >= len(messages):
+            return 0
+
+        message = messages[message_index]
+        images = self._message_images(message) if isinstance(message, dict) else []
+        return len(images)
+
+    def _strip_message_images(
+        self,
+        messages,
+        message_index: int,
+        image_indexes: set[int] | None,
+    ) -> tuple[list, bool]:
+        stripped = []
+        removed_images = False
+
+        for index, message in enumerate(messages):
+            if index != message_index or not isinstance(message, dict):
+                stripped.append(message)
+                continue
+
+            images = self._message_images(message)
+            if not images:
+                stripped.append(message)
+                continue
+
+            updated_message = dict(message)
+            if image_indexes is None:
+                updated_message.pop("images", None)
+                removed_images = True
+            else:
+                remaining_images = [
+                    image
+                    for image_index, image in enumerate(images)
+                    if image_index not in image_indexes
+                ]
+                if len(remaining_images) != len(images):
+                    removed_images = True
+                if remaining_images:
+                    updated_message["images"] = remaining_images
+                else:
+                    updated_message.pop("images", None)
+
+            stripped.append(updated_message)
 
         return stripped, removed_images
 
@@ -674,163 +835,5 @@ class OllamaClient(LLMClient):
         key = json.dumps(candidate_messages, sort_keys=True)
         if key in seen_keys:
             return
-
         seen_keys.add(key)
         candidates.append((candidate_messages, strategy, dropped_current_images_count))
-
-    def _image_message_indices(self, messages) -> list[int]:
-        return [
-            index
-            for index, message in enumerate(messages)
-            if isinstance(message, dict) and self._message_images(message)
-        ]
-
-    def _current_user_message_index_with_images(self, messages) -> int | None:
-        if not messages:
-            return None
-
-        index = len(messages) - 1
-        message = messages[index]
-        if (
-            isinstance(message, dict)
-            and message.get("role") == "user"
-            and self._message_images(message)
-        ):
-            return index
-        return None
-
-    def _image_count_for_message(self, messages, message_index: int | None) -> int:
-        if message_index is None:
-            return 0
-        if message_index < 0 or message_index >= len(messages):
-            return 0
-
-        message = messages[message_index]
-        images = self._message_images(message) if isinstance(message, dict) else []
-        return len(images)
-
-    def _strip_message_images(
-        self,
-        messages,
-        message_index: int,
-        image_indexes: set[int] | None,
-    ) -> tuple[list, bool]:
-        stripped = []
-        removed_images = False
-
-        for index, message in enumerate(messages):
-            if index != message_index or not isinstance(message, dict):
-                stripped.append(message)
-                continue
-
-            images = self._message_images(message)
-            if not images:
-                stripped.append(message)
-                continue
-
-            updated_message = dict(message)
-            if image_indexes is None:
-                updated_message.pop("images", None)
-                removed_images = True
-            else:
-                remaining_images = [
-                    image
-                    for image_index, image in enumerate(images)
-                    if image_index not in image_indexes
-                ]
-                if len(remaining_images) != len(images):
-                    removed_images = True
-                if remaining_images:
-                    updated_message["images"] = remaining_images
-                else:
-                    updated_message.pop("images", None)
-
-            stripped.append(updated_message)
-
-        return stripped, removed_images
-
-    def _message_images(self, message: dict) -> list:
-        images = message.get("images")
-        if not isinstance(images, list):
-            return []
-        return images
-
-    def _should_retry_stream_without_images(
-        self,
-        exc: requests.HTTPError,
-        messages,
-    ) -> bool:
-        if not self._multimodal_supported:
-            return False
-
-        _, has_images = self._strip_images_from_messages(messages)
-        if not has_images:
-            return False
-
-        status_code = getattr(exc.response, "status_code", None)
-        if status_code is None:
-            return False
-
-        # Some Ollama backends report malformed/unsupported image payloads
-        # as 5xx instead of 4xx. If the request includes images, allow the
-        # image-stripping fallback path to try recovering.
-        if status_code >= 500:
-            return True
-
-        if status_code not in {400, 415, 422}:
-            return False
-
-        error_text = self._http_error_text(exc)
-        if not error_text:
-            return True
-
-        image_error_markers = (
-            "image",
-            "vision",
-            "multimodal",
-            "unsupported",
-            "not support",
-            "base64",
-        )
-        return any(marker in error_text for marker in image_error_markers)
-
-    def _error_indicates_model_without_images(self, error_text: str) -> bool:
-        if not error_text:
-            return False
-
-        capability_markers = (
-            "does not support image",
-            "doesn't support image",
-            "vision is not supported",
-            "multimodal is not supported",
-            "model does not support vision",
-        )
-        return any(marker in error_text for marker in capability_markers)
-
-    def _http_error_text(self, exc: requests.HTTPError) -> str:
-        response = getattr(exc, "response", None)
-        if response is None:
-            return ""
-
-        try:
-            text = response.text
-        except Exception:
-            text = ""
-
-        if not text:
-            try:
-                payload = response.json()
-            except Exception:
-                payload = None
-            if isinstance(payload, dict):
-                text = str(payload.get("error") or payload.get("message") or "")
-
-        return str(text).strip().lower()
-
-    def _is_retryable(self, exc: requests.RequestException) -> bool:
-        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-            return True
-        if isinstance(exc, requests.HTTPError):
-            status_code = getattr(exc.response, "status_code", None)
-            return status_code is not None and status_code >= 500
-        return False

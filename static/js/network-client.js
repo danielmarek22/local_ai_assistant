@@ -136,6 +136,15 @@ export class NetworkClient {
         this.ws.send(audioBlob);  // binary frame — no JSON wrapping
     }
 
+    sendVisionFrame(type, attachment) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type,
+                attachment,
+            }));
+        }
+    }
+
     sendMessage(text, options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             const attachments = Array.isArray(options.attachments)

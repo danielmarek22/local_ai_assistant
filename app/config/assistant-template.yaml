@@ -69,6 +69,13 @@ stt:
   device: cpu
   compute_type: int8
 
+vision_watchdog:
+  model: HuggingFaceTB/SmolVLM-256M-Instruct
+  device: auto
+  torch_dtype: auto
+  attn_implementation: auto
+  max_new_tokens: 8
+
 logging:
   level: INFO
   console_level: INFO

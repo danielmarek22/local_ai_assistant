@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
-from app.perception.state import ImageAttachment
+from app.perception.state import ImageAttachment, PerceptionState
 from app.storage.database import Database
 
 
@@ -289,6 +289,59 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0].name, "cat.png")
         self.assertEqual(attachments[0].mime_type, "image/png")
         self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
+
+    def test_append_recent_vision_attachments_adds_screen_and_webcam_frames(self):
+        perception = PerceptionState()
+        perception.update(
+            server_module.PerceptionKey.SCREEN_SCENE,
+            {
+                "name": "screen.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "aGVsbG8=",
+            },
+        )
+        perception.update(
+            server_module.PerceptionKey.WEBCAM_SCENE,
+            {
+                "name": "webcam.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "d29ybGQ=",
+            },
+        )
+        orchestrator = types.SimpleNamespace(perception=perception)
+        attachments = []
+
+        appended_count = server_module._append_recent_vision_attachments(
+            orchestrator,
+            attachments,
+            max_age_seconds=10.0,
+        )
+
+        self.assertEqual(appended_count, 2)
+        self.assertEqual([attachment.name for attachment in attachments], ["screen.jpg", "webcam.jpg"])
+        self.assertEqual([attachment.base64_data for attachment in attachments], ["aGVsbG8=", "d29ybGQ="])
+
+    def test_append_recent_vision_attachments_ignores_stale_frames(self):
+        perception = PerceptionState()
+        perception.update(
+            server_module.PerceptionKey.SCREEN_SCENE,
+            {
+                "name": "screen.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "aGVsbG8=",
+            },
+        )
+        orchestrator = types.SimpleNamespace(perception=perception)
+        attachments = []
+
+        appended_count = server_module._append_recent_vision_attachments(
+            orchestrator,
+            attachments,
+            max_age_seconds=-1.0,
+        )
+
+        self.assertEqual(appended_count, 0)
+        self.assertEqual(attachments, [])
 
     def test_parse_user_message_repairs_prefixed_png_clipboard_payload(self):
         broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"

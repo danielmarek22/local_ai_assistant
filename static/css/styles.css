@@ -297,6 +297,17 @@ body {
     opacity: 0.65;
 }
 
+.vision-control-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+
+.vision-toggle-btn.active {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.45);
+    color: #8fffd0;
+}
+
 .config-hotkey-btn {
     min-height: 34px;
     padding: 0 12px;
@@ -908,7 +919,20 @@ body {
     animation: pulse-recording 1.2s infinite;
 }
 
+.mic-btn.always-listening {
+    background: rgba(0, 255, 153, 0.2);
+    border-color: rgba(0, 255, 153, 0.5);
+    color: #00ff99;
+    box-shadow: 0 0 12px rgba(0, 255, 153, 0.4);
+    animation: pulse-listening 1.2s infinite;
+}
+
 @keyframes pulse-recording {
     0%, 100% { box-shadow: 0 0 12px rgba(255, 80, 80, 0.4); }
     50% { box-shadow: 0 0 20px rgba(255, 80, 80, 0.6); }
+}
+
+@keyframes pulse-listening {
+    0%, 100% { box-shadow: 0 0 12px rgba(0, 255, 153, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(0, 255, 153, 0.6); }
 }

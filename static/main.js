@@ -12,6 +12,16 @@ let currentSessionId = null;
 let assistantState = 'idle';
 let assistantExpression = 'neutral';
 let reflectionInFlight = false;
+let screenStream = null;
+let webcamStream = null;
+let visionCaptureTimer = null;
+
+const screenShareToggle = document.getElementById('screen-share-toggle');
+const webcamToggle = document.getElementById('webcam-toggle');
+const screenVideo = document.getElementById('screen-capture-video');
+const screenCanvas = document.getElementById('screen-capture-canvas');
+const webcamVideo = document.getElementById('webcam-capture-video');
+const webcamCanvas = document.getElementById('webcam-capture-canvas');
 
 function readStoredSessionContext() {
     const rawValue = sessionStorage.getItem(sessionStorageKey);
@@ -45,6 +55,9 @@ const avatarManager = new AvatarManager(
     'canvas-container',
     () => audioManager.getVisemeData()
 );
+
+// Store frames captured when STT transcript arrives; will be sent with final message
+let pendingSttAttachments = [];
 
 function syncAssistantPresentation() {
     const baseState = reflectionInFlight ? 'dreaming' : assistantState;
@@ -119,6 +132,13 @@ const handlers = {
     onSttTranscript: ({ text }) => {
         audioManager.init();
         uiManager.appendVoiceUserMessage(text);
+
+        // Capture frames at the moment STT transcript arrives (when user stopped speaking)
+        // These will be bundled with the final message when user clicks send
+        pendingSttAttachments = captureAndBundleFrames();
+        if (pendingSttAttachments.length > 0) {
+            console.log(`Captured ${pendingSttAttachments.length} frame(s) at STT transcript moment`);
+        }
     },
     // Silence detected — nothing to do in the UI, but the hook is here
     // if you want to add a visual cue later (e.g. a brief mic flash).
@@ -138,8 +158,212 @@ if (storedSessionContext?.sessionId && storedSessionContext?.serverInstanceId) {
     client.connect({ sessionMode: 'new' });
 }
 
+function isStreamActive(stream) {
+    return Boolean(stream?.getTracks().some((track) => track.readyState === 'live'));
+}
+
+function syncVisionToggle(button, isEnabled, enabledLabel, disabledLabel) {
+    if (!button) return;
+    button.textContent = isEnabled ? enabledLabel : disabledLabel;
+    button.setAttribute('aria-pressed', String(isEnabled));
+    button.classList.toggle('active', isEnabled);
+}
+
+function ensureVisionCaptureLoop() {
+    if (visionCaptureTimer) return;
+
+    visionCaptureTimer = window.setInterval(() => {
+        if (isStreamActive(screenStream)) {
+            sendVideoFrame({
+                video: screenVideo,
+                canvas: screenCanvas,
+                type: 'screen_frame',
+                name: 'screen.jpg',
+                maxLongEdge: 960,
+            });
+        }
+
+        if (isStreamActive(webcamStream)) {
+            sendVideoFrame({
+                video: webcamVideo,
+                canvas: webcamCanvas,
+                type: 'webcam_frame',
+                name: 'webcam.jpg',
+                maxLongEdge: 640,
+            });
+        }
+
+        if (!isStreamActive(screenStream) && !isStreamActive(webcamStream)) {
+            window.clearInterval(visionCaptureTimer);
+            visionCaptureTimer = null;
+        }
+    }, 1500);
+}
+
+function captureVideoFrame(video, canvas, maxLongEdge) {
+    if (!video || !canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return null;
+    }
+
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+    if (!sourceWidth || !sourceHeight) {
+        return null;
+    }
+
+    const scale = Math.min(1, maxLongEdge / Math.max(sourceWidth, sourceHeight));
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
+    const commaIndex = dataUrl.indexOf(',');
+    return commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : null;
+}
+
+function sendVideoFrame({ video, canvas, type, name, maxLongEdge }) {
+    const base64Data = captureVideoFrame(video, canvas, maxLongEdge);
+    if (!base64Data) return;
+
+    client.sendVisionFrame(type, {
+        mime_type: 'image/jpeg',
+        base64_data: base64Data,
+        name,
+    });
+}
+
+/**
+ * Synchronously capture fresh frames from active streams and bundle as attachment objects.
+ * Called when user explicitly sends a message to ensure visual context matches the exact moment.
+ * @returns {Array<{name: string, mimeType: string, data: string}>} Array of attachment objects
+ */
+function captureAndBundleFrames() {
+    const attachments = [];
+
+    try {
+        if (isStreamActive(screenStream)) {
+            const base64Data = captureVideoFrame(screenVideo, screenCanvas, 960);
+            if (base64Data) {
+                attachments.push({
+                    name: 'sync_screen.jpg',
+                    mimeType: 'image/jpeg',
+                    data: base64Data,
+                });
+            }
+        }
+
+        if (isStreamActive(webcamStream)) {
+            const base64Data = captureVideoFrame(webcamVideo, webcamCanvas, 640);
+            if (base64Data) {
+                attachments.push({
+                    name: 'sync_webcam.jpg',
+                    mimeType: 'image/jpeg',
+                    data: base64Data,
+                });
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to capture and bundle frames:', error);
+    }
+
+    return attachments;
+}
+
+function stopStream(stream) {
+    if (!stream) return;
+    stream.getTracks().forEach((track) => track.stop());
+}
+
+async function enableScreenShare() {
+    if (!navigator.mediaDevices?.getDisplayMedia || !screenVideo) return;
+
+    try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenVideo.srcObject = screenStream;
+        await screenVideo.play();
+        screenStream.getVideoTracks().forEach((track) => {
+            track.addEventListener('ended', disableScreenShare, { once: true });
+        });
+        syncVisionToggle(screenShareToggle, true, 'Disable Screen Share', 'Enable Screen Share');
+        ensureVisionCaptureLoop();
+    } catch (error) {
+        console.warn('Screen share permission was not granted:', error);
+        disableScreenShare();
+    }
+}
+
+function disableScreenShare() {
+    stopStream(screenStream);
+    screenStream = null;
+    if (screenVideo) screenVideo.srcObject = null;
+    syncVisionToggle(screenShareToggle, false, 'Disable Screen Share', 'Enable Screen Share');
+}
+
+async function enableWebcam() {
+    if (!navigator.mediaDevices?.getUserMedia || !webcamVideo) return;
+
+    try {
+        webcamStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        webcamVideo.srcObject = webcamStream;
+        await webcamVideo.play();
+        webcamStream.getVideoTracks().forEach((track) => {
+            track.addEventListener('ended', disableWebcam, { once: true });
+        });
+        syncVisionToggle(webcamToggle, true, 'Disable Webcam', 'Enable Webcam');
+        ensureVisionCaptureLoop();
+    } catch (error) {
+        console.warn('Webcam permission was not granted:', error);
+        disableWebcam();
+    }
+}
+
+function disableWebcam() {
+    stopStream(webcamStream);
+    webcamStream = null;
+    if (webcamVideo) webcamVideo.srcObject = null;
+    syncVisionToggle(webcamToggle, false, 'Disable Webcam', 'Enable Webcam');
+}
+
+screenShareToggle?.addEventListener('click', () => {
+    if (isStreamActive(screenStream)) {
+        disableScreenShare();
+    } else {
+        void enableScreenShare();
+    }
+});
+
+webcamToggle?.addEventListener('click', () => {
+    if (isStreamActive(webcamStream)) {
+        disableWebcam();
+    } else {
+        void enableWebcam();
+    }
+});
+
+window.addEventListener('beforeunload', () => {
+    disableScreenShare();
+    disableWebcam();
+});
+
 uiManager.onSend((text, options) => {
     audioManager.init();
+
+    // Capture fresh frames synchronously and bundle with user message
+    const syncFrames = captureAndBundleFrames();
+    const allAttachments = [
+        ...syncFrames,
+        ...(options.attachments || [])
+    ];
+    options.attachments = allAttachments;
+
+    // Also include any frames captured during STT transcript
+    if (pendingSttAttachments.length > 0) {
+        options.attachments = [...options.attachments, ...pendingSttAttachments];
+        pendingSttAttachments = [];
+    }
 
     uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
@@ -150,6 +374,25 @@ uiManager.onSend((text, options) => {
 // because we don't have the transcript text yet at send time.
 uiManager.onMicPress((audioBlob) => {
     console.log('onMicPress fired, blob size:', audioBlob.size, 'type:', audioBlob.type);
+
+    // Capture fresh frames and send them before audio (as separate JSON messages)
+    const syncFrames = captureAndBundleFrames();
+    syncFrames.forEach(attachment => {
+        try {
+            client.sendVisionFrame(
+                'user_attached_frame',
+                {
+                    mime_type: attachment.mimeType,
+                    base64_data: attachment.data,
+                    name: attachment.name,
+                }
+            );
+        } catch (error) {
+            console.warn('Failed to send bundled frame before audio:', error);
+        }
+    });
+
+    // Now send the audio blob as binary
     client.sendAudio(audioBlob);
 });
 
