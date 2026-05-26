@@ -11,7 +11,7 @@ from app.core.events import (
     AvatarAnimationEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.core.actions import ActionType
+from app.core.actions import Action, ActionType
 from app.core.plan import Plan
 from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
@@ -67,6 +67,7 @@ class Orchestrator:
         session_id: str,
         user_text: str,
         think_override=None,
+        instant_mode: bool = False,
         attachments: list[Attachment] | None = None,
         input_modality = InputModality.TEXT,
     ):
@@ -75,6 +76,7 @@ class Orchestrator:
             user_text=user_text,
             attachments=attachments or [],
             think_override=think_override,
+            instant_mode=instant_mode,
             input_modality=input_modality,
         )
         retrieval_text = turn_input.retrieval_text()
@@ -155,11 +157,15 @@ class Orchestrator:
             # 4. Planning (decide actions)
             # --------------------------------------------------------
             perception_snapshot = self.perception.snapshot()
-            plan = self._plan(
-                session_id=session_id,
-                user_text=retrieval_text or turn_input.user_text,
-                perception=perception_snapshot,
-            )
+            if turn_input.instant_mode:
+                logger.info("[%s] Instant mode enabled; skipping planner", session_id)
+                plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+            else:
+                plan = self._plan(
+                    session_id=session_id,
+                    user_text=retrieval_text or turn_input.user_text,
+                    perception=perception_snapshot,
+                )
 
             logger.debug(
                 "[%s] Plan actions: %s",

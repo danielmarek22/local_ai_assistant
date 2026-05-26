@@ -25,6 +25,7 @@ export class UIManager {
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
+        this.instantModeToggle = document.getElementById('instant-mode-toggle');
         this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
@@ -46,6 +47,8 @@ export class UIManager {
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
+        this.instantModeStorageKey = CONFIG.UI.STORAGE_KEYS.INSTANT_MODE;
+        this.instantModeEnabled = this.readStoredInstantMode();
         this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
@@ -629,6 +632,11 @@ export class UIManager {
             this.micHotkeyBtn.addEventListener('click', () => this.startHotkeyCapture());
         }
 
+        this.setInstantMode(this.instantModeEnabled, { persist: false });
+        this.instantModeToggle?.addEventListener('click', () => {
+            this.setInstantMode(!this.instantModeEnabled);
+        });
+
         this.setScreenCapturePolicy(this.screenCapturePolicy, { persist: false, notify: false });
         for (const button of this.screenPolicyButtons) {
             button.addEventListener('click', () => {
@@ -701,6 +709,37 @@ export class UIManager {
         }
 
         return Number(this.playbackVolumeInput.value) / 100;
+    }
+
+    readStoredInstantMode() {
+        try {
+            return localStorage.getItem(this.instantModeStorageKey) === 'true';
+        } catch (error) {
+            console.warn('Failed to restore instant mode:', error);
+            return false;
+        }
+    }
+
+    setInstantMode(isEnabled, { persist = true } = {}) {
+        this.instantModeEnabled = Boolean(isEnabled);
+
+        if (this.instantModeToggle) {
+            this.instantModeToggle.textContent = this.instantModeEnabled ? 'On' : 'Off';
+            this.instantModeToggle.classList.toggle('active', this.instantModeEnabled);
+            this.instantModeToggle.setAttribute('aria-pressed', String(this.instantModeEnabled));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.instantModeStorageKey, String(this.instantModeEnabled));
+            } catch (error) {
+                console.warn('Failed to persist instant mode:', error);
+            }
+        }
+    }
+
+    isInstantModeEnabled() {
+        return Boolean(this.instantModeEnabled);
     }
 
     normalizeScreenCapturePolicy(policy) {
@@ -1270,6 +1309,7 @@ export class UIManager {
 
             const sendOptions = {
                 reasoning: this.reasoningEnabledForNextSend,
+                instantMode: this.isInstantModeEnabled(),
                 attachments,
             };
 

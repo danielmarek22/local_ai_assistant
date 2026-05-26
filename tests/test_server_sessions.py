@@ -270,21 +270,33 @@ class ServerSessionTests(unittest.TestCase):
         self.assertNotEqual(session_id, "session-a")
 
     def test_parse_user_message_supports_structured_reasoning_override(self):
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
         )
 
         self.assertEqual(text, "hello")
         self.assertIs(reasoning, True)
+        self.assertIs(instant_mode, False)
+        self.assertEqual(attachments, [])
+
+    def test_parse_user_message_supports_instant_mode(self):
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
+            '{"type":"user_message","text":"hello","instant_mode":true}'
+        )
+
+        self.assertEqual(text, "hello")
+        self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, True)
         self.assertEqual(attachments, [])
 
     def test_parse_user_message_parses_base64_image_attachments(self):
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":5}]}'
         )
 
         self.assertEqual(text, "look")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(len(attachments), 1)
         self.assertEqual(attachments[0].name, "cat.png")
         self.assertEqual(attachments[0].mime_type, "image/png")
@@ -375,7 +387,7 @@ class ServerSessionTests(unittest.TestCase):
         broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         broken_png_b64 = base64.b64encode(broken_png).decode("ascii")
 
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"look","attachments":[{"name":"image.png","mime_type":"image/png","data":"'
             + broken_png_b64
             + '"}]}'
@@ -383,6 +395,7 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(text, "look")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(len(attachments), 1)
         decoded = base64.b64decode(attachments[0].base64_data)
         self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
@@ -394,10 +407,11 @@ class ServerSessionTests(unittest.TestCase):
             )
 
     def test_parse_user_message_keeps_plain_text_backward_compatible(self):
-        text, reasoning, attachments = server_module.parse_user_message("hello")
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message("hello")
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(attachments, [])
 
     def test_should_forward_state_holds_responding_until_audio(self):

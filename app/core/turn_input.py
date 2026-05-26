@@ -13,6 +13,7 @@ class TurnInput:
     user_text: str
     attachments: list[Attachment] = field(default_factory=list)
     think_override: bool | None = None
+    instant_mode: bool = False
     input_modality: InputModality = InputModality.TEXT
 
     def _attachment_noun(self) -> str:

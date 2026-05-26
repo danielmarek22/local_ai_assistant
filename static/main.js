@@ -416,6 +416,10 @@ uiManager.onMicPress((audioBlob, options = {}) => {
     });
     pendingVoiceAttachmentBatches.push(syncFrames);
 
+    client.sendUserConfig({
+        instantMode: uiManager.isInstantModeEnabled(),
+    });
+
     // Now send the audio blob as binary
     client.sendAudio(audioBlob);
 });

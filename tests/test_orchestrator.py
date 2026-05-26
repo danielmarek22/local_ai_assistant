@@ -209,6 +209,19 @@ class OrchestratorTests(unittest.TestCase):
         
         self.assertEqual("tool info", tool_ctx)
 
+    def test_instant_mode_skips_planner_and_responds_directly(self):
+        plan = Plan(actions=[
+            Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}),
+            Action(type=ActionType.RESPOND),
+        ])
+        orch, _llm, _history, _memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
+
+        list(orch.handle_user_input(self.SESSION_ID, "hello", instant_mode=True))
+
+        self.assertEqual(planner.calls, [])
+        self.assertEqual(tool_executor.calls, [])
+        self.assertEqual(context_builder.calls[0]["tool_context"], None)
+
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (

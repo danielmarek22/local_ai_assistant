@@ -143,17 +143,17 @@ def resolve_session_id(
     return uuid.uuid4().hex[:8]
 
 
-def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[Attachment]]:
+def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Attachment]]:
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
-        return raw_text, None, []
+        return raw_text, None, False, []
 
     if not isinstance(payload, dict):
-        return raw_text, None, []
+        return raw_text, None, False, []
 
     if payload.get("type") != "user_message":
-        return raw_text, None, []
+        return raw_text, None, False, []
 
     text = payload.get("text")
     if not isinstance(text, str):
@@ -178,7 +178,11 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, list[Attachment
     else:
         raise ValueError("User message reasoning flag must be boolean")
 
-    return text, reasoning_override, attachments
+    instant_mode = payload.get("instant_mode", False)
+    if not isinstance(instant_mode, bool):
+        raise ValueError("User message instant_mode flag must be boolean")
+
+    return text, reasoning_override, instant_mode, attachments
 
 
 @dataclass
@@ -748,6 +752,7 @@ async def websocket_endpoint(ws: WebSocket):
     last_screen_hash: str | None = None
     last_webcam_hash: str | None = None
     pending_voice_attachments: list[Attachment] = []
+    connection_instant_mode = False
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     async def handle_vision_payload(payload: dict) -> Attachment | None:
@@ -926,6 +931,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                     user_text = result.text
                     reasoning_override = None
+                    instant_mode = connection_instant_mode
                     attachments = []
                     input_modality = InputModality.VOICE
 
@@ -949,7 +955,17 @@ async def websocket_endpoint(ws: WebSocket):
                             )[-4:]
                         continue
 
-                    user_text, reasoning_override, attachments = parse_user_message(
+                    if (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "user_config"
+                    ):
+                        instant_value = parsed_payload.get("instant_mode")
+                        if not isinstance(instant_value, bool):
+                            raise ValueError("User config instant_mode flag must be boolean")
+                        connection_instant_mode = instant_value
+                        continue
+
+                    user_text, reasoning_override, instant_mode, attachments = parse_user_message(
                         text_payload
                     )
                     pending_voice_attachments = []
@@ -994,6 +1010,7 @@ async def websocket_endpoint(ws: WebSocket):
                         session_id,
                         user_text,
                         think_override=reasoning_override,
+                        instant_mode=instant_mode,
                         attachments=attachments,
                         input_modality=input_modality,
                     ),
