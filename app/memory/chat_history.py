@@ -301,7 +301,7 @@ class ChatHistoryStore:
 
         return hydrated_rows
 
-    def search_past_conversations(self, query: str, current_session: str, limit: int = 4) -> list[str]:
+    def search_past_conversations(self, query: str, current_session: str, limit: int = 4, max_distance: float = 0.55) -> list[str]:
         results = self.collection.query(
             query_texts=[query],
             n_results=limit,
@@ -318,13 +318,24 @@ class ChatHistoryStore:
             return []
 
         documents = results["documents"][0]
+        distances = results["distances"][0] if "distances" in results and results["distances"] else []
+        
+        filtered_docs = []
+
+        # STRICT FILTERING: Drop episodic memories that are too far away
+        for doc, distance in zip(documents, distances):
+            if distance <= max_distance:
+                filtered_docs.append(doc)
+            else:
+                logger.debug(f"Discarded episodic memory '{doc[:30]}...' (Distance: {distance:.3f} > {max_distance})")
+
         trace_event(
             "chat_history",
             "episodic_search",
             session_id=current_session,
-            payload={"query": query, "limit": limit, "documents": documents},
+            payload={"query": query, "limit": limit, "documents": filtered_docs},
         )
-        return documents
+        return filtered_docs
 
     def get_recent(self, session_id: str, limit: int = 10):
         cursor = self.db.conn.cursor()

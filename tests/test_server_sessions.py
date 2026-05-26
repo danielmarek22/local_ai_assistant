@@ -343,6 +343,34 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(appended_count, 0)
         self.assertEqual(attachments, [])
 
+    def test_dedupe_attachments_by_hash_keeps_first_copy(self):
+        first = server_module.attachment_from_payload({
+            "name": "screen-a.jpg",
+            "mime_type": "image/jpeg",
+            "data": "aGVsbG8=",
+        })
+        duplicate = server_module.attachment_from_payload({
+            "name": "screen-b.jpg",
+            "mime_type": "image/jpeg",
+            "data": "aGVsbG8=",
+        })
+        different = server_module.attachment_from_payload({
+            "name": "screen-c.jpg",
+            "mime_type": "image/jpeg",
+            "data": "d29ybGQ=",
+        })
+
+        deduped = server_module._dedupe_attachments_by_hash([
+            first,
+            duplicate,
+            different,
+        ])
+
+        self.assertEqual(
+            [attachment.name for attachment in deduped],
+            ["screen-a.jpg", "screen-c.jpg"],
+        )
+
     def test_parse_user_message_repairs_prefixed_png_clipboard_payload(self):
         broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         broken_png_b64 = base64.b64encode(broken_png).decode("ascii")

@@ -25,6 +25,7 @@ export class UIManager {
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
+        this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
         this.sendBtn = document.getElementById('send-btn');
@@ -45,6 +46,8 @@ export class UIManager {
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
+        this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
+        this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
 
         // STT recording state
@@ -60,6 +63,7 @@ export class UIManager {
         this._speechDetectedTime = 0;
         this._alwaysListeningSpeechCheck = null;
         this._isSendingAlwaysListeningChunk = false;
+        this._alwaysListeningVoiceContextSent = false;
 
         this.initAutoResize();
         this.initPanelControls();
@@ -171,6 +175,9 @@ export class UIManager {
 
                 // Send accumulated audio if speech was detected recently
                 const timeSinceSpeech = Date.now() - this._speechDetectedTime;
+                if (timeSinceSpeech >= 800) {
+                    this._alwaysListeningVoiceContextSent = false;
+                }
                 if (this._audioChunks.length > 0 && timeSinceSpeech < 800 && !this._isSendingAlwaysListeningChunk) {
                     this._isSendingAlwaysListeningChunk = true;
                     const blob = new Blob(this._audioChunks, {
@@ -179,7 +186,10 @@ export class UIManager {
                     this._audioChunks = [];
                     
                     if (this._onMicPressHandler) {
-                        this._onMicPressHandler(blob);
+                        this._onMicPressHandler(blob, {
+                            includeScreenContext: !this._alwaysListeningVoiceContextSent,
+                        });
+                        this._alwaysListeningVoiceContextSent = true;
                     }
                     
                     // Add a small delay to prevent rapid successive sends
@@ -232,6 +242,7 @@ export class UIManager {
 
         this._isAlwaysListening = false;
         this._audioChunks = [];
+        this._alwaysListeningVoiceContextSent = false;
         this.micBtn.classList.remove('always-listening');
         this.micBtn.setAttribute('aria-label', 'Click to enable always listening');
     }
@@ -280,7 +291,7 @@ export class UIManager {
             this._audioChunks = [];
 
             if (this._onMicPressHandler) {
-                this._onMicPressHandler(blob);
+                this._onMicPressHandler(blob, { includeScreenContext: true });
             }
         };
 
@@ -366,10 +377,10 @@ export class UIManager {
 
     // Called by main.js when stt_transcript arrives from the server,
     // so the user bubble appears before the assistant starts responding.
-    appendVoiceUserMessage(text) {
+    appendVoiceUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        const msgDiv = this.createMessageDiv('user', text, []);
+        const msgDiv = this.createMessageDiv('user', text, attachments);
         msgDiv.classList.add('from-stt');
     }
 
@@ -618,6 +629,16 @@ export class UIManager {
             this.micHotkeyBtn.addEventListener('click', () => this.startHotkeyCapture());
         }
 
+        this.setScreenCapturePolicy(this.screenCapturePolicy, { persist: false, notify: false });
+        for (const button of this.screenPolicyButtons) {
+            button.addEventListener('click', () => {
+                this.setScreenCapturePolicy(button.dataset.screenPolicy, {
+                    persist: true,
+                    notify: true,
+                });
+            });
+        }
+
         this.reflectNowBtn?.addEventListener('click', () => {
             if (this.onReflectHandler) {
                 this.onReflectHandler();
@@ -680,6 +701,57 @@ export class UIManager {
         }
 
         return Number(this.playbackVolumeInput.value) / 100;
+    }
+
+    normalizeScreenCapturePolicy(policy) {
+        return CONFIG.UI.SCREEN_CAPTURE_POLICIES.includes(policy)
+            ? policy
+            : CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+    }
+
+    readStoredScreenCapturePolicy() {
+        try {
+            const rawValue = localStorage.getItem(this.screenCapturePolicyStorageKey);
+            const policy = this.normalizeScreenCapturePolicy(rawValue);
+            if (rawValue !== null && rawValue !== policy) {
+                localStorage.removeItem(this.screenCapturePolicyStorageKey);
+            }
+            return policy;
+        } catch (error) {
+            console.warn('Failed to restore screen capture policy:', error);
+            return CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+        }
+    }
+
+    setScreenCapturePolicy(policy, { persist = true, notify = true } = {}) {
+        const nextPolicy = this.normalizeScreenCapturePolicy(policy);
+        this.screenCapturePolicy = nextPolicy;
+
+        for (const button of this.screenPolicyButtons) {
+            const isActive = button.dataset.screenPolicy === nextPolicy;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-checked', String(isActive));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.screenCapturePolicyStorageKey, nextPolicy);
+            } catch (error) {
+                console.warn('Failed to persist screen capture policy:', error);
+            }
+        }
+
+        if (notify && this.onScreenCapturePolicyChangeHandler) {
+            this.onScreenCapturePolicyChangeHandler(nextPolicy);
+        }
+    }
+
+    getScreenCapturePolicy() {
+        return this.screenCapturePolicy || CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+    }
+
+    onScreenCapturePolicyChange(callback) {
+        this.onScreenCapturePolicyChangeHandler = callback;
     }
 
     syncReasoningToggle() {

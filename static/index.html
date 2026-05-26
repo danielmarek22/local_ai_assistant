@@ -139,6 +139,10 @@
                                 <span class="config-control-title">Proactive vision</span>
                                 <span class="config-control-description">Explicitly opt in before sending local screen or webcam frames.</span>
                             </div>
+                            <div class="config-control-input screen-policy-control" role="radiogroup" aria-label="Screen capture policy">
+                                <button id="screen-policy-voice" class="config-segment-btn" type="button" role="radio" aria-checked="true" data-screen-policy="voice">Voice context</button>
+                                <button id="screen-policy-watchdog" class="config-segment-btn" type="button" role="radio" aria-checked="false" data-screen-policy="watchdog">Watchdog</button>
+                            </div>
                             <div class="config-control-input config-control-actions vision-control-actions">
                                 <button id="screen-share-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Screen Share</button>
                                 <button id="webcam-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Webcam</button>

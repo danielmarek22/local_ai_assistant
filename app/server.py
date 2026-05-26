@@ -56,6 +56,9 @@ _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
+BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
+VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
+VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -397,6 +400,21 @@ def _append_recent_vision_attachments(
     return appended_count
 
 
+def _dedupe_attachments_by_hash(attachments: list[Attachment]) -> list[Attachment]:
+    deduped: list[Attachment] = []
+    seen_hashes: set[str] = set()
+
+    for attachment in attachments:
+        attachment_hash = getattr(attachment, "sha256", None)
+        if attachment_hash:
+            if attachment_hash in seen_hashes:
+                continue
+            seen_hashes.add(attachment_hash)
+        deduped.append(attachment)
+
+    return deduped
+
+
 async def _stream_orchestrator_events(
     ws: WebSocket,
     orchestrator,
@@ -729,9 +747,10 @@ async def websocket_endpoint(ws: WebSocket):
     last_webcam_detection = 0.0
     last_screen_hash: str | None = None
     last_webcam_hash: str | None = None
+    pending_voice_attachments: list[Attachment] = []
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
-    async def handle_vision_payload(payload: dict) -> None:
+    async def handle_vision_payload(payload: dict) -> Attachment | None:
         nonlocal last_screen_detection
         nonlocal last_webcam_detection
         nonlocal last_screen_hash
@@ -744,8 +763,11 @@ async def websocket_endpoint(ws: WebSocket):
         elif frame_type == "webcam_frame":
             key = PerceptionKey.WEBCAM_SCENE
             source = "webcam"
+        elif frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
+            key = None
+            source = "voice_attachment"
         else:
-            return
+            return None
 
         attachment_payload = payload.get("attachment")
         if not isinstance(attachment_payload, dict):
@@ -766,37 +788,41 @@ async def websocket_endpoint(ws: WebSocket):
         if base64_data:
             perception_payload["base64_data"] = base64_data
 
-        orchestrator.perception.update(
-            key,
-            perception_payload,
-        )
+        if key is not None:
+            orchestrator.perception.update(
+                key,
+                perception_payload,
+            )
+
+        if frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
+            return attachment
 
         if frame_type == "screen_frame":
             if image_hash == last_screen_hash:
-                return
+                return None
             last_screen_hash = image_hash
             last_detection = last_screen_detection
             evaluate = watchdog.evaluate_screen if watchdog else None
         else:
             if image_hash == last_webcam_hash:
-                return
+                return None
             last_webcam_hash = image_hash
             last_detection = last_webcam_detection
             evaluate = watchdog.evaluate_webcam if watchdog else None
 
         now = time.monotonic()
         if now - last_detection < 5.0:
-            return
+            return None
 
         if assistant_state_tracker["state"] != AssistantState.IDLE:
-            return
+            return None
 
         if evaluate is None:
             logger.debug("[%s] Vision watchdog unavailable; stored %s perception only", connection_id, source)
-            return
+            return None
 
         if not base64_data:
-            return
+            return None
 
         if frame_type == "screen_frame":
             last_screen_detection = now
@@ -805,7 +831,7 @@ async def websocket_endpoint(ws: WebSocket):
 
         should_react = await evaluate(base64_data)
         if not should_react:
-            return
+            return None
 
         if frame_type == "screen_frame":
             event_text = (
@@ -831,6 +857,7 @@ async def websocket_endpoint(ws: WebSocket):
             original_attachment_count=1,
             state_tracker=assistant_state_tracker,
         )
+        return None
 
     try:
         while True:
@@ -853,6 +880,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if raw_message.get("bytes") is not None:
                     stt = getattr(app.state, "stt", None)
                     if stt is None:
+                        pending_voice_attachments = []
                         await _send_turn_error(ws, "STT is not available.")
                         continue
 
@@ -871,11 +899,13 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                     except Exception:
                         logger.exception("[%s] STT transcription failed", connection_id)
+                        pending_voice_attachments = []
                         await _send_turn_error(ws, "Transcription failed.")
                         continue
 
                     if not result.text.strip():
                         logger.debug("[%s] STT returned empty transcript (silence)", connection_id)
+                        pending_voice_attachments = []
                         await _send_ws_payload(ws, {"type": "stt_silence"})
                         continue
 
@@ -909,17 +939,32 @@ async def websocket_endpoint(ws: WebSocket):
 
                     if (
                         isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") in {"screen_frame", "webcam_frame"}
+                        and parsed_payload.get("type") in VISION_FRAME_TYPES
                     ):
-                        await handle_vision_payload(parsed_payload)
+                        attachment = await handle_vision_payload(parsed_payload)
+                        if attachment is not None:
+                            pending_voice_attachments.append(attachment)
+                            pending_voice_attachments = _dedupe_attachments_by_hash(
+                                pending_voice_attachments
+                            )[-4:]
                         continue
 
                     user_text, reasoning_override, attachments = parse_user_message(
                         text_payload
                     )
+                    pending_voice_attachments = []
                     input_modality = InputModality.TEXT
 
                 # ── SHARED PATH (both modalities reach here) ──────────────
+                if input_modality == InputModality.VOICE and pending_voice_attachments:
+                    attachments = _dedupe_attachments_by_hash(
+                        [
+                            *pending_voice_attachments,
+                            *attachments,
+                        ]
+                    )
+                    pending_voice_attachments = []
+
                 original_attachment_count = len(attachments)
                 vision_attachment_count = _append_recent_vision_attachments(
                     orchestrator,

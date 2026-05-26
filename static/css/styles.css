@@ -297,6 +297,38 @@ body {
     opacity: 0.65;
 }
 
+.screen-policy-control {
+    display: inline-flex;
+    width: fit-content;
+    padding: 3px;
+    gap: 2px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.config-segment-btn {
+    min-height: 30px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #b9c4cd;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.config-segment-btn.active {
+    background: rgba(0, 195, 255, 0.2);
+    color: #eefaff;
+}
+
+.config-segment-btn:hover {
+    color: #eefaff;
+}
+
 .vision-control-actions {
     flex-wrap: wrap;
     justify-content: flex-start;

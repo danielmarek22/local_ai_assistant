@@ -56,8 +56,7 @@ const avatarManager = new AvatarManager(
     () => audioManager.getVisemeData()
 );
 
-// Store frames captured when STT transcript arrives; will be sent with final message
-let pendingSttAttachments = [];
+const pendingVoiceAttachmentBatches = [];
 
 function syncAssistantPresentation() {
     const baseState = reflectionInFlight ? 'dreaming' : assistantState;
@@ -84,6 +83,10 @@ audioManager.setPlaybackHandlers({
 
 uiManager.onVolumeChange((volume) => {
     audioManager.setVolume(volume);
+});
+
+uiManager.onScreenCapturePolicyChange(() => {
+    syncVisionCaptureLoop();
 });
 
 const handlers = {
@@ -131,18 +134,14 @@ const handlers = {
     // the turn, so we render the user bubble here rather than on send.
     onSttTranscript: ({ text }) => {
         audioManager.init();
-        uiManager.appendVoiceUserMessage(text);
-
-        // Capture frames at the moment STT transcript arrives (when user stopped speaking)
-        // These will be bundled with the final message when user clicks send
-        pendingSttAttachments = captureAndBundleFrames();
-        if (pendingSttAttachments.length > 0) {
-            console.log(`Captured ${pendingSttAttachments.length} frame(s) at STT transcript moment`);
-        }
+        const attachments = pendingVoiceAttachmentBatches.shift() || [];
+        uiManager.appendVoiceUserMessage(text, attachments);
     },
     // Silence detected — nothing to do in the UI, but the hook is here
     // if you want to add a visual cue later (e.g. a brief mic flash).
-    onSttSilence: () => {},
+    onSttSilence: () => {
+        pendingVoiceAttachmentBatches.shift();
+    },
 };
 
 const client = new NetworkClient(handlers);
@@ -169,11 +168,34 @@ function syncVisionToggle(button, isEnabled, enabledLabel, disabledLabel) {
     button.classList.toggle('active', isEnabled);
 }
 
+function isScreenWatchdogPolicy() {
+    return uiManager.getScreenCapturePolicy() === 'watchdog';
+}
+
+function shouldRunVisionCaptureLoop() {
+    return isStreamActive(webcamStream) || (isStreamActive(screenStream) && isScreenWatchdogPolicy());
+}
+
+function stopVisionCaptureLoop() {
+    if (!visionCaptureTimer) return;
+
+    window.clearInterval(visionCaptureTimer);
+    visionCaptureTimer = null;
+}
+
+function syncVisionCaptureLoop() {
+    if (shouldRunVisionCaptureLoop()) {
+        ensureVisionCaptureLoop();
+    } else {
+        stopVisionCaptureLoop();
+    }
+}
+
 function ensureVisionCaptureLoop() {
     if (visionCaptureTimer) return;
 
     visionCaptureTimer = window.setInterval(() => {
-        if (isStreamActive(screenStream)) {
+        if (isStreamActive(screenStream) && isScreenWatchdogPolicy()) {
             sendVideoFrame({
                 video: screenVideo,
                 canvas: screenCanvas,
@@ -193,10 +215,7 @@ function ensureVisionCaptureLoop() {
             });
         }
 
-        if (!isStreamActive(screenStream) && !isStreamActive(webcamStream)) {
-            window.clearInterval(visionCaptureTimer);
-            visionCaptureTimer = null;
-        }
+        syncVisionCaptureLoop();
     }, 1500);
 }
 
@@ -237,14 +256,13 @@ function sendVideoFrame({ video, canvas, type, name, maxLongEdge }) {
 
 /**
  * Synchronously capture fresh frames from active streams and bundle as attachment objects.
- * Called when user explicitly sends a message to ensure visual context matches the exact moment.
  * @returns {Array<{name: string, mimeType: string, data: string}>} Array of attachment objects
  */
-function captureAndBundleFrames() {
+function captureAndBundleFrames({ includeScreen = true, includeWebcam = true } = {}) {
     const attachments = [];
 
     try {
-        if (isStreamActive(screenStream)) {
+        if (includeScreen && isStreamActive(screenStream)) {
             const base64Data = captureVideoFrame(screenVideo, screenCanvas, 960);
             if (base64Data) {
                 attachments.push({
@@ -255,7 +273,7 @@ function captureAndBundleFrames() {
             }
         }
 
-        if (isStreamActive(webcamStream)) {
+        if (includeWebcam && isStreamActive(webcamStream)) {
             const base64Data = captureVideoFrame(webcamVideo, webcamCanvas, 640);
             if (base64Data) {
                 attachments.push({
@@ -288,7 +306,7 @@ async function enableScreenShare() {
             track.addEventListener('ended', disableScreenShare, { once: true });
         });
         syncVisionToggle(screenShareToggle, true, 'Disable Screen Share', 'Enable Screen Share');
-        ensureVisionCaptureLoop();
+        syncVisionCaptureLoop();
     } catch (error) {
         console.warn('Screen share permission was not granted:', error);
         disableScreenShare();
@@ -300,6 +318,7 @@ function disableScreenShare() {
     screenStream = null;
     if (screenVideo) screenVideo.srcObject = null;
     syncVisionToggle(screenShareToggle, false, 'Disable Screen Share', 'Enable Screen Share');
+    syncVisionCaptureLoop();
 }
 
 async function enableWebcam() {
@@ -313,7 +332,7 @@ async function enableWebcam() {
             track.addEventListener('ended', disableWebcam, { once: true });
         });
         syncVisionToggle(webcamToggle, true, 'Disable Webcam', 'Enable Webcam');
-        ensureVisionCaptureLoop();
+        syncVisionCaptureLoop();
     } catch (error) {
         console.warn('Webcam permission was not granted:', error);
         disableWebcam();
@@ -325,6 +344,7 @@ function disableWebcam() {
     webcamStream = null;
     if (webcamVideo) webcamVideo.srcObject = null;
     syncVisionToggle(webcamToggle, false, 'Disable Webcam', 'Enable Webcam');
+    syncVisionCaptureLoop();
 }
 
 screenShareToggle?.addEventListener('click', () => {
@@ -351,19 +371,17 @@ window.addEventListener('beforeunload', () => {
 uiManager.onSend((text, options) => {
     audioManager.init();
 
-    // Capture fresh frames synchronously and bundle with user message
-    const syncFrames = captureAndBundleFrames();
+    // Keep screen capture policy tied to voice/watchdog routing. Webcam
+    // context keeps the existing automatic attachment behavior.
+    const syncFrames = captureAndBundleFrames({
+        includeScreen: false,
+        includeWebcam: true,
+    });
     const allAttachments = [
         ...syncFrames,
         ...(options.attachments || [])
     ];
     options.attachments = allAttachments;
-
-    // Also include any frames captured during STT transcript
-    if (pendingSttAttachments.length > 0) {
-        options.attachments = [...options.attachments, ...pendingSttAttachments];
-        pendingSttAttachments = [];
-    }
 
     uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
@@ -372,11 +390,16 @@ uiManager.onSend((text, options) => {
 // Wire mic button → binary WS frame.
 // The user bubble is rendered by onSttTranscript above, not here,
 // because we don't have the transcript text yet at send time.
-uiManager.onMicPress((audioBlob) => {
+uiManager.onMicPress((audioBlob, options = {}) => {
     console.log('onMicPress fired, blob size:', audioBlob.size, 'type:', audioBlob.type);
 
     // Capture fresh frames and send them before audio (as separate JSON messages)
-    const syncFrames = captureAndBundleFrames();
+    const includeScreenContext = options.includeScreenContext !== false;
+    const syncFrames = captureAndBundleFrames({
+        includeScreen: isScreenWatchdogPolicy() ? false : includeScreenContext,
+        includeWebcam: true,
+    });
+
     syncFrames.forEach(attachment => {
         try {
             client.sendVisionFrame(
@@ -391,6 +414,7 @@ uiManager.onMicPress((audioBlob) => {
             console.warn('Failed to send bundled frame before audio:', error);
         }
     });
+    pendingVoiceAttachmentBatches.push(syncFrames);
 
     // Now send the audio blob as binary
     client.sendAudio(audioBlob);
