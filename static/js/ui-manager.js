@@ -26,6 +26,7 @@ export class UIManager {
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
         this.instantModeToggle = document.getElementById('instant-mode-toggle');
+        this.voiceModeButtons = Array.from(document.querySelectorAll('[data-voice-mode]'));
         this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
@@ -49,6 +50,8 @@ export class UIManager {
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.instantModeStorageKey = CONFIG.UI.STORAGE_KEYS.INSTANT_MODE;
         this.instantModeEnabled = this.readStoredInstantMode();
+        this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
+        this.voiceMode = this.readStoredVoiceMode();
         this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
@@ -82,29 +85,23 @@ export class UIManager {
     // ============================================================
 
     initMicControls() {
-        if (!this.micBtn) return;
-
         if (!navigator.mediaDevices?.getUserMedia) {
             // Browser doesn't support mic access — hide the button silently.
-            this.micBtn.classList.add('hidden');
+            this.micBtn?.classList.add('hidden');
             return;
         }
 
         // Load saved hotkey or use default
         this._micHotkey = this.loadMicHotkey();
 
-        // Button click toggles always listening mode
-        this.micBtn.addEventListener('click', () => {
-            this.toggleAlwaysListening();
-        });
-
         // Hotkey controls (spacebar by default) for manual recording
         document.addEventListener('keydown', (event) => {
             if (event.key !== this._micHotkey) return;
             // Don't trigger if user is typing in the input field
             if (document.activeElement === this.userInput) return;
-            // Don't trigger if already in always listening mode or recording
-            if (this._isAlwaysListening || this._isRecording) return;
+            // Push-to-talk hotkey is disabled while automatic voice detection is active.
+            if (this.voiceMode !== 'push_to_talk') return;
+            if (this._isRecording) return;
 
             event.preventDefault();
             this.startManualRecording();
@@ -112,12 +109,13 @@ export class UIManager {
 
         document.addEventListener('keyup', (event) => {
             if (event.key !== this._micHotkey) return;
-            // Only stop if we're recording from hotkey (not in always listening mode)
-            if (this._isRecording && !this._isAlwaysListening) {
+            if (this.voiceMode === 'push_to_talk' && this._isRecording) {
                 event.preventDefault();
                 this.stopRecording();
             }
         });
+
+        void this.applyVoiceMode(this.voiceMode);
     }
 
     async toggleAlwaysListening() {
@@ -136,8 +134,8 @@ export class UIManager {
             this._alwaysListeningStream = stream;
             this._isAlwaysListening = true;
 
-            this.micBtn.classList.add('always-listening');
-            this.micBtn.setAttribute('aria-label', 'Always listening - click to stop');
+            this.micBtn?.classList.add('always-listening');
+            this.micBtn?.setAttribute('aria-label', 'Automatic voice detection is active');
 
             // Setup Web Audio API for voice activity detection
             if (!this._audioContext) {
@@ -159,6 +157,7 @@ export class UIManager {
             this._audioChunks = [];
             this._speechDetectedTime = 0;
             this._isSendingAlwaysListeningChunk = false;
+            this._alwaysListeningVoiceContextSent = false;
 
             this._mediaRecorder.ondataavailable = (e) => {
                 if (e.data.size > 0) {
@@ -246,8 +245,8 @@ export class UIManager {
         this._isAlwaysListening = false;
         this._audioChunks = [];
         this._alwaysListeningVoiceContextSent = false;
-        this.micBtn.classList.remove('always-listening');
-        this.micBtn.setAttribute('aria-label', 'Click to enable always listening');
+        this.micBtn?.classList.remove('always-listening');
+        this.micBtn?.setAttribute('aria-label', 'Voice input');
     }
 
     stopRecording() {
@@ -269,8 +268,8 @@ export class UIManager {
 
         this._audioChunks = [];
         this._isRecording = true;
-        this.micBtn.classList.add('recording');
-        this.micBtn.setAttribute('aria-label', 'Recording… release spacebar to send');
+        this.micBtn?.classList.add('recording');
+        this.micBtn?.setAttribute('aria-label', 'Recording... release hotkey to send');
 
         // Prefer webm/opus; fall back to whatever the browser supports.
         const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -285,8 +284,8 @@ export class UIManager {
         this._mediaRecorder.onstop = () => {
             stream.getTracks().forEach((t) => t.stop());
             this._isRecording = false;
-            this.micBtn.classList.remove('recording');
-            this.micBtn.setAttribute('aria-label', 'Click to enable always listening');
+            this.micBtn?.classList.remove('recording');
+            this.micBtn?.setAttribute('aria-label', 'Voice input');
 
             const blob = new Blob(this._audioChunks, {
                 type: this._mediaRecorder.mimeType || 'audio/webm',
@@ -317,6 +316,24 @@ export class UIManager {
 
     onMicHotkeyChange(callback) {
         this._onMicHotkeyChangeHandler = callback;
+    }
+
+    async applyVoiceMode(mode = this.voiceMode) {
+        if (!navigator.mediaDevices?.getUserMedia) return;
+
+        if (mode === 'automatic') {
+            if (this._isRecording) {
+                this.stopRecording();
+            }
+            if (!this._isAlwaysListening) {
+                await this.startAlwaysListening();
+            }
+            return;
+        }
+
+        if (this._isAlwaysListening) {
+            await this.stopAlwaysListening();
+        }
     }
 
     formatKeyDisplay(key) {
@@ -637,6 +654,16 @@ export class UIManager {
             this.setInstantMode(!this.instantModeEnabled);
         });
 
+        this.setVoiceMode(this.voiceMode, { persist: false, activate: false });
+        for (const button of this.voiceModeButtons) {
+            button.addEventListener('click', () => {
+                this.setVoiceMode(button.dataset.voiceMode, {
+                    persist: true,
+                    activate: true,
+                });
+            });
+        }
+
         this.setScreenCapturePolicy(this.screenCapturePolicy, { persist: false, notify: false });
         for (const button of this.screenPolicyButtons) {
             button.addEventListener('click', () => {
@@ -740,6 +767,49 @@ export class UIManager {
 
     isInstantModeEnabled() {
         return Boolean(this.instantModeEnabled);
+    }
+
+    normalizeVoiceMode(mode) {
+        return CONFIG.UI.VOICE_MODES.includes(mode)
+            ? mode
+            : CONFIG.UI.VOICE_MODE_DEFAULT;
+    }
+
+    readStoredVoiceMode() {
+        try {
+            const rawValue = localStorage.getItem(this.voiceModeStorageKey);
+            const mode = this.normalizeVoiceMode(rawValue);
+            if (rawValue !== null && rawValue !== mode) {
+                localStorage.removeItem(this.voiceModeStorageKey);
+            }
+            return mode;
+        } catch (error) {
+            console.warn('Failed to restore voice mode:', error);
+            return CONFIG.UI.VOICE_MODE_DEFAULT;
+        }
+    }
+
+    setVoiceMode(mode, { persist = true, activate = true } = {}) {
+        const nextMode = this.normalizeVoiceMode(mode);
+        this.voiceMode = nextMode;
+
+        for (const button of this.voiceModeButtons) {
+            const isActive = button.dataset.voiceMode === nextMode;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-checked', String(isActive));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.voiceModeStorageKey, nextMode);
+            } catch (error) {
+                console.warn('Failed to persist voice mode:', error);
+            }
+        }
+
+        if (activate) {
+            void this.applyVoiceMode(nextMode);
+        }
     }
 
     normalizeScreenCapturePolicy(policy) {

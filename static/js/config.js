@@ -57,8 +57,11 @@ export const CONFIG = {
             AUDIO_VOLUME: 'astra-audio-volume',
             MIC_HOTKEY: 'astra-mic-hotkey',
             SCREEN_CAPTURE_POLICY: 'astra-screen-capture-policy',
+            VOICE_MODE: 'astra-voice-mode',
             INSTANT_MODE: 'astra-instant-mode'
         },
+        VOICE_MODE_DEFAULT: 'push_to_talk',
+        VOICE_MODES: ['push_to_talk', 'automatic'],
         SCREEN_CAPTURE_POLICY_DEFAULT: 'voice',
         SCREEN_CAPTURE_POLICIES: ['voice', 'watchdog'],
         STATUS_TEXT: {

@@ -81,16 +81,6 @@
                             </button>
                         </div>
                     </div>
-                    <!-- Mic button: click to toggle always listening, or use spacebar hotkey for manual recording -->
-                    <button
-                        id="mic-btn"
-                        class="mic-btn"
-                        type="button"
-                        aria-label="Click to enable always listening"
-                        title="Click to enable always listening (or hold Spacebar for manual recording)"
-                    >
-                        🎤
-                    </button>
                     <button id="send-btn">Send</button>
                 </div>
             </section>
@@ -117,11 +107,21 @@
                         <div class="config-control">
                             <div class="config-control-copy">
                                 <span class="config-control-title">Microphone hotkey</span>
-                                <span class="config-control-description">Press a key to configure the hotkey for starting/stopping recording.</span>
+                                <span class="config-control-description">Press a key to configure push-to-talk recording.</span>
                             </div>
                             <div class="config-control-input">
                                 <button id="mic-hotkey-btn" class="config-hotkey-btn" type="button">Press any key...</button>
                                 <span id="mic-hotkey-current" class="config-hotkey-display">Space</span>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Voice detection</span>
+                                <span class="config-control-description">Choose whether voice input uses the hotkey or listens for speech automatically.</span>
+                            </div>
+                            <div class="config-control-input config-segment-control" role="radiogroup" aria-label="Voice detection mode">
+                                <button id="voice-mode-push-to-talk" class="config-segment-btn" type="button" role="radio" aria-checked="true" data-voice-mode="push_to_talk">Push-to-talk</button>
+                                <button id="voice-mode-automatic" class="config-segment-btn" type="button" role="radio" aria-checked="false" data-voice-mode="automatic">Automatic</button>
                             </div>
                         </div>
                         <div class="config-control">
@@ -148,7 +148,7 @@
                                 <span class="config-control-title">Proactive vision</span>
                                 <span class="config-control-description">Explicitly opt in before sending local screen or webcam frames.</span>
                             </div>
-                            <div class="config-control-input screen-policy-control" role="radiogroup" aria-label="Screen capture policy">
+                            <div class="config-control-input config-segment-control" role="radiogroup" aria-label="Screen capture policy">
                                 <button id="screen-policy-voice" class="config-segment-btn" type="button" role="radio" aria-checked="true" data-screen-policy="voice">Voice context</button>
                                 <button id="screen-policy-watchdog" class="config-segment-btn" type="button" role="radio" aria-checked="false" data-screen-policy="watchdog">Watchdog</button>
                             </div>

@@ -321,7 +321,7 @@ body {
     background: rgba(255, 255, 255, 0.14);
 }
 
-.screen-policy-control {
+.config-segment-control {
     display: inline-flex;
     width: fit-content;
     padding: 3px;
