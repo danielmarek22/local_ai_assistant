@@ -62,7 +62,7 @@ class MemoryStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.55) -> list[str]:
+    def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.65) -> list[str]:
         """
         True semantic search using CPU embeddings for the Orchestrator, 
         now with a strict similarity threshold.
@@ -134,10 +134,10 @@ class MemoryStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def delete_memories(self, memory_ids: list[str]):
+    def delete_memories(self, memory_ids: list[str]) -> int:
         """Deletes memories from both SQLite and the Vector DB."""
         if not memory_ids:
-            return
+            return 0
 
         # 1. Delete from SQLite
         cursor = self.db.conn.cursor()
@@ -146,8 +146,10 @@ class MemoryStore:
             f"DELETE FROM memory WHERE id IN ({placeholders})",
             memory_ids
         )
+        deleted_count = cursor.rowcount
         self.db.conn.commit()
 
         # 2. Delete from ChromaDB
         self.collection.delete(ids=memory_ids)
-        logger.info("Deleted %d stale memories", len(memory_ids))
+        logger.info("Deleted %d stale memories", deleted_count)
+        return deleted_count

@@ -33,6 +33,7 @@ class FakeCollection:
 
         return {
             "documents": [[record["document"] for record in records[:n_results]]],
+            "distances": [[record["metadata"].get("distance", 0.2) for record in records[:n_results]]],
         }
 
     def delete(self, where=None):
