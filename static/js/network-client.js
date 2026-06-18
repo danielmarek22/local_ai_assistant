@@ -147,10 +147,18 @@ export class NetworkClient {
 
     sendUserConfig(options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({
+            const payload = {
                 type: 'user_config',
                 instant_mode: Boolean(options.instantMode),
-            }));
+            };
+
+            if (Object.prototype.hasOwnProperty.call(options, 'reasoning')) {
+                payload.reasoning = options.reasoning === null
+                    ? null
+                    : Boolean(options.reasoning);
+            }
+
+            this.ws.send(JSON.stringify(payload));
         }
     }
 

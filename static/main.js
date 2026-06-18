@@ -418,6 +418,7 @@ uiManager.onMicPress((audioBlob, options = {}) => {
 
     client.sendUserConfig({
         instantMode: uiManager.isInstantModeEnabled(),
+        reasoning: uiManager.isReasoningAlwaysEnabled() ? true : null,
     });
 
     // Now send the audio blob as binary

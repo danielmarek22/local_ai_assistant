@@ -753,6 +753,7 @@ async def websocket_endpoint(ws: WebSocket):
     last_webcam_hash: str | None = None
     pending_voice_attachments: list[Attachment] = []
     connection_instant_mode = False
+    connection_reasoning_override: bool | None = None
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     async def handle_vision_payload(payload: dict) -> Attachment | None:
@@ -930,7 +931,7 @@ async def websocket_endpoint(ws: WebSocket):
                     })
 
                     user_text = result.text
-                    reasoning_override = None
+                    reasoning_override = connection_reasoning_override
                     instant_mode = connection_instant_mode
                     attachments = []
                     input_modality = InputModality.VOICE
@@ -963,6 +964,14 @@ async def websocket_endpoint(ws: WebSocket):
                         if not isinstance(instant_value, bool):
                             raise ValueError("User config instant_mode flag must be boolean")
                         connection_instant_mode = instant_value
+                        if "reasoning" in parsed_payload:
+                            reasoning_value = parsed_payload.get("reasoning")
+                            if reasoning_value is None:
+                                connection_reasoning_override = None
+                            elif isinstance(reasoning_value, bool):
+                                connection_reasoning_override = reasoning_value
+                            else:
+                                raise ValueError("User config reasoning flag must be boolean or null")
                         continue
 
                     user_text, reasoning_override, instant_mode, attachments = parse_user_message(

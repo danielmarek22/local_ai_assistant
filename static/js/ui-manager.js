@@ -26,6 +26,7 @@ export class UIManager {
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
         this.instantModeToggle = document.getElementById('instant-mode-toggle');
+        this.reasoningAlwaysToggle = document.getElementById('reasoning-always-toggle');
         this.voiceModeButtons = Array.from(document.querySelectorAll('[data-voice-mode]'));
         this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
@@ -50,6 +51,8 @@ export class UIManager {
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.instantModeStorageKey = CONFIG.UI.STORAGE_KEYS.INSTANT_MODE;
         this.instantModeEnabled = this.readStoredInstantMode();
+        this.reasoningAlwaysStorageKey = CONFIG.UI.STORAGE_KEYS.REASONING_ALWAYS_ON;
+        this.reasoningAlwaysEnabled = this.readStoredReasoningAlways();
         this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
         this.voiceMode = this.readStoredVoiceMode();
         this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
@@ -518,6 +521,8 @@ export class UIManager {
         });
 
         this.reasoningToggle.addEventListener('click', () => {
+            if (this.reasoningAlwaysEnabled) return;
+
             this.reasoningEnabledForNextSend = !this.reasoningEnabledForNextSend;
             this.syncReasoningToggle();
             this.closeComposerMenu();
@@ -654,6 +659,11 @@ export class UIManager {
             this.setInstantMode(!this.instantModeEnabled);
         });
 
+        this.setReasoningAlways(this.reasoningAlwaysEnabled, { persist: false });
+        this.reasoningAlwaysToggle?.addEventListener('click', () => {
+            this.setReasoningAlways(!this.reasoningAlwaysEnabled);
+        });
+
         this.setVoiceMode(this.voiceMode, { persist: false, activate: false });
         for (const button of this.voiceModeButtons) {
             button.addEventListener('click', () => {
@@ -769,6 +779,57 @@ export class UIManager {
         return Boolean(this.instantModeEnabled);
     }
 
+    readStoredReasoningAlways() {
+        try {
+            const storedValue = localStorage.getItem(this.reasoningAlwaysStorageKey);
+            if (storedValue === null) {
+                return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+            }
+
+            return storedValue === 'true';
+        } catch (error) {
+            console.warn('Failed to restore thinking every message setting:', error);
+            return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+        }
+    }
+
+    setReasoningAlways(isEnabled, { persist = true } = {}) {
+        this.reasoningAlwaysEnabled = Boolean(isEnabled);
+
+        if (this.reasoningAlwaysEnabled) {
+            this.reasoningEnabledForNextSend = false;
+            if (this.currentThinkingMessageDiv) {
+                this.currentThinkingMessageDiv.remove();
+                this.currentThinkingMessageDiv = null;
+                this.persistChatHistory();
+            }
+        }
+
+        if (this.reasoningAlwaysToggle) {
+            this.reasoningAlwaysToggle.textContent = this.reasoningAlwaysEnabled ? 'On' : 'Off';
+            this.reasoningAlwaysToggle.classList.toggle('active', this.reasoningAlwaysEnabled);
+            this.reasoningAlwaysToggle.setAttribute('aria-pressed', String(this.reasoningAlwaysEnabled));
+        }
+
+        this.syncReasoningToggle();
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.reasoningAlwaysStorageKey, String(this.reasoningAlwaysEnabled));
+            } catch (error) {
+                console.warn('Failed to persist thinking every message setting:', error);
+            }
+        }
+    }
+
+    isReasoningAlwaysEnabled() {
+        return Boolean(this.reasoningAlwaysEnabled);
+    }
+
+    shouldUseReasoningForSend() {
+        return this.isReasoningAlwaysEnabled() || this.reasoningEnabledForNextSend;
+    }
+
     normalizeVoiceMode(mode) {
         return CONFIG.UI.VOICE_MODES.includes(mode)
             ? mode
@@ -864,9 +925,13 @@ export class UIManager {
     }
 
     syncReasoningToggle() {
-        this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend);
-        this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend);
-        this.reasoningToggle.setAttribute('aria-checked', String(this.reasoningEnabledForNextSend));
+        const isReasoningAlwaysOn = this.isReasoningAlwaysEnabled();
+        this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend || isReasoningAlwaysOn);
+        this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend || isReasoningAlwaysOn);
+        this.reasoningToggle.classList.toggle('disabled', isReasoningAlwaysOn);
+        this.reasoningToggle.disabled = isReasoningAlwaysOn;
+        this.reasoningToggle.setAttribute('aria-disabled', String(isReasoningAlwaysOn));
+        this.reasoningToggle.setAttribute('aria-checked', String(this.reasoningEnabledForNextSend || isReasoningAlwaysOn));
     }
 
     toggleComposerMenu() {
@@ -944,6 +1009,7 @@ export class UIManager {
 
     appendToThinkingMessage(text) {
         if (!text) return;
+        if (this.isReasoningAlwaysEnabled()) return;
 
         if (!this.currentThinkingMessageDiv) this.startThinkingMessage();
         const rawText = (this.currentThinkingMessageDiv.dataset.rawText || '') + text;
@@ -1378,7 +1444,7 @@ export class UIManager {
             if (!text && attachments.length === 0) return;
 
             const sendOptions = {
-                reasoning: this.reasoningEnabledForNextSend,
+                reasoning: this.shouldUseReasoningForSend(),
                 instantMode: this.isInstantModeEnabled(),
                 attachments,
             };
