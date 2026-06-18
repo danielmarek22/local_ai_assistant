@@ -37,8 +37,8 @@ class _FakeStreamResponse(_FakeResponse):
             yield line
 
 
-def _sse_line(payload: str) -> bytes:
-    return f"data: {payload}".encode("utf-8")
+def _ndjson_line(payload: str) -> bytes:
+    return payload.encode("utf-8")
 
 
 class HttpRetryTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class HttpRetryTests(unittest.TestCase):
         post_mock.side_effect = [
             requests.Timeout("timeout"),
             _FakeResponse(
-                data={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+                data={"message": {"content": "ok"}, "done_reason": "stop"},
             ),
         ]
 
@@ -64,7 +64,7 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(post_mock.call_count, 2)
-        self.assertEqual(post_mock.call_args.kwargs["json"]["reasoning_effort"], "none")
+        self.assertEqual(post_mock.call_args.kwargs["json"]["think"], False)
 
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.Session.post")
@@ -90,9 +90,69 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(post_mock.call_count, 1)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_chat_retries_without_images_on_http_500(self, post_mock):
+        error_response = requests.Response()
+        error_response.status_code = 500
+        error_response._content = b'{"error":"internal server error"}'
+
+        post_mock.side_effect = [
+            _FakeResponse(
+                http_error=requests.HTTPError(response=error_response),
+                status_code=500,
+            ),
+            _FakeResponse(
+                data={"message": {"content": "text fallback"}, "done_reason": "stop"},
+            ),
+        ]
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            max_retries=2,
+            retry_backoff_s=0.0,
+        )
+
+        result = client.chat(
+            [{"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}],
+            think_override=False,
+        )
+
+        self.assertEqual(result, "text fallback")
+        self.assertEqual(post_mock.call_count, 2)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertNotIn("images", payload["messages"][0])
+        self.assertTrue(client.last_chat_dropped_current_images)
+        self.assertEqual(client.last_chat_dropped_current_images_count, 1)
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_chat_uses_native_endpoint_for_images(self, post_mock):
+        post_mock.return_value = _FakeResponse(
+            data={"message": {"content": "image summary"}, "done_reason": "stop"},
+        )
+
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+        )
+
+        result = client.chat(
+            [{"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}],
+            think_override=False,
+            options_override={"num_predict": 160},
+        )
+
+        self.assertEqual(result, "image summary")
+        self.assertEqual(post_mock.call_args.args[0], "http://localhost:11434/api/chat")
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["messages"][0]["images"], ["aGVsbG8="])
+        self.assertEqual(payload["messages"][0]["content"], "what is this?")
+        self.assertEqual(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], 160)
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_uses_configured_thinking_level(self, post_mock):
         post_mock.return_value = _FakeResponse(
-            data={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+            data={"message": {"content": "ok"}, "done_reason": "stop"},
         )
 
         client = OllamaClient(
@@ -104,16 +164,16 @@ class HttpRetryTests(unittest.TestCase):
 
         client.chat([{"role": "user", "content": "hello"}])
 
-        self.assertEqual(post_mock.call_args.kwargs["json"]["reasoning_effort"], "medium")
+        self.assertEqual(post_mock.call_args.kwargs["json"]["think"], "medium")
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_surfaces_thinking_when_content_is_empty(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line(
-                    '{"choices":[{"delta":{"reasoning":"Thinking Process:\\n\\n1. Hello"},"finish_reason":null}]}'
+                _ndjson_line(
+                    '{"message":{"thinking":"Thinking Process:\\n\\n1. Hello"},"done":false}'
                 ),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -130,13 +190,13 @@ class HttpRetryTests(unittest.TestCase):
         )
 
     @patch("app.llm.ollama_stream.requests.Session.post")
-    def test_ollama_stream_normalizes_inline_thinking_inside_content(self, post_mock):
+    def test_ollama_stream_passes_inline_thinking_content_through(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line(
-                    '{"choices":[{"delta":{"content":"<think>secret</think>Visible reply"},"finish_reason":null}]}'
+                _ndjson_line(
+                    '{"message":{"content":"<think>secret</think>Visible reply"},"done":false}'
                 ),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -149,17 +209,17 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(
             chunks,
-            ["<think>\n", "secret", "\n</think>\n\n", "Visible reply"],
+            ["<think>secret</think>Visible reply"],
         )
 
     @patch("app.llm.ollama_stream.requests.Session.post")
-    def test_ollama_stream_normalizes_split_inline_thinking_inside_content(self, post_mock):
+    def test_ollama_stream_passes_split_inline_thinking_content_through(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line('{"choices":[{"delta":{"content":"<thi"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{"content":"nk>secret</th"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{"content":"ink>Visible"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{"content":"<thi"},"done":false}'),
+                _ndjson_line('{"message":{"content":"nk>secret</th"},"done":false}'),
+                _ndjson_line('{"message":{"content":"ink>Visible"},"done":false}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -172,15 +232,15 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(
             chunks,
-            ["<think>\n", "secret", "\n</think>\n\n", "Visible"],
+            ["<thi", "nk>secret</th", "ink>Visible"],
         )
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_uses_configured_repeat_penalty(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line('{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{"content":"ok"},"done":false}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -193,14 +253,14 @@ class HttpRetryTests(unittest.TestCase):
         chunks = list(client.stream_chat([{"role": "user", "content": "hello"}]))
 
         self.assertEqual(chunks, ["ok"])
-        self.assertEqual(post_mock.call_args.kwargs["json"]["repeat_penalty"], 1.33)
+        self.assertEqual(post_mock.call_args.kwargs["json"]["options"]["repeat_penalty"], 1.33)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_applies_thinking_option_overrides(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line('{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{"content":"ok"},"done":false}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -224,17 +284,17 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(chunks, ["ok"])
         payload = post_mock.call_args.kwargs["json"]
-        self.assertEqual(payload["temperature"], 0.6)
-        self.assertEqual(payload["repeat_penalty"], 1.0)
-        self.assertEqual(payload["top_p"], 0.95)
-        self.assertNotIn("min_p", payload)
+        self.assertEqual(payload["options"]["temperature"], 0.6)
+        self.assertEqual(payload["options"]["repeat_penalty"], 1.0)
+        self.assertEqual(payload["options"]["top_p"], 0.95)
+        self.assertNotIn("min_p", payload["options"])
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_keeps_normal_options_when_thinking_is_disabled(self, post_mock):
         post_mock.return_value = _FakeStreamResponse(
             lines=[
-                _sse_line('{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'),
-                _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                _ndjson_line('{"message":{"content":"ok"},"done":false}'),
+                _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
             ]
         )
 
@@ -257,9 +317,9 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(chunks, ["ok"])
         payload = post_mock.call_args.kwargs["json"]
-        self.assertEqual(payload["temperature"], 1.0)
-        self.assertEqual(payload["repeat_penalty"], 1.15)
-        self.assertEqual(payload["min_p"], 0.05)
+        self.assertEqual(payload["options"]["temperature"], 1.0)
+        self.assertEqual(payload["options"]["repeat_penalty"], 1.15)
+        self.assertEqual(payload["options"]["min_p"], 0.05)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_retries_without_images_on_http_400(self, post_mock):
@@ -274,8 +334,8 @@ class HttpRetryTests(unittest.TestCase):
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    b'{"message":{"content":"ok"},"done":false}',
+                    b'{"message":{},"done":true,"done_reason":"stop"}',
                 ],
             ),
         ]
@@ -310,8 +370,8 @@ class HttpRetryTests(unittest.TestCase):
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    b'{"message":{"content":"ok"},"done":false}',
+                    b'{"message":{},"done":true,"done_reason":"stop"}',
                 ],
             ),
         ]
@@ -345,14 +405,14 @@ class HttpRetryTests(unittest.TestCase):
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"first"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    b'{"message":{"content":"first"},"done":false}',
+                    b'{"message":{},"done":true,"done_reason":"stop"}',
                 ],
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"second"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    b'{"message":{"content":"second"},"done":false}',
+                    b'{"message":{},"done":true,"done_reason":"stop"}',
                 ],
             ),
         ]
@@ -367,13 +427,9 @@ class HttpRetryTests(unittest.TestCase):
 
         self.assertEqual(post_mock.call_count, 3)
         last_messages = post_mock.call_args.kwargs["json"]["messages"]
-        self.assertEqual(
-            last_messages[0]["content"],
-            [
-                {"type": "text", "text": "again"},
-                {"type": "image_url", "image_url": "data:image/png;base64,d29ybGQ="},
-            ],
-        )
+        self.assertEqual(post_mock.call_args.args[0], "http://localhost:11434/api/chat")
+        self.assertEqual(last_messages[0]["content"], "again")
+        self.assertEqual(last_messages[0]["images"], ["d29ybGQ="])
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_disables_images_when_model_lacks_vision_support(self, post_mock):
@@ -388,14 +444,14 @@ class HttpRetryTests(unittest.TestCase):
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"first"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    b'{"message":{"content":"first"},"done":false}',
+                    b'{"message":{},"done":true,"done_reason":"stop"}',
                 ],
             ),
             _FakeStreamResponse(
                 lines=[
-                    _sse_line('{"choices":[{"delta":{"content":"second"},"finish_reason":null}]}'),
-                    _sse_line('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+                    _ndjson_line('{"message":{"content":"second"},"done":false}'),
+                    _ndjson_line('{"message":{},"done":true,"done_reason":"stop"}'),
                 ],
             ),
         ]

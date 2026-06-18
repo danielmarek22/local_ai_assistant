@@ -26,10 +26,11 @@ body {
     left: 20px;
     width: 450px;
     height: calc(100vh - 40px);
-    min-width: 280px;
-    min-height: 260px;
+    min-width: min(280px, calc(100vw - 40px));
+    min-height: min(260px, calc(100vh - 40px));
     max-width: calc(100vw - 40px);
     max-height: calc(100vh - 40px);
+    box-sizing: border-box;
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(10px);
     border-radius: 15px;
@@ -84,6 +85,7 @@ body {
 .tab-panel {
     display: none;
     flex: 1;
+    min-width: 0;
     min-height: 0;
 }
 
@@ -178,6 +180,7 @@ body {
 }
 
 .panel-section-header {
+    flex-shrink: 0;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -217,10 +220,15 @@ body {
 }
 
 .config-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     padding: 0 20px 20px;
     display: flex;
     flex-direction: column;
     gap: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: #444 transparent;
 }
 
 .config-control {
@@ -253,7 +261,9 @@ body {
 
 .config-control-input {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    min-width: 0;
     gap: 12px;
 }
 
@@ -264,6 +274,7 @@ body {
 
 .config-control-input input[type="range"] {
     flex: 1;
+    min-width: 80px;
     accent-color: #00c3ff;
 }
 
@@ -295,6 +306,79 @@ body {
 .config-action-btn:disabled {
     cursor: default;
     opacity: 0.65;
+}
+
+.config-toggle-btn {
+    min-width: 64px;
+    min-height: 34px;
+    padding: 0 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: #c8d3dc;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.config-toggle-btn.active {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.45);
+    color: #8fffd0;
+}
+
+.config-toggle-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.config-toggle-btn.active:hover {
+    background: rgba(0, 255, 153, 0.24);
+}
+
+.config-segment-control {
+    display: inline-flex;
+    width: fit-content;
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 3px;
+    gap: 2px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.config-segment-btn {
+    min-height: 30px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #b9c4cd;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.config-segment-btn.active {
+    background: rgba(0, 195, 255, 0.2);
+    color: #eefaff;
+}
+
+.config-segment-btn:hover {
+    color: #eefaff;
+}
+
+.vision-control-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+
+.vision-toggle-btn.active {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.45);
+    color: #8fffd0;
 }
 
 .config-hotkey-btn {
@@ -358,6 +442,7 @@ body {
 .history-panel,
 .config-panel {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -827,6 +912,17 @@ body {
     background: rgba(255, 255, 255, 0.08);
 }
 
+.composer-menu-item:disabled,
+.composer-menu-item.disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.composer-menu-item:disabled:hover,
+.composer-menu-item.disabled:hover {
+    background: transparent;
+}
+
 .composer-menu-item.active {
     background: rgba(0, 255, 153, 0.12);
     border-color: rgba(0, 255, 153, 0.24);
@@ -908,7 +1004,20 @@ body {
     animation: pulse-recording 1.2s infinite;
 }
 
+.mic-btn.always-listening {
+    background: rgba(0, 255, 153, 0.2);
+    border-color: rgba(0, 255, 153, 0.5);
+    color: #00ff99;
+    box-shadow: 0 0 12px rgba(0, 255, 153, 0.4);
+    animation: pulse-listening 1.2s infinite;
+}
+
 @keyframes pulse-recording {
     0%, 100% { box-shadow: 0 0 12px rgba(255, 80, 80, 0.4); }
     50% { box-shadow: 0 0 20px rgba(255, 80, 80, 0.6); }
+}
+
+@keyframes pulse-listening {
+    0%, 100% { box-shadow: 0 0 12px rgba(0, 255, 153, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(0, 255, 153, 0.6); }
 }

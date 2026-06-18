@@ -81,16 +81,6 @@
                             </button>
                         </div>
                     </div>
-                    <!-- Mic button: hold to record, release to send -->
-                    <button
-                        id="mic-btn"
-                        class="mic-btn"
-                        type="button"
-                        aria-label="Hold to speak"
-                        title="Hold to speak"
-                    >
-                        🎤
-                    </button>
                     <button id="send-btn">Send</button>
                 </div>
             </section>
@@ -117,11 +107,39 @@
                         <div class="config-control">
                             <div class="config-control-copy">
                                 <span class="config-control-title">Microphone hotkey</span>
-                                <span class="config-control-description">Press a key to configure the hotkey for starting/stopping recording.</span>
+                                <span class="config-control-description">Press a key to configure push-to-talk recording.</span>
                             </div>
                             <div class="config-control-input">
                                 <button id="mic-hotkey-btn" class="config-hotkey-btn" type="button">Press any key...</button>
                                 <span id="mic-hotkey-current" class="config-hotkey-display">Space</span>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Voice detection</span>
+                                <span class="config-control-description">Choose whether voice input uses the hotkey or listens for speech automatically.</span>
+                            </div>
+                            <div class="config-control-input config-segment-control" role="radiogroup" aria-label="Voice detection mode">
+                                <button id="voice-mode-push-to-talk" class="config-segment-btn" type="button" role="radio" aria-checked="true" data-voice-mode="push_to_talk">Push-to-talk</button>
+                                <button id="voice-mode-automatic" class="config-segment-btn" type="button" role="radio" aria-checked="false" data-voice-mode="automatic">Automatic</button>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Instant mode</span>
+                                <span class="config-control-description">Skip planning and always answer directly.</span>
+                            </div>
+                            <div class="config-control-input config-control-actions">
+                                <button id="instant-mode-toggle" class="config-toggle-btn" type="button" aria-pressed="false">Off</button>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Thinking every message</span>
+                                <span class="config-control-description">Enable reasoning automatically and hide streamed thinking bubbles.</span>
+                            </div>
+                            <div class="config-control-input config-control-actions">
+                                <button id="reasoning-always-toggle" class="config-toggle-btn" type="button" aria-pressed="false">Off</button>
                             </div>
                         </div>
                         <div class="config-control">
@@ -132,6 +150,20 @@
                             <div class="config-control-input config-control-actions">
                                 <button id="reflect-now-btn" class="config-action-btn" type="button">Run Reflection</button>
                                 <span id="reflect-status" class="config-inline-status hidden" aria-live="polite"></span>
+                            </div>
+                        </div>
+                        <div class="config-control">
+                            <div class="config-control-copy">
+                                <span class="config-control-title">Proactive vision</span>
+                                <span class="config-control-description">Explicitly opt in before sending local screen or webcam frames.</span>
+                            </div>
+                            <div class="config-control-input config-segment-control" role="radiogroup" aria-label="Screen capture policy">
+                                <button id="screen-policy-voice" class="config-segment-btn" type="button" role="radio" aria-checked="true" data-screen-policy="voice">Voice context</button>
+                                <button id="screen-policy-watchdog" class="config-segment-btn" type="button" role="radio" aria-checked="false" data-screen-policy="watchdog">Watchdog</button>
+                            </div>
+                            <div class="config-control-input config-control-actions vision-control-actions">
+                                <button id="screen-share-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Screen Share</button>
+                                <button id="webcam-toggle" class="config-action-btn vision-toggle-btn" type="button" aria-pressed="false">Enable Webcam</button>
                             </div>
                         </div>
                     </div>
@@ -158,6 +190,11 @@
     </div>
 
     <button id="chat-open-btn" class="chat-open-btn" type="button" aria-label="Open chat panel">Chat</button>
+
+    <video id="screen-capture-video" class="hidden" autoplay muted playsinline></video>
+    <canvas id="screen-capture-canvas" class="hidden"></canvas>
+    <video id="webcam-capture-video" class="hidden" autoplay muted playsinline></video>
+    <canvas id="webcam-capture-canvas" class="hidden"></canvas>
 
     <script type="module" src="/static/main.js"></script>
 </body>

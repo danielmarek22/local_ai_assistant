@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
-from app.perception.state import ImageAttachment
+from app.perception.state import ImageAttachment, PerceptionState
 from app.storage.database import Database
 
 
@@ -270,31 +270,124 @@ class ServerSessionTests(unittest.TestCase):
         self.assertNotEqual(session_id, "session-a")
 
     def test_parse_user_message_supports_structured_reasoning_override(self):
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
         )
 
         self.assertEqual(text, "hello")
         self.assertIs(reasoning, True)
+        self.assertIs(instant_mode, False)
+        self.assertEqual(attachments, [])
+
+    def test_parse_user_message_supports_instant_mode(self):
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
+            '{"type":"user_message","text":"hello","instant_mode":true}'
+        )
+
+        self.assertEqual(text, "hello")
+        self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, True)
         self.assertEqual(attachments, [])
 
     def test_parse_user_message_parses_base64_image_attachments(self):
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":5}]}'
         )
 
         self.assertEqual(text, "look")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(len(attachments), 1)
         self.assertEqual(attachments[0].name, "cat.png")
         self.assertEqual(attachments[0].mime_type, "image/png")
         self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
 
+    def test_append_recent_vision_attachments_adds_screen_and_webcam_frames(self):
+        perception = PerceptionState()
+        perception.update(
+            server_module.PerceptionKey.SCREEN_SCENE,
+            {
+                "name": "screen.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "aGVsbG8=",
+            },
+        )
+        perception.update(
+            server_module.PerceptionKey.WEBCAM_SCENE,
+            {
+                "name": "webcam.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "d29ybGQ=",
+            },
+        )
+        orchestrator = types.SimpleNamespace(perception=perception)
+        attachments = []
+
+        appended_count = server_module._append_recent_vision_attachments(
+            orchestrator,
+            attachments,
+            max_age_seconds=10.0,
+        )
+
+        self.assertEqual(appended_count, 2)
+        self.assertEqual([attachment.name for attachment in attachments], ["screen.jpg", "webcam.jpg"])
+        self.assertEqual([attachment.base64_data for attachment in attachments], ["aGVsbG8=", "d29ybGQ="])
+
+    def test_append_recent_vision_attachments_ignores_stale_frames(self):
+        perception = PerceptionState()
+        perception.update(
+            server_module.PerceptionKey.SCREEN_SCENE,
+            {
+                "name": "screen.jpg",
+                "mime_type": "image/jpeg",
+                "base64_data": "aGVsbG8=",
+            },
+        )
+        orchestrator = types.SimpleNamespace(perception=perception)
+        attachments = []
+
+        appended_count = server_module._append_recent_vision_attachments(
+            orchestrator,
+            attachments,
+            max_age_seconds=-1.0,
+        )
+
+        self.assertEqual(appended_count, 0)
+        self.assertEqual(attachments, [])
+
+    def test_dedupe_attachments_by_hash_keeps_first_copy(self):
+        first = server_module.attachment_from_payload({
+            "name": "screen-a.jpg",
+            "mime_type": "image/jpeg",
+            "data": "aGVsbG8=",
+        })
+        duplicate = server_module.attachment_from_payload({
+            "name": "screen-b.jpg",
+            "mime_type": "image/jpeg",
+            "data": "aGVsbG8=",
+        })
+        different = server_module.attachment_from_payload({
+            "name": "screen-c.jpg",
+            "mime_type": "image/jpeg",
+            "data": "d29ybGQ=",
+        })
+
+        deduped = server_module._dedupe_attachments_by_hash([
+            first,
+            duplicate,
+            different,
+        ])
+
+        self.assertEqual(
+            [attachment.name for attachment in deduped],
+            ["screen-a.jpg", "screen-c.jpg"],
+        )
+
     def test_parse_user_message_repairs_prefixed_png_clipboard_payload(self):
         broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         broken_png_b64 = base64.b64encode(broken_png).decode("ascii")
 
-        text, reasoning, attachments = server_module.parse_user_message(
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"look","attachments":[{"name":"image.png","mime_type":"image/png","data":"'
             + broken_png_b64
             + '"}]}'
@@ -302,6 +395,7 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(text, "look")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(len(attachments), 1)
         decoded = base64.b64decode(attachments[0].base64_data)
         self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
@@ -313,10 +407,11 @@ class ServerSessionTests(unittest.TestCase):
             )
 
     def test_parse_user_message_keeps_plain_text_backward_compatible(self):
-        text, reasoning, attachments = server_module.parse_user_message("hello")
+        text, reasoning, instant_mode, attachments = server_module.parse_user_message("hello")
 
         self.assertEqual(text, "hello")
         self.assertIsNone(reasoning)
+        self.assertIs(instant_mode, False)
         self.assertEqual(attachments, [])
 
     def test_should_forward_state_holds_responding_until_audio(self):

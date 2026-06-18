@@ -136,6 +136,32 @@ export class NetworkClient {
         this.ws.send(audioBlob);  // binary frame — no JSON wrapping
     }
 
+    sendVisionFrame(type, attachment) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type,
+                attachment,
+            }));
+        }
+    }
+
+    sendUserConfig(options = {}) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const payload = {
+                type: 'user_config',
+                instant_mode: Boolean(options.instantMode),
+            };
+
+            if (Object.prototype.hasOwnProperty.call(options, 'reasoning')) {
+                payload.reasoning = options.reasoning === null
+                    ? null
+                    : Boolean(options.reasoning);
+            }
+
+            this.ws.send(JSON.stringify(payload));
+        }
+    }
+
     sendMessage(text, options = {}) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             const attachments = Array.isArray(options.attachments)
@@ -160,6 +186,7 @@ export class NetworkClient {
                 type: 'user_message',
                 text,
                 reasoning: Boolean(options.reasoning),
+                instant_mode: Boolean(options.instantMode),
                 attachments,
             }));
         } else {

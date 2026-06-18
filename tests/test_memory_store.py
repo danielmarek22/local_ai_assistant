@@ -7,29 +7,33 @@ class FakeCollection:
     def __init__(self):
         self.ids = []
         self.docs = []
+        self.distances = []
         self.deleted_ids = []
 
     def add(self, ids, documents, metadatas):
         self.ids.extend(ids)
         self.docs.extend(documents)
+        self.distances.extend(metadata.get("distance", 0.2) for metadata in metadatas)
 
     def query(self, query_texts, n_results, where=None):
         # Fake search behavior: return everything we have up to n_results
         return {
             "ids": [self.ids[:n_results]] if self.ids else [[]],
             "documents": [self.docs[:n_results]] if self.docs else [[]],
+            "distances": [self.distances[:n_results]] if self.distances else [[]],
         }
 
     def delete(self, ids=None, where=None):
         if ids:
             self.deleted_ids.extend(ids)
-            filtered_pairs = [
-                (mem_id, doc)
-                for mem_id, doc in zip(self.ids, self.docs)
+            filtered_records = [
+                (mem_id, doc, distance)
+                for mem_id, doc, distance in zip(self.ids, self.docs, self.distances)
                 if mem_id not in ids
             ]
-            self.ids = [pair[0] for pair in filtered_pairs]
-            self.docs = [pair[1] for pair in filtered_pairs]
+            self.ids = [record[0] for record in filtered_records]
+            self.docs = [record[1] for record in filtered_records]
+            self.distances = [record[2] for record in filtered_records]
 
 
 class FakeVectorStore:
@@ -62,11 +66,20 @@ class MemoryStoreTests(unittest.TestCase):
         self.store.add("Memory A")
         self.store.add("Memory B")
 
-        # Our fake collection just returns what it has
+        # Our fake collection returns hits with distances under the threshold.
         results = self.store.get_relevant("find A", limit=2)
         
         self.assertEqual(len(results), 2)
         self.assertIn("Memory A", results)
+
+    def test_get_relevant_filters_vectordb_results_by_distance(self):
+        self.store.add("Relevant memory")
+        self.store.add("Distant memory")
+        self.vector_store.semantic_collection.distances = [0.2, 0.9]
+
+        results = self.store.get_relevant("find relevant", limit=2, max_distance=0.65)
+
+        self.assertEqual(results, ["Relevant memory"])
 
     def test_get_stale_with_zero_days_returns_all_memories(self):
         self.store.add("Memory A", category="general", importance=1)

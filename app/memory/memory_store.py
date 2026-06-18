@@ -62,9 +62,10 @@ class MemoryStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_relevant(self, query: str, limit: int = 3) -> list[str]:
+    def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.65) -> list[str]:
         """
-        True semantic search using CPU embeddings for the Orchestrator.
+        True semantic search using CPU embeddings for the Orchestrator, 
+        now with a strict similarity threshold.
         """
         results = self.collection.query(
             query_texts=[query],
@@ -73,26 +74,32 @@ class MemoryStore:
         
         if not results["documents"] or not results["documents"][0]:
             logger.debug("Semantic memory search returned no results")
-            trace_event(
-                "memory_store",
-                "semantic_query_result",
-                payload={"query": query, "limit": limit, "documents": []},
-            )
             return []
 
         retrieved_ids = results["ids"][0]
         documents = results["documents"][0]
+        distances = results["distances"][0] if "distances" in results and results["distances"] else []
 
-        # Bump the access timestamp in SQLite for the memories we just pulled
-        if retrieved_ids:
-            self._touch_memories(retrieved_ids)
+        filtered_docs = []
+        filtered_ids = []
+
+        # STRICT FILTERING: Drop anything with a distance > 0.55
+        for doc_id, doc, distance in zip(retrieved_ids, documents, distances):
+            if distance <= max_distance:
+                filtered_docs.append(doc)
+                filtered_ids.append(doc_id)
+            else:
+                logger.debug(f"Discarded memory '{doc[:30]}...' (Distance: {distance:.3f} > {max_distance})")
+
+        if filtered_ids:
+            self._touch_memories(filtered_ids)
 
         trace_event(
             "memory_store",
             "semantic_query_result",
-            payload={"query": query, "limit": limit, "documents": documents},
+            payload={"query": query, "limit": limit, "documents": filtered_docs},
         )
-        return documents
+        return filtered_docs
 
     def _touch_memories(self, memory_ids: list[str]):
         """Helper to update the last_accessed_at timestamp."""
@@ -115,56 +122,34 @@ class MemoryStore:
         logger.debug("Updated last_accessed_at for %d memories", len(memory_ids))
 
     def get_stale(self, days_old: int = 14) -> list[dict]:
-        """
-        Return memories whose last access timestamp is older than `days_old`.
-        A value of 0 means return all memories.
-        """
-        if days_old < 0:
-            raise ValueError("days_old must be >= 0")
-
+        """Fetches memories that haven't been accessed in X days."""
         cursor = self.db.conn.cursor()
-        if days_old == 0:
-            cursor.execute(
-                """
-                SELECT id, category, content, importance, created_at, last_accessed_at
-                FROM memory
-                ORDER BY last_accessed_at ASC
-                """
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, category, content, importance, created_at, last_accessed_at
-                FROM memory
-                WHERE last_accessed_at <= datetime('now', ?)
-                ORDER BY last_accessed_at ASC
-                """,
-                (f"-{days_old} days",),
-            )
-
+        # Using SQLite's built-in date math
+        cursor.execute(
+            f"""
+            SELECT id, category, content, importance, created_at, last_accessed_at
+            FROM memory
+            WHERE last_accessed_at <= datetime('now', '-{days_old} days')
+            """
+        )
         return [dict(row) for row in cursor.fetchall()]
 
     def delete_memories(self, memory_ids: list[str]) -> int:
-        """
-        Delete memories from SQLite and the semantic vector collection.
-        Returns the number of removed SQLite rows.
-        """
+        """Deletes memories from both SQLite and the Vector DB."""
         if not memory_ids:
             return 0
 
+        # 1. Delete from SQLite
         cursor = self.db.conn.cursor()
         placeholders = ",".join(["?"] * len(memory_ids))
         cursor.execute(
             f"DELETE FROM memory WHERE id IN ({placeholders})",
-            memory_ids,
+            memory_ids
         )
-        deleted_rows = cursor.rowcount or 0
+        deleted_count = cursor.rowcount
         self.db.conn.commit()
 
-        try:
-            self.collection.delete(ids=memory_ids)
-        except Exception:
-            logger.exception("Failed deleting %d memories from vector store", len(memory_ids))
-
-        logger.info("Deleted %d memories", deleted_rows)
-        return deleted_rows
+        # 2. Delete from ChromaDB
+        self.collection.delete(ids=memory_ids)
+        logger.info("Deleted %d stale memories", deleted_count)
+        return deleted_count

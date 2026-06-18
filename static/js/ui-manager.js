@@ -25,6 +25,10 @@ export class UIManager {
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
+        this.instantModeToggle = document.getElementById('instant-mode-toggle');
+        this.reasoningAlwaysToggle = document.getElementById('reasoning-always-toggle');
+        this.voiceModeButtons = Array.from(document.querySelectorAll('[data-voice-mode]'));
+        this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
         this.sendBtn = document.getElementById('send-btn');
@@ -45,14 +49,30 @@ export class UIManager {
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
+        this.instantModeStorageKey = CONFIG.UI.STORAGE_KEYS.INSTANT_MODE;
+        this.instantModeEnabled = this.readStoredInstantMode();
+        this.reasoningAlwaysStorageKey = CONFIG.UI.STORAGE_KEYS.REASONING_ALWAYS_ON;
+        this.reasoningAlwaysEnabled = this.readStoredReasoningAlways();
+        this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
+        this.voiceMode = this.readStoredVoiceMode();
+        this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
+        this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
 
         // STT recording state
         this._mediaRecorder = null;
         this._audioChunks = [];
         this._isRecording = false;
+        this._isAlwaysListening = false;
         this._onMicPressHandler = null;
         this._micHotkey = this.loadMicHotkey();
+        this._alwaysListeningStream = null;
+        this._audioContext = null;
+        this._alwaysListeningAnalyser = null;
+        this._speechDetectedTime = 0;
+        this._alwaysListeningSpeechCheck = null;
+        this._isSendingAlwaysListeningChunk = false;
+        this._alwaysListeningVoiceContextSent = false;
 
         this.initAutoResize();
         this.initPanelControls();
@@ -68,49 +88,177 @@ export class UIManager {
     // ============================================================
 
     initMicControls() {
-        if (!this.micBtn) return;
-
         if (!navigator.mediaDevices?.getUserMedia) {
             // Browser doesn't support mic access — hide the button silently.
-            this.micBtn.classList.add('hidden');
+            this.micBtn?.classList.add('hidden');
             return;
         }
 
         // Load saved hotkey or use default
         this._micHotkey = this.loadMicHotkey();
 
-        // Hold to record, release to send (pointer controls).
-        this.micBtn.addEventListener('pointerdown', (event) => {
-            event.preventDefault();
-            this.startRecording();
-        });
-
-        // Release on pointerup or pointerleave so a drag-off also stops recording.
-        const stopRecording = () => this.stopRecording();
-        this.micBtn.addEventListener('pointerup', stopRecording);
-        this.micBtn.addEventListener('pointerleave', stopRecording);
-
-        // Hotkey controls (spacebar by default).
+        // Hotkey controls (spacebar by default) for manual recording
         document.addEventListener('keydown', (event) => {
             if (event.key !== this._micHotkey) return;
             // Don't trigger if user is typing in the input field
             if (document.activeElement === this.userInput) return;
+            // Push-to-talk hotkey is disabled while automatic voice detection is active.
+            if (this.voiceMode !== 'push_to_talk') return;
             if (this._isRecording) return;
 
             event.preventDefault();
-            this.startRecording();
+            this.startManualRecording();
         });
 
         document.addEventListener('keyup', (event) => {
             if (event.key !== this._micHotkey) return;
-            if (this._isRecording) {
+            if (this.voiceMode === 'push_to_talk' && this._isRecording) {
                 event.preventDefault();
                 this.stopRecording();
             }
         });
+
+        void this.applyVoiceMode(this.voiceMode);
     }
 
-    async startRecording() {
+    async toggleAlwaysListening() {
+        if (this._isAlwaysListening) {
+            // Disable always listening
+            await this.stopAlwaysListening();
+        } else {
+            // Enable always listening
+            await this.startAlwaysListening();
+        }
+    }
+
+    async startAlwaysListening() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            this._alwaysListeningStream = stream;
+            this._isAlwaysListening = true;
+
+            this.micBtn?.classList.add('always-listening');
+            this.micBtn?.setAttribute('aria-label', 'Automatic voice detection is active');
+
+            // Setup Web Audio API for voice activity detection
+            if (!this._audioContext) {
+                this._audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            const audioContext = this._audioContext;
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 2048;
+            source.connect(analyser);
+
+            this._alwaysListeningAnalyser = analyser;
+
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : '';
+
+            this._mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+            this._audioChunks = [];
+            this._speechDetectedTime = 0;
+            this._isSendingAlwaysListeningChunk = false;
+            this._alwaysListeningVoiceContextSent = false;
+
+            this._mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) {
+                    this._audioChunks.push(e.data);
+                }
+            };
+
+            // Check for speech activity every 100ms and send accumulated audio if speech detected
+            this._alwaysListeningSpeechCheck = setInterval(() => {
+                if (!this._isAlwaysListening) return;
+
+                const hasSpeech = this.detectSpeechActivity(analyser);
+                
+                if (hasSpeech) {
+                    this._speechDetectedTime = Date.now();
+                }
+
+                // Send accumulated audio if speech was detected recently
+                const timeSinceSpeech = Date.now() - this._speechDetectedTime;
+                if (timeSinceSpeech >= 800) {
+                    this._alwaysListeningVoiceContextSent = false;
+                }
+                if (this._audioChunks.length > 0 && timeSinceSpeech < 800 && !this._isSendingAlwaysListeningChunk) {
+                    this._isSendingAlwaysListeningChunk = true;
+                    const blob = new Blob(this._audioChunks, {
+                        type: this._mediaRecorder.mimeType || 'audio/webm',
+                    });
+                    this._audioChunks = [];
+                    
+                    if (this._onMicPressHandler) {
+                        this._onMicPressHandler(blob, {
+                            includeScreenContext: !this._alwaysListeningVoiceContextSent,
+                        });
+                        this._alwaysListeningVoiceContextSent = true;
+                    }
+                    
+                    // Add a small delay to prevent rapid successive sends
+                    setTimeout(() => {
+                        this._isSendingAlwaysListeningChunk = false;
+                    }, 300);
+                }
+            }, 100);
+
+            this._mediaRecorder.start(100); // Collect audio every 100ms
+        } catch (err) {
+            console.warn('Microphone access denied:', err);
+            this._isAlwaysListening = false;
+        }
+    }
+
+    detectSpeechActivity(analyser) {
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(dataArray);
+
+        // Calculate average energy across frequency bins
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+
+        // Consider speech detected if average frequency energy > 30
+        // (threshold can be adjusted based on testing)
+        return average > 30;
+    }
+
+    async stopAlwaysListening() {
+        if (this._alwaysListeningSpeechCheck) {
+            clearInterval(this._alwaysListeningSpeechCheck);
+            this._alwaysListeningSpeechCheck = null;
+        }
+
+        if (this._mediaRecorder) {
+            this._mediaRecorder.stop();
+            this._mediaRecorder = null;
+        }
+
+        if (this._alwaysListeningStream) {
+            this._alwaysListeningStream.getTracks().forEach((t) => t.stop());
+            this._alwaysListeningStream = null;
+        }
+
+        this._alwaysListeningAnalyser = null;
+
+        this._isAlwaysListening = false;
+        this._audioChunks = [];
+        this._alwaysListeningVoiceContextSent = false;
+        this.micBtn?.classList.remove('always-listening');
+        this.micBtn?.setAttribute('aria-label', 'Voice input');
+    }
+
+    stopRecording() {
+        if (this._mediaRecorder && this._isRecording) {
+            this._mediaRecorder.stop();
+        }
+    }
+
+    async startManualRecording() {
         if (this._isRecording) return;
 
         let stream;
@@ -123,8 +271,8 @@ export class UIManager {
 
         this._audioChunks = [];
         this._isRecording = true;
-        this.micBtn.classList.add('recording');
-        this.micBtn.setAttribute('aria-label', 'Recording… release to send');
+        this.micBtn?.classList.add('recording');
+        this.micBtn?.setAttribute('aria-label', 'Recording... release hotkey to send');
 
         // Prefer webm/opus; fall back to whatever the browser supports.
         const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -139,8 +287,8 @@ export class UIManager {
         this._mediaRecorder.onstop = () => {
             stream.getTracks().forEach((t) => t.stop());
             this._isRecording = false;
-            this.micBtn.classList.remove('recording');
-            this.micBtn.setAttribute('aria-label', 'Hold to speak');
+            this.micBtn?.classList.remove('recording');
+            this.micBtn?.setAttribute('aria-label', 'Voice input');
 
             const blob = new Blob(this._audioChunks, {
                 type: this._mediaRecorder.mimeType || 'audio/webm',
@@ -148,17 +296,11 @@ export class UIManager {
             this._audioChunks = [];
 
             if (this._onMicPressHandler) {
-                this._onMicPressHandler(blob);
+                this._onMicPressHandler(blob, { includeScreenContext: true });
             }
         };
 
         this._mediaRecorder.start();
-    }
-
-    stopRecording() {
-        if (this._mediaRecorder && this._isRecording) {
-            this._mediaRecorder.stop();
-        }
     }
 
     loadMicHotkey() {
@@ -177,6 +319,24 @@ export class UIManager {
 
     onMicHotkeyChange(callback) {
         this._onMicHotkeyChangeHandler = callback;
+    }
+
+    async applyVoiceMode(mode = this.voiceMode) {
+        if (!navigator.mediaDevices?.getUserMedia) return;
+
+        if (mode === 'automatic') {
+            if (this._isRecording) {
+                this.stopRecording();
+            }
+            if (!this._isAlwaysListening) {
+                await this.startAlwaysListening();
+            }
+            return;
+        }
+
+        if (this._isAlwaysListening) {
+            await this.stopAlwaysListening();
+        }
     }
 
     formatKeyDisplay(key) {
@@ -240,10 +400,10 @@ export class UIManager {
 
     // Called by main.js when stt_transcript arrives from the server,
     // so the user bubble appears before the assistant starts responding.
-    appendVoiceUserMessage(text) {
+    appendVoiceUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        const msgDiv = this.createMessageDiv('user', text, []);
+        const msgDiv = this.createMessageDiv('user', text, attachments);
         msgDiv.classList.add('from-stt');
     }
 
@@ -361,6 +521,8 @@ export class UIManager {
         });
 
         this.reasoningToggle.addEventListener('click', () => {
+            if (this.reasoningAlwaysEnabled) return;
+
             this.reasoningEnabledForNextSend = !this.reasoningEnabledForNextSend;
             this.syncReasoningToggle();
             this.closeComposerMenu();
@@ -492,6 +654,36 @@ export class UIManager {
             this.micHotkeyBtn.addEventListener('click', () => this.startHotkeyCapture());
         }
 
+        this.setInstantMode(this.instantModeEnabled, { persist: false });
+        this.instantModeToggle?.addEventListener('click', () => {
+            this.setInstantMode(!this.instantModeEnabled);
+        });
+
+        this.setReasoningAlways(this.reasoningAlwaysEnabled, { persist: false });
+        this.reasoningAlwaysToggle?.addEventListener('click', () => {
+            this.setReasoningAlways(!this.reasoningAlwaysEnabled);
+        });
+
+        this.setVoiceMode(this.voiceMode, { persist: false, activate: false });
+        for (const button of this.voiceModeButtons) {
+            button.addEventListener('click', () => {
+                this.setVoiceMode(button.dataset.voiceMode, {
+                    persist: true,
+                    activate: true,
+                });
+            });
+        }
+
+        this.setScreenCapturePolicy(this.screenCapturePolicy, { persist: false, notify: false });
+        for (const button of this.screenPolicyButtons) {
+            button.addEventListener('click', () => {
+                this.setScreenCapturePolicy(button.dataset.screenPolicy, {
+                    persist: true,
+                    notify: true,
+                });
+            });
+        }
+
         this.reflectNowBtn?.addEventListener('click', () => {
             if (this.onReflectHandler) {
                 this.onReflectHandler();
@@ -556,10 +748,190 @@ export class UIManager {
         return Number(this.playbackVolumeInput.value) / 100;
     }
 
+    readStoredInstantMode() {
+        try {
+            return localStorage.getItem(this.instantModeStorageKey) === 'true';
+        } catch (error) {
+            console.warn('Failed to restore instant mode:', error);
+            return false;
+        }
+    }
+
+    setInstantMode(isEnabled, { persist = true } = {}) {
+        this.instantModeEnabled = Boolean(isEnabled);
+
+        if (this.instantModeToggle) {
+            this.instantModeToggle.textContent = this.instantModeEnabled ? 'On' : 'Off';
+            this.instantModeToggle.classList.toggle('active', this.instantModeEnabled);
+            this.instantModeToggle.setAttribute('aria-pressed', String(this.instantModeEnabled));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.instantModeStorageKey, String(this.instantModeEnabled));
+            } catch (error) {
+                console.warn('Failed to persist instant mode:', error);
+            }
+        }
+    }
+
+    isInstantModeEnabled() {
+        return Boolean(this.instantModeEnabled);
+    }
+
+    readStoredReasoningAlways() {
+        try {
+            const storedValue = localStorage.getItem(this.reasoningAlwaysStorageKey);
+            if (storedValue === null) {
+                return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+            }
+
+            return storedValue === 'true';
+        } catch (error) {
+            console.warn('Failed to restore thinking every message setting:', error);
+            return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+        }
+    }
+
+    setReasoningAlways(isEnabled, { persist = true } = {}) {
+        this.reasoningAlwaysEnabled = Boolean(isEnabled);
+
+        if (this.reasoningAlwaysEnabled) {
+            this.reasoningEnabledForNextSend = false;
+            if (this.currentThinkingMessageDiv) {
+                this.currentThinkingMessageDiv.remove();
+                this.currentThinkingMessageDiv = null;
+                this.persistChatHistory();
+            }
+        }
+
+        if (this.reasoningAlwaysToggle) {
+            this.reasoningAlwaysToggle.textContent = this.reasoningAlwaysEnabled ? 'On' : 'Off';
+            this.reasoningAlwaysToggle.classList.toggle('active', this.reasoningAlwaysEnabled);
+            this.reasoningAlwaysToggle.setAttribute('aria-pressed', String(this.reasoningAlwaysEnabled));
+        }
+
+        this.syncReasoningToggle();
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.reasoningAlwaysStorageKey, String(this.reasoningAlwaysEnabled));
+            } catch (error) {
+                console.warn('Failed to persist thinking every message setting:', error);
+            }
+        }
+    }
+
+    isReasoningAlwaysEnabled() {
+        return Boolean(this.reasoningAlwaysEnabled);
+    }
+
+    shouldUseReasoningForSend() {
+        return this.isReasoningAlwaysEnabled() || this.reasoningEnabledForNextSend;
+    }
+
+    normalizeVoiceMode(mode) {
+        return CONFIG.UI.VOICE_MODES.includes(mode)
+            ? mode
+            : CONFIG.UI.VOICE_MODE_DEFAULT;
+    }
+
+    readStoredVoiceMode() {
+        try {
+            const rawValue = localStorage.getItem(this.voiceModeStorageKey);
+            const mode = this.normalizeVoiceMode(rawValue);
+            if (rawValue !== null && rawValue !== mode) {
+                localStorage.removeItem(this.voiceModeStorageKey);
+            }
+            return mode;
+        } catch (error) {
+            console.warn('Failed to restore voice mode:', error);
+            return CONFIG.UI.VOICE_MODE_DEFAULT;
+        }
+    }
+
+    setVoiceMode(mode, { persist = true, activate = true } = {}) {
+        const nextMode = this.normalizeVoiceMode(mode);
+        this.voiceMode = nextMode;
+
+        for (const button of this.voiceModeButtons) {
+            const isActive = button.dataset.voiceMode === nextMode;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-checked', String(isActive));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.voiceModeStorageKey, nextMode);
+            } catch (error) {
+                console.warn('Failed to persist voice mode:', error);
+            }
+        }
+
+        if (activate) {
+            void this.applyVoiceMode(nextMode);
+        }
+    }
+
+    normalizeScreenCapturePolicy(policy) {
+        return CONFIG.UI.SCREEN_CAPTURE_POLICIES.includes(policy)
+            ? policy
+            : CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+    }
+
+    readStoredScreenCapturePolicy() {
+        try {
+            const rawValue = localStorage.getItem(this.screenCapturePolicyStorageKey);
+            const policy = this.normalizeScreenCapturePolicy(rawValue);
+            if (rawValue !== null && rawValue !== policy) {
+                localStorage.removeItem(this.screenCapturePolicyStorageKey);
+            }
+            return policy;
+        } catch (error) {
+            console.warn('Failed to restore screen capture policy:', error);
+            return CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+        }
+    }
+
+    setScreenCapturePolicy(policy, { persist = true, notify = true } = {}) {
+        const nextPolicy = this.normalizeScreenCapturePolicy(policy);
+        this.screenCapturePolicy = nextPolicy;
+
+        for (const button of this.screenPolicyButtons) {
+            const isActive = button.dataset.screenPolicy === nextPolicy;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-checked', String(isActive));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.screenCapturePolicyStorageKey, nextPolicy);
+            } catch (error) {
+                console.warn('Failed to persist screen capture policy:', error);
+            }
+        }
+
+        if (notify && this.onScreenCapturePolicyChangeHandler) {
+            this.onScreenCapturePolicyChangeHandler(nextPolicy);
+        }
+    }
+
+    getScreenCapturePolicy() {
+        return this.screenCapturePolicy || CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+    }
+
+    onScreenCapturePolicyChange(callback) {
+        this.onScreenCapturePolicyChangeHandler = callback;
+    }
+
     syncReasoningToggle() {
-        this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend);
-        this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend);
-        this.reasoningToggle.setAttribute('aria-checked', String(this.reasoningEnabledForNextSend));
+        const isReasoningAlwaysOn = this.isReasoningAlwaysEnabled();
+        this.composerMenuBtn.classList.toggle('active', this.reasoningEnabledForNextSend || isReasoningAlwaysOn);
+        this.reasoningToggle.classList.toggle('active', this.reasoningEnabledForNextSend || isReasoningAlwaysOn);
+        this.reasoningToggle.classList.toggle('disabled', isReasoningAlwaysOn);
+        this.reasoningToggle.disabled = isReasoningAlwaysOn;
+        this.reasoningToggle.setAttribute('aria-disabled', String(isReasoningAlwaysOn));
+        this.reasoningToggle.setAttribute('aria-checked', String(this.reasoningEnabledForNextSend || isReasoningAlwaysOn));
     }
 
     toggleComposerMenu() {
@@ -637,6 +1009,7 @@ export class UIManager {
 
     appendToThinkingMessage(text) {
         if (!text) return;
+        if (this.isReasoningAlwaysEnabled()) return;
 
         if (!this.currentThinkingMessageDiv) this.startThinkingMessage();
         const rawText = (this.currentThinkingMessageDiv.dataset.rawText || '') + text;
@@ -1071,7 +1444,8 @@ export class UIManager {
             if (!text && attachments.length === 0) return;
 
             const sendOptions = {
-                reasoning: this.reasoningEnabledForNextSend,
+                reasoning: this.shouldUseReasoningForSend(),
+                instantMode: this.isInstantModeEnabled(),
                 attachments,
             };
 
