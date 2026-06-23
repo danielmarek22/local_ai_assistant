@@ -1,7 +1,7 @@
 
 # Tools
 
-Actionable capabilities exposed to planners.
+Actionable capabilities exposed to late-routing tool directives.
 
 ## Responsibilities
 - Executing well-scoped actions (search, file access, system info, etc.)

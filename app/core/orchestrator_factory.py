@@ -14,7 +14,6 @@ from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
-from app.planners.factory import build_planner
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -24,6 +23,7 @@ from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
 )
+from app.services.tool_controls import build_prompt_with_tools
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -120,13 +120,6 @@ def build_orchestrator() -> Orchestrator:
     logger.debug("Storage initialized: database, vector_store, history, memory, summary")
 
     # --------------------------------------------------
-    # Planner
-    # --------------------------------------------------
-    logger.info("Building planner")
-    planner = build_planner(config, llm)
-    logger.info("Planner ready: %s", planner.__class__.__name__)
-
-    # --------------------------------------------------
     # Summarizers
     # --------------------------------------------------
     logger.info("Initializing summarizers")
@@ -176,7 +169,7 @@ def build_orchestrator() -> Orchestrator:
 
         web_client = SearXNGClient(
             base_url=web_cfg.get("base_url", config.tools["web"]["base_url"]),
-            timeout=web_cfg.get("timeout", config.planner["timeout_ms"] / 1000),
+            timeout=web_cfg.get("timeout", 10.0),  # Defaulted to 10s if missing
             max_retries=web_cfg.get("max_retries", 2),
             retry_backoff_s=web_cfg.get("retry_backoff_s", 0.25),
         )
@@ -207,12 +200,20 @@ def build_orchestrator() -> Orchestrator:
     avatar_controls_cfg = config.assistant.get("avatar_controls", {})
     allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
 
+    # Build system prompt with avatar controls and tool information
+    base_system_prompt = config.assistant["system_prompt"]
+    system_prompt_with_avatar = build_prompt_with_avatar_controls(
+        base_system_prompt,
+        gesture_catalog=gesture_catalog,
+        allowed_expressions=allowed_expressions,
+    )
+    system_prompt_with_tools = build_prompt_with_tools(
+        system_prompt_with_avatar,
+        tool_executor=tool_executor,
+    )
+
     context_builder = ContextBuilder(
-        system_prompt=build_prompt_with_avatar_controls(
-            config.assistant["system_prompt"],
-            gesture_catalog=gesture_catalog,
-            allowed_expressions=allowed_expressions,
-        ),
+        system_prompt=system_prompt_with_tools,
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
@@ -233,7 +234,6 @@ def build_orchestrator() -> Orchestrator:
         context_builder=context_builder,
         history_store=history_store,
         summary_store=summary_store,
-        planner=planner,
         tool_executor=tool_executor,
         memory_retriever=memory_retriever,
         memory_action_handler=memory_action_handler,

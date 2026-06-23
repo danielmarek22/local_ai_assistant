@@ -3,6 +3,7 @@ import time
 import os
 from typing import Optional
 
+from app.core.actions import Action, ActionType
 from app.core.events import (
     AssistantSpeechEvent,
     AssistantThinkingEvent,
@@ -11,10 +12,8 @@ from app.core.events import (
     AvatarAnimationEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.core.actions import Action, ActionType
-from app.core.plan import Plan
 from app.core.stream_processor import StreamProcessor
-from app.core.thinking_filter import ThinkingBlockSplitter
+from app.core.thinking_filter import ThinkingBlockSplitter, ThinkingDirectiveFilter, ThinkingDirective
 from app.core.turn_input import TurnInput, InputModality
 from app.logging import trace_event
 from app.perception.attachments import Attachment
@@ -36,7 +35,6 @@ class Orchestrator:
         context_builder,
         history_store,
         summary_store,
-        planner,
         tool_executor: ToolExecutor,
         memory_retriever,
         memory_action_handler,
@@ -47,7 +45,6 @@ class Orchestrator:
         self.context_builder = context_builder
         self.history = history_store
         self.summary_store = summary_store
-        self.planner = planner
         self.tool_executor = tool_executor
         self.memory_retriever = memory_retriever
         self.memory_action_handler = memory_action_handler
@@ -55,8 +52,9 @@ class Orchestrator:
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
         self.perception = PerceptionState()
+        self.max_late_routing_steps = 5
 
-        logger.info("Orchestrator initialized")
+        logger.info("Orchestrator initialized with late routing")
 
     # ============================================================
     # Public entry point
@@ -86,10 +84,11 @@ class Orchestrator:
 
         try:
             logger.info(
-                "[%s] User input received (len=%d, images=%d)",
+                "[%s] User input received (len=%d, images=%d, instant=%s)",
                 session_id,
                 len(turn_input.user_text),
                 len(turn_input.attachments),
+                turn_input.instant_mode,
             )
             trace_event(
                 "orchestrator",
@@ -100,6 +99,7 @@ class Orchestrator:
                     "retrieval_text": retrieval_text,
                     "history_text": history_text,
                     "think_override": turn_input.think_override,
+                    "instant_mode": turn_input.instant_mode,
                     "attachments": [attachment.to_perception_payload() for attachment in turn_input.attachments],
                 },
             )
@@ -154,81 +154,33 @@ class Orchestrator:
             )
 
             # --------------------------------------------------------
-            # 4. Planning (decide actions)
-            # --------------------------------------------------------
-            perception_snapshot = self.perception.snapshot()
-            if turn_input.instant_mode:
-                logger.info("[%s] Instant mode enabled; skipping planner", session_id)
-                plan = Plan(actions=[Action(type=ActionType.RESPOND)])
-            else:
-                plan = self._plan(
-                    session_id=session_id,
-                    user_text=retrieval_text or turn_input.user_text,
-                    perception=perception_snapshot,
-                )
-
-            logger.debug(
-                "[%s] Plan actions: %s",
-                session_id,
-                [action.type for action in plan.actions],
-            )
-            trace_event(
-                "orchestrator",
-                "plan_result",
-                session_id=session_id,
-                payload=[
-                    {"type": action.type.value, "payload": action.payload}
-                    for action in plan.actions
-                ],
-            )
-
-            tool_context: Optional[str] = None
-
-            # --------------------------------------------------------
-            # 5. Execute actions
-            # --------------------------------------------------------
-            for action in plan.actions:
-                logger.info("[%s] Executing action '%s'", session_id, action.type.value)
-
-                if action.type == ActionType.WEB_SEARCH:
-                    tool_context = yield from self.tool_executor.execute(
-                        action,
-                        turn_input.user_text,
-                    )
-
-                elif action.type == ActionType.WRITE_MEMORY:
-                    self.memory_action_handler.handle(session_id, action)
-
-                elif action.type == ActionType.RESPOND:
-                    logger.debug("[%s] Respond action reached", session_id)
-                    break
-
-                else:
-                    raise ValueError(f"Orchestrator received unhandled action type: {action.type}")
-
-            # --------------------------------------------------------
-            # 6. Context construction
+            # 4. Context construction
             # --------------------------------------------------------
             messages = self._build_context(
                 session_id=session_id,
                 user_text=turn_input.user_text,
                 memory_context=memory_context,
-                tool_context=tool_context,
+                tool_context=None,
                 attachments=turn_input.attachments,
             )
 
             # --------------------------------------------------------
-            # 7. LLM streaming response
+            # 5. LLM streaming response with late routing
             # --------------------------------------------------------
-            response = yield from self._stream_response(
-                session_id,
-                messages,
-                think_override=turn_input.think_override,
-            )
+            if turn_input.instant_mode:
+                logger.info("[%s] Instant mode enabled; late routing disabled", session_id)
+                response = yield from self._stream_response(
+                    session_id,
+                    messages,
+                    think_override=turn_input.think_override,
+                )
+            else:
+                response = yield from self._stream_late_routed_response(
+                    session_id=session_id,
+                    messages=messages,
+                    user_text=turn_input.user_text,
+                )
 
-            # --------------------------------------------------------
-            # 8. Persist assistant response (to SQLite + Vector Store)
-            # --------------------------------------------------------
             self.history.add(session_id, "assistant", response)
             trace_event(
                 "orchestrator",
@@ -240,7 +192,7 @@ class Orchestrator:
             yield AssistantSpeechEvent(text=response, is_final=True)
 
             # --------------------------------------------------------
-            # 9. Post-processing (summarization)
+            # 6. Post-processing (summarization)
             # --------------------------------------------------------
             self.turn_finalizer.finalize(session_id)
 
@@ -302,6 +254,7 @@ class Orchestrator:
                 {"value": retrieval.perception_value},
             )
 
+            # Proactive events skip the router and go straight to fast chat
             messages = self._build_context(
                 session_id=session_id,
                 user_text="",
@@ -350,31 +303,6 @@ class Orchestrator:
             if not idle_emitted and not is_closing:
                 idle_emitted = True
                 yield AssistantStateEvent(state=AssistantState.IDLE)
-
-    # ============================================================
-    # Planning
-    # ============================================================
-
-    def _plan(self, session_id: str, user_text: str, perception: dict) -> Plan:
-        logger.info("[%s] Running planner", session_id)
-        trace_event(
-            "orchestrator",
-            "planner_input",
-            session_id=session_id,
-            payload={"user_text": user_text, "perception": perception},
-        )
-
-        try:
-            plan = self.planner.decide(
-                user_text=user_text,
-                perception=perception,
-            )
-        except Exception:
-            logger.exception("[%s] Planner failed", session_id)
-            raise
-
-        logger.info("[%s] Planner produced %d actions", session_id, len(plan.actions))
-        return plan
 
     # ============================================================
     # Context & response
@@ -427,6 +355,7 @@ class Orchestrator:
         start_ts = time.perf_counter()
         processor = StreamProcessor(allowed_animations=self.allowed_animations)
         thinking_splitter = ThinkingBlockSplitter()
+        directive_filter = ThinkingDirectiveFilter()
 
         for chunk in self.llm.stream_chat(messages, think_override=think_override):
             visible_chunk, thinking_chunk = thinking_splitter.push(chunk)
@@ -435,6 +364,12 @@ class Orchestrator:
                 yield AssistantThinkingEvent(text=thinking_chunk)
             if not visible_chunk:
                 continue
+            
+            # Sanitize visible chunk in case directive tags leaked outside thinking blocks
+            visible_chunk = directive_filter.strip_directive_tags(visible_chunk)
+            if not visible_chunk:
+                continue
+                
             if not visible_buffer and not visible_chunk.strip():
                 continue
             visible_buffer, expression_initialized = yield from self._emit_processor_events(
@@ -453,12 +388,14 @@ class Orchestrator:
                 final_visible_chunk = ""
 
         if final_visible_chunk:
-            visible_buffer, expression_initialized = yield from self._emit_processor_events(
-                session_id,
-                processor.push(final_visible_chunk),
-                visible_buffer,
-                expression_initialized,
-            )
+            final_visible_chunk = directive_filter.strip_directive_tags(final_visible_chunk)
+            if final_visible_chunk:
+                visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                    session_id,
+                    processor.push(final_visible_chunk),
+                    visible_buffer,
+                    expression_initialized,
+                )
 
         visible_buffer, expression_initialized = yield from self._emit_processor_events(
             session_id,
@@ -488,6 +425,365 @@ class Orchestrator:
             },
         )
         return visible_buffer
+
+    def _stream_late_routed_response(
+        self,
+        session_id: str,
+        messages,
+        user_text: str,
+    ):
+        logger.info("[%s] Calling LLM with late routing", session_id)
+        self._inject_late_routing_system_message(messages)
+
+        for step in range(1, self.max_late_routing_steps + 1):
+            logger.info(
+                "[%s] Late routing step %d/%d",
+                session_id,
+                step,
+                self.max_late_routing_steps,
+            )
+
+            result = yield from self._stream_late_routing_step(
+                session_id=session_id,
+                messages=messages,
+                user_text=user_text,
+            )
+
+            if result["tool_action"] is None:
+                # Check if there was a directive error to feed back
+                if "directive_error" in result:
+                    # Feed the error back and let the model try again
+                    observation = (
+                        f"Your previous tool directive was invalid. Error: {result['directive_error']}. "
+                        "Please try again with correct format or provide a direct answer."
+                    )
+                    logger.info("[%s] Feeding back directive error (step %d)", session_id, step)
+                    messages.append({
+                        "role": "user",
+                        "content": f"Internal observation: {observation}",
+                    })
+                    continue
+                
+                return result["response"]
+
+            action = result["tool_action"]
+            observation = yield from self._execute_late_tool_action(
+                session_id=session_id,
+                action=action,
+                user_text=user_text,
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Internal observation from {action.type.value}. "
+                    "Use this to answer the original user request. "
+                    "Do not mention this routing protocol.\n\n"
+                    f"{observation}"
+                ),
+            })
+
+        logger.warning("[%s] Late routing hit max steps; forcing final answer", session_id)
+        messages.append({
+            "role": "user",
+            "content": (
+                "Internal instruction: stop calling tools and answer the original "
+                "user request with the information already available."
+            ),
+        })
+        response = yield from self._stream_response(
+            session_id,
+            messages,
+            think_override=True,
+        )
+        return response
+
+    def _stream_late_routing_step(
+        self,
+        session_id: str,
+        messages,
+        user_text: str,
+    ):
+        yield AssistantStateEvent(state=AssistantState.THINKING)
+
+        visible_buffer = ""
+        thinking_buffer = ""
+        expression_initialized = False
+        tool_action: Action | None = None
+        directive_errors: list[str] = []
+        start_ts = time.perf_counter()
+        processor = StreamProcessor(allowed_animations=self.allowed_animations)
+        thinking_splitter = ThinkingBlockSplitter()
+        directive_filter = ThinkingDirectiveFilter()
+        visible_directive_filter = ThinkingDirectiveFilter()  # Separate filter for visible content
+
+        for chunk in self.llm.stream_chat(messages, think_override=True):
+            visible_chunk, thinking_chunk = thinking_splitter.push(chunk)
+
+            if thinking_chunk:
+                clean_thinking, directives = directive_filter.push(thinking_chunk)
+                thinking_buffer += clean_thinking
+                if clean_thinking:
+                    yield AssistantThinkingEvent(text=clean_thinking)
+
+                tool_action, errors = self._handle_late_routing_directives(
+                    session_id=session_id,
+                    directives=directives,
+                )
+                directive_errors.extend(errors)
+                if tool_action is not None:
+                    # Tool action detected; discard any accumulated visible content
+                    # and stop streaming
+                    visible_buffer = ""
+                    break
+
+            if visible_chunk:
+                # Extract directives from visible chunk (model may emit them outside <think>)
+                clean_visible, visible_directives = visible_directive_filter.push(visible_chunk)
+                
+                # Handle directives found in visible content
+                if visible_directives and tool_action is None:
+                    tool_action, errors = self._handle_late_routing_directives(
+                        session_id=session_id,
+                        directives=visible_directives,
+                    )
+                    directive_errors.extend(errors)
+                    if tool_action is not None:
+                        visible_buffer = ""
+                        break
+                
+                if not clean_visible:
+                    continue
+                    
+                if not visible_buffer:
+                    yield AssistantStateEvent(state=AssistantState.RESPONDING)
+                visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                    session_id,
+                    processor.push(clean_visible),
+                    visible_buffer,
+                    expression_initialized,
+                )
+
+        final_visible_chunk, final_thinking_chunk = thinking_splitter.flush()
+        if final_thinking_chunk and tool_action is None:
+            clean_thinking, directives = directive_filter.push(final_thinking_chunk)
+            thinking_buffer += clean_thinking
+            if clean_thinking:
+                yield AssistantThinkingEvent(text=clean_thinking)
+            tool_action, errors = self._handle_late_routing_directives(
+                session_id=session_id,
+                directives=directives,
+            )
+            directive_errors.extend(errors)
+
+        clean_thinking, directives = directive_filter.flush()
+        if clean_thinking and tool_action is None:
+            thinking_buffer += clean_thinking
+            yield AssistantThinkingEvent(text=clean_thinking)
+        if tool_action is None:
+            tool_action, errors = self._handle_late_routing_directives(
+                session_id=session_id,
+                directives=directives,
+            )
+            directive_errors.extend(errors)
+
+        if tool_action is not None:
+            logger.info(
+                "[%s] Late routing selected tool '%s'",
+                session_id,
+                tool_action.type.value,
+            )
+            return {"response": "", "tool_action": tool_action}
+
+        if final_visible_chunk:
+            # Extract any directives from final visible chunk
+            clean_final_visible, final_visible_directives = visible_directive_filter.push(final_visible_chunk)
+            if final_visible_directives and tool_action is None:
+                tool_action, errors = self._handle_late_routing_directives(
+                    session_id=session_id,
+                    directives=final_visible_directives,
+                )
+                directive_errors.extend(errors)
+                if tool_action is not None:
+                    logger.info(
+                        "[%s] Late routing selected tool '%s' from final chunk",
+                        session_id,
+                        tool_action.type.value,
+                    )
+                    return {"response": "", "tool_action": tool_action}
+            
+            if clean_final_visible:
+                if not visible_buffer:
+                    yield AssistantStateEvent(state=AssistantState.RESPONDING)
+                visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                    session_id,
+                    processor.push(clean_final_visible),
+                    visible_buffer,
+                    expression_initialized,
+                )
+        
+        # Flush visible directive filter
+        clean_remaining_visible, remaining_visible_directives = visible_directive_filter.flush()
+        if remaining_visible_directives and tool_action is None:
+            tool_action, errors = self._handle_late_routing_directives(
+                session_id=session_id,
+                directives=remaining_visible_directives,
+            )
+            directive_errors.extend(errors)
+            if tool_action is not None:
+                logger.info(
+                    "[%s] Late routing selected tool '%s' from remaining visible directives",
+                    session_id,
+                    tool_action.type.value,
+                )
+                return {"response": "", "tool_action": tool_action}
+        
+        if clean_remaining_visible:
+            if not visible_buffer:
+                yield AssistantStateEvent(state=AssistantState.RESPONDING)
+            visible_buffer, expression_initialized = yield from self._emit_processor_events(
+                session_id,
+                processor.push(clean_remaining_visible),
+                visible_buffer,
+                expression_initialized,
+            )
+
+        visible_buffer, expression_initialized = yield from self._emit_processor_events(
+            session_id,
+            processor.flush(),
+            visible_buffer,
+            expression_initialized,
+        )
+
+        if not expression_initialized:
+            logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
+            yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+
+        logger.info(
+            "[%s] Late-routed response complete (chars=%d, thinking_chars=%d, duration=%.2f ms)",
+            session_id,
+            len(visible_buffer),
+            len(thinking_buffer),
+            (time.perf_counter() - start_ts) * 1000,
+        )
+        trace_event(
+            "orchestrator",
+            "late_routing_stream_complete",
+            session_id=session_id,
+            payload={
+                "visible_response": visible_buffer,
+                "filtered_thinking_response": thinking_buffer,
+            },
+        )
+        
+        # If there were directive errors and no response, treat it as a failed tool attempt
+        if directive_errors and not visible_buffer:
+            observation = "\n".join(directive_errors)
+            return {"response": "", "tool_action": None, "directive_error": observation}
+        
+        return {"response": visible_buffer, "tool_action": None}
+
+    def _handle_late_routing_directives(
+        self,
+        session_id: str,
+        directives: list[ThinkingDirective],
+    ) -> tuple[Action | None, list[str]]:
+        """
+        Handle late-routing directives. Returns a tuple of (tool_action, error_messages).
+        error_messages contains any issues that occurred during directive processing
+        that should be fed back to the model.
+        """
+        tool_action = None
+        error_messages = []
+        
+        for directive in directives:
+            trace_event(
+                "orchestrator",
+                "late_routing_directive",
+                session_id=session_id,
+                payload={"kind": directive.kind, "payload": directive.payload},
+            )
+            if directive.kind == "memory_write":
+                action = Action(type=ActionType.WRITE_MEMORY, payload=directive.payload)
+                self.memory_action_handler.handle(session_id, action)
+                continue
+
+            if directive.kind == "tool_call":
+                tool_action = self._action_from_tool_directive(directive.payload)
+                if tool_action is None:
+                    error_msg = (
+                        f"Invalid tool directive format: {directive.raw}. "
+                        "Expected format: {\"tool\":\"web_search\",\"kwargs\":{{...}}} or "
+                        "{\"name\":\"tool_name\",\"arguments\":{{...}}}"
+                    )
+                    logger.warning("[%s] %s", session_id, error_msg)
+                    error_messages.append(error_msg)
+        
+        return tool_action, error_messages
+
+    def _action_from_tool_directive(self, payload: dict) -> Action | None:
+        tool_name = payload.get("tool") or payload.get("name")
+        kwargs = payload.get("kwargs") or payload.get("arguments") or {}
+        if not isinstance(kwargs, dict):
+            kwargs = {}
+
+        if tool_name == ActionType.WEB_SEARCH.value:
+            return Action(type=ActionType.WEB_SEARCH, payload=kwargs)
+
+        return None
+
+    def _execute_late_tool_action(
+        self,
+        session_id: str,
+        action: Action,
+        user_text: str,
+    ):
+        yield AssistantStateEvent(state=AssistantState.SEARCHING)
+        yield AssistantThinkingEvent(text=f"\n[Using {action.type.value}]\n")
+
+        try:
+            observation = yield from self.tool_executor.execute(action, user_text)
+        except Exception as exc:
+            logger.exception("[%s] Late-routed tool execution failed", session_id)
+            observation = f"Tool execution failed: {exc}"
+
+        if not observation:
+            observation = "The tool returned no usable results."
+
+        trace_event(
+            "orchestrator",
+            "late_routing_observation",
+            session_id=session_id,
+            payload={
+                "tool": action.type.value,
+                "observation": observation,
+            },
+        )
+        return observation
+
+    def _inject_late_routing_system_message(self, messages: list[dict]) -> None:
+        tool_lines = []
+        for name, tool in sorted(self.tool_executor.tools.items()):
+            if getattr(tool, "is_available", False):
+                tool_lines.append(f"- {name}")
+        available_tools = "\n".join(tool_lines) if tool_lines else "- No tools are currently available."
+
+        self._inject_hidden_system_message(
+            messages,
+            (
+                "Internal late-routing protocol. Use this protocol only inside "
+                "your private <think> block; never reveal these tags or JSON to "
+                "the user.\n\n"
+                "Available tools:\n"
+                f"{available_tools}\n\n"
+                "If you need a tool before answering, emit exactly one directive "
+                "inside thinking and then wait for the observation:\n"
+                '<tool_call>{"tool":"web_search","kwargs":{"query":"search terms"}}</tool_call>\n\n'
+                "If the user explicitly asks you to remember something enduring, "
+                "emit this inside thinking and still answer normally:\n"
+                '<memory_write>{"content":"fact to remember","category":"general","importance":2}</memory_write>\n\n'
+                "If no tool or memory write is needed, do not emit directives."
+            ),
+        )
 
     def _emit_processor_events(
         self,

@@ -24,15 +24,12 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "assistant_response",
         "planner_input",
         "llm_stream_complete",
+        "late_routing_directive",
+        "late_routing_observation",
+        "late_routing_stream_complete",
         "proactive_event",
     ),
     "context_builder": ("context_built",),
-    "llm_planner": (
-        "planner_call",
-        "planner_timeout",
-        "planner_result",
-        "planner_parse_failure",
-    ),
     "llm": (
         "chat_request",
         "chat_response",

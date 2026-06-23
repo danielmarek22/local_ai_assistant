@@ -27,7 +27,7 @@ Memory should be treated as an *active system*, not just a database.
 - `SummaryStore`
   - stores one summary per conversation session in SQLite
 - `SimpleMemoryPolicy`
-  - converts planner `write_memory` actions into concrete storage decisions
+  - converts late-routed `write_memory` actions into concrete storage decisions
 
 The attachment model now has a shared `Attachment` base type, but persistence is still intentionally image-focused today.
 
@@ -36,7 +36,7 @@ The attachment model now has a shared `Attachment` base type, but persistence is
 1. The orchestrator receives user input.
 2. Semantic memory is queried for relevant facts.
 3. Episodic memory is queried for similar messages from past sessions.
-4. Retrieved memory is injected into perception for planning and into prompt context for response generation.
+4. Retrieved memory is injected into perception and into prompt context for response generation.
 5. The current user/assistant messages are persisted to both chat history layers.
 6. If the user attached images, those files are stored, summarized once for long-term retrieval, and linked back to the chat message.
 7. Recent user turns with images can be replayed into the multimodal prompt from stored attachments.

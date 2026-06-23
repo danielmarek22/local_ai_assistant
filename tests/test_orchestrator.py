@@ -180,7 +180,6 @@ class OrchestratorTests(unittest.TestCase):
             context_builder=context_builder,
             history_store=history,
             summary_store=summary_store,
-            planner=planner,
             tool_executor=tool_executor,
             memory_retriever=memory_retriever,
             memory_action_handler=memory_action_handler,
@@ -189,25 +188,23 @@ class OrchestratorTests(unittest.TestCase):
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
-    def test_turn_flow_injects_memory_and_tools_into_context(self):
+    def test_turn_flow_injects_memory_into_context(self):
         plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
         orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
         list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
-        # 1. Verify perception was updated with retrieved memories BEFORE planner runs
-        perception_snapshot = planner.calls[0][1]
+        perception_snapshot = orch.perception.snapshot()
         self.assertIn(PerceptionKey.MEMORY_RETRIEVED.value, perception_snapshot)
         self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value]["value"])
 
-        # 2. Verify ContextBuilder received memory and tool info separately
         mem_ctx = context_builder.calls[0]["memory_context"]
         tool_ctx = context_builder.calls[0]["tool_context"]
         
         self.assertIn("User likes testing", mem_ctx)
         self.assertIn("Past answer", mem_ctx)
         
-        self.assertEqual("tool info", tool_ctx)
+        self.assertIsNone(tool_ctx)
 
     def test_instant_mode_skips_planner_and_responds_directly(self):
         plan = Plan(actions=[
@@ -652,8 +649,8 @@ class OrchestratorTests(unittest.TestCase):
 
         list(orch.handle_user_input(self.SESSION_ID, "", attachments=[attachment]))
 
-        self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
-        perception_snapshot = planner.calls[0][1]
+        self.assertEqual(context_builder.calls[0]["user_text"], "")
+        perception_snapshot = orch.perception.snapshot()
         self.assertEqual(perception_snapshot["user.input"]["image_count"], 1)
         self.assertEqual(
             perception_snapshot["user.input"]["attachments"][0]["name"],
@@ -824,14 +821,9 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(context_builder.calls[0]["session_id"], "session-a")
         self.assertEqual(context_builder.calls[1]["session_id"], "session-b")
 
-        first_perception = planner.calls[0][1]
-        second_perception = planner.calls[1][1]
+        perception_snapshot = orch.perception.snapshot()
         self.assertEqual(
-            first_perception[PerceptionKey.USER_INPUT.value]["text"],
-            "hello",
-        )
-        self.assertEqual(
-            second_perception[PerceptionKey.USER_INPUT.value]["text"],
+            perception_snapshot[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
 

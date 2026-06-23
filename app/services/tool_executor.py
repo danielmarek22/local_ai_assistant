@@ -12,7 +12,7 @@ logger = logging.getLogger("tool_executor")
 
 class ToolExecutor:
     """
-    Executes planner actions that map to tools.
+    Executes actions that map to tools.
     Handles availability checks, timing, errors, and state events.
     """
 
