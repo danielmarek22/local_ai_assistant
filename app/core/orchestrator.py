@@ -728,6 +728,9 @@ class Orchestrator:
 
         if tool_name == ActionType.WEB_SEARCH.value:
             return Action(type=ActionType.WEB_SEARCH, payload=kwargs)
+        
+        if tool_name == ActionType.EXECUTE_BASH.value:
+            return Action(type=ActionType.EXECUTE_BASH, payload=kwargs)
 
         return None
 

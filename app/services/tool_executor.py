@@ -34,7 +34,7 @@ class ToolExecutor:
             )
             return None
 
-        if not tool.is_available:
+        if getattr(tool, "is_available", False) is False:
             logger.warning(
                 "Tool '%s' unavailable, skipping",
                 action.type.value,
@@ -47,18 +47,21 @@ class ToolExecutor:
         start_ts = time.perf_counter()
 
         try:
-            query = (action.payload or {}).get("query") or user_text
+            # Extract the primary argument gracefully, supporting both search 'query' and bash 'command'
+            payload = action.payload or {}
+            primary_arg = payload.get("command") or payload.get("query") or user_text
+            
             trace_event(
                 "tool_executor",
                 "tool_call",
                 payload={
                     "tool": action.type.value,
                     "action_payload": action.payload,
-                    "query": query,
+                    "primary_arg": primary_arg,
                 },
             )
 
-            context = tool.run(query)
+            context = tool.run(primary_arg)
 
             logger.info(
                 "Tool '%s' completed (duration=%.2f ms)",

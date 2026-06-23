@@ -14,6 +14,7 @@ from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
+from app.tools.bash_execution import BashExecutionTool
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -189,6 +190,11 @@ def build_orchestrator() -> Orchestrator:
 
     else:
         logger.info("Web search tool disabled via config")
+
+        # Inject Bash Execution Tool
+    bash_tool = BashExecutionTool(timeout=15)
+    tools[bash_tool.name] = bash_tool
+    logger.info("Bash execution tool registered as '%s'", bash_tool.name)
 
     tool_executor = ToolExecutor(tools)
 
