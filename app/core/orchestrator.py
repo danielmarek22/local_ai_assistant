@@ -472,6 +472,16 @@ class Orchestrator:
                 action=action,
                 user_text=user_text,
             )
+
+            # Truncate the observation to keep the context window safe (e.g., max 1024 chars)
+            safe_observation = observation[:1024] + ("..." if len(observation) > 1024 else "")
+            
+            self.history.add(
+                session_id, 
+                "system", # Or "tool" if your ChatHistoryStore supports it
+                f"[Tool Execution Trace: {action.type.value}]\n{safe_observation}"
+            )
+
             messages.append({
                 "role": "user",
                 "content": (
@@ -551,9 +561,9 @@ class Orchestrator:
                         visible_buffer = ""
                         break
                 
-                if not clean_visible:
+                if not clean_visible.strip():
                     continue
-                    
+
                 if not visible_buffer:
                     yield AssistantStateEvent(state=AssistantState.RESPONDING)
                 visible_buffer, expression_initialized = yield from self._emit_processor_events(
@@ -667,6 +677,15 @@ class Orchestrator:
         )
         trace_event(
             "orchestrator",
+            "llm_stream_complete",
+            session_id=session_id,
+            payload={
+                "visible_response": visible_buffer,
+                "reasoning_response": thinking_buffer,
+            },
+        )
+        trace_event(
+            "orchestrator",
             "late_routing_stream_complete",
             session_id=session_id,
             payload={
@@ -765,7 +784,8 @@ class Orchestrator:
 
     def _inject_late_routing_system_message(self, messages: list[dict]) -> None:
         tool_lines = []
-        for name, tool in sorted(self.tool_executor.tools.items()):
+        tools = getattr(self.tool_executor, "tools", {}) or {}
+        for name, tool in sorted(tools.items()):
             if getattr(tool, "is_available", False):
                 tool_lines.append(f"- {name}")
         available_tools = "\n".join(tool_lines) if tool_lines else "- No tools are currently available."
@@ -807,7 +827,7 @@ class Orchestrator:
                 yield AvatarAnimationEvent(animation=value)
                 continue
 
-            if not value:
+            if not value or not value.strip():
                 continue
 
             if not expression_initialized:
