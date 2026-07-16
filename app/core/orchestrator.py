@@ -37,7 +37,6 @@ class Orchestrator:
         summary_store,
         tool_executor: ToolExecutor,
         memory_retriever,
-        memory_action_handler,
         turn_finalizer,
         gesture_catalog: dict[str, str] | None = None,
     ):
@@ -47,7 +46,6 @@ class Orchestrator:
         self.summary_store = summary_store
         self.tool_executor = tool_executor
         self.memory_retriever = memory_retriever
-        self.memory_action_handler = memory_action_handler
         self.turn_finalizer = turn_finalizer
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
@@ -332,7 +330,7 @@ class Orchestrator:
             messages,
             (
                 "Internal late-routing protocol. Evaluate the user's request and the available context. "
-                "If you need external information or need to run a command, you MUST immediately use the "
+                "If you need external information, a command, or a structured memory write, you MUST immediately use the "
                 "available tools provided in the native system schema. "
                 "CRITICAL: Do NOT acknowledge the user, explain what you are going to do, or use conversational "
                 "filler (e.g., 'Let me check', 'One moment'). Output ONLY the native tool call. "
@@ -505,14 +503,16 @@ class Orchestrator:
         yield AssistantStateEvent(state=AssistantState.THINKING)
         start_ts = time.perf_counter()
 
-        # Fetch native schemas
-        tools = self.tool_executor.get_native_tools()
+        # Fetch native schemas when the executor supports native discovery.
+        # Keep this backward-compatible with older test doubles and wrappers.
+        tools = getattr(self.tool_executor, "get_native_tools", None)
+        native_tools = tools() if callable(tools) else []
 
         # Perform a BLOCKING call to guarantee the tool_calls object is returned safely
         message = self.llm.chat(
             messages=messages, 
             think_override=True, 
-            tools=tools,
+            tools=native_tools,
             timeout_override=120.0,  # Ensure the LLM call doesn't hang indefinitely
         )
 

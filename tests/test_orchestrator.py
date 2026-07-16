@@ -42,6 +42,9 @@ class FakeToolExecutor:
         self.context = context
         self.calls = []
 
+    def get_native_tools(self):
+        return []
+
     def execute(self, action: Action, user_text: str):
         self.calls.append((action, user_text))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
@@ -82,6 +85,11 @@ class FakeLLM:
         self.chunks = chunks
         self.error = error
         self.calls = []
+        self.chat_calls = []
+
+    def chat(self, messages, think_override=None, options_override=None, timeout_override=None, max_retries_override=None, tools=None):
+        self.chat_calls.append((messages, think_override, tools))
+        return {"content": ""}
 
     def stream_chat(self, messages, think_override=None):
         self.calls.append((messages, think_override))
@@ -164,10 +172,6 @@ class OrchestratorTests(unittest.TestCase):
         context_builder = FakeContextBuilder()
         memory_policy = FakeMemoryPolicy()
         memory_retriever = MemoryRetriever(memory_store=memory, history_store=history)
-        memory_action_handler = MemoryActionHandler(
-            memory_store=memory,
-            memory_policy=memory_policy,
-        )
         turn_finalizer = TurnFinalizer(
             history_store=history,
             summary_store=summary_store,
@@ -182,7 +186,6 @@ class OrchestratorTests(unittest.TestCase):
             summary_store=summary_store,
             tool_executor=tool_executor,
             memory_retriever=memory_retriever,
-            memory_action_handler=memory_action_handler,
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
         )

@@ -10,8 +10,6 @@ THINK_BLOCK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 
 TOOL_CALL_OPEN_TAG = "<tool_call>"
 TOOL_CALL_CLOSE_TAG = "</tool_call>"
-MEMORY_WRITE_OPEN_TAG = "<memory_write>"
-MEMORY_WRITE_CLOSE_TAG = "</memory_write>"
 
 
 def _trailing_marker_prefix_len(text: str, marker: str) -> int:
@@ -128,11 +126,9 @@ class ThinkingDirectiveFilter:
 
     _OPEN_TAGS = {
         "tool_call": TOOL_CALL_OPEN_TAG,
-        "memory_write": MEMORY_WRITE_OPEN_TAG,
     }
     _CLOSE_TAGS = {
         "tool_call": TOOL_CALL_CLOSE_TAG,
-        "memory_write": MEMORY_WRITE_CLOSE_TAG,
     }
 
     def __init__(self):
@@ -215,7 +211,7 @@ class ThinkingDirectiveFilter:
 
     def strip_directive_tags(self, text: str) -> str:
         """
-        Remove any directive tags (<tool_call>...</tool_call> or <memory_write>...</memory_write>)
+        Remove any directive tags (<tool_call>...</tool_call>)
         from the given text, including bare JSON that matches the directive schema.
         Used to sanitize visible content that may have accidentally included directive
         syntax outside of thinking blocks.
@@ -224,13 +220,11 @@ class ThinkingDirectiveFilter:
         for open_tag, close_tag in zip(self._OPEN_TAGS.values(), self._CLOSE_TAGS.values()):
             pattern = re.escape(open_tag) + r"[\s\S]*?" + re.escape(close_tag)
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-        
+
         # Remove any lingering incomplete tags
         text = re.sub(re.escape(TOOL_CALL_OPEN_TAG), "", text, flags=re.IGNORECASE)
         text = re.sub(re.escape(TOOL_CALL_CLOSE_TAG), "", text, flags=re.IGNORECASE)
-        text = re.sub(re.escape(MEMORY_WRITE_OPEN_TAG), "", text, flags=re.IGNORECASE)
-        text = re.sub(re.escape(MEMORY_WRITE_CLOSE_TAG), "", text, flags=re.IGNORECASE)
-        
+
         # Remove bare JSON objects matching directive schema (including nested objects)
         # This catches bare directive JSON without wrapper tags that leaked into visible content
         text = self._strip_bare_directive_json(text)
@@ -239,7 +233,7 @@ class ThinkingDirectiveFilter:
     
     def _strip_bare_directive_json(self, text: str) -> str:
         """
-        Remove JSON objects that match the directive schema (tool_call or memory_write).
+        Remove JSON objects that match the directive schema for tool calls.
         Handles nested objects properly using a simple state machine.
         """
         result = []
@@ -311,24 +305,20 @@ class ThinkingDirectiveFilter:
     def _is_directive_json(self, json_str: str) -> bool:
         """
         Check if the given JSON string matches the directive schema.
-        Returns True if it looks like a tool_call or memory_write directive.
+        Returns True if it looks like a tool_call directive.
         """
         try:
             obj = json.loads(json_str)
             if not isinstance(obj, dict):
                 return False
-            
+
             # Check for tool_call pattern: {"tool": "...", "kwargs": ...}
             if "tool" in obj and "kwargs" in obj:
                 return True
             # Also support alternative formats: {"name": "...", "arguments": ...}
             if "name" in obj and "arguments" in obj:
                 return True
-            
-            # Check for memory_write pattern: {"content": "...", "category": "...", ...}
-            if "content" in obj and ("category" in obj or "importance" in obj):
-                return True
-            
+
             return False
         except (json.JSONDecodeError, TypeError):
             return False

@@ -65,10 +65,14 @@ class ToolExecutor:
         start_ts = time.perf_counter()
 
         try:
-            # Extract the primary argument gracefully, supporting both search 'query' and bash 'command'
+            # Preserve structured payloads for native tools like write_memory,
+            # while keeping the existing string-friendly behavior for search/bash tools.
             payload = action.payload or {}
-            primary_arg = payload.get("command") or payload.get("query") or user_text
-            
+            if action.type.value == "write_memory" and isinstance(payload, dict):
+                primary_arg = payload
+            else:
+                primary_arg = payload.get("command") or payload.get("query") or user_text
+
             trace_event(
                 "tool_executor",
                 "tool_call",

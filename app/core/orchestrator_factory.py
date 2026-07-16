@@ -15,6 +15,7 @@ from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
+from app.tools.memory_write import MemoryWriteTool
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -196,6 +197,10 @@ def build_orchestrator() -> Orchestrator:
     tools[bash_tool.name] = bash_tool
     logger.info("Bash execution tool registered as '%s'", bash_tool.name)
 
+    memory_write_tool = MemoryWriteTool(memory_action_handler=memory_action_handler)
+    tools[memory_write_tool.name] = memory_write_tool
+    logger.info("Memory write tool registered as '%s'", memory_write_tool.name)
+
     tool_executor = ToolExecutor(tools)
 
     # --------------------------------------------------
@@ -242,7 +247,6 @@ def build_orchestrator() -> Orchestrator:
         summary_store=summary_store,
         tool_executor=tool_executor,
         memory_retriever=memory_retriever,
-        memory_action_handler=memory_action_handler,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
     )
