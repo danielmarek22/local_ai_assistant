@@ -133,7 +133,6 @@ class SearXNGClient:
 
         return False
 
-
 class WebSearchTool:
     """
     Orchestrator-facing tool adapter.
@@ -141,6 +140,19 @@ class WebSearchTool:
     """
 
     name = "web_search"
+    description = "Search the internet for current events, facts, or real-time information."
+    
+    # Native Ollama JSON Schema parameters
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The specific search query to execute"
+            }
+        },
+        "required": ["query"]
+    }
 
     def __init__(self, client: SearXNGClient, summarizer):
         self.client = client

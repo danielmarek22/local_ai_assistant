@@ -34,14 +34,18 @@ class ImageSummarizer:
             },
         ]
 
-        result = self.llm.chat(
+        response = self.llm.chat(
             prompt,
             think_override=False,
             options_override={
                 "temperature": 0.1,
                 "num_predict": 160,
             },
-        ).strip()
+        )
+        
+        # Safely extract the text content from the dictionary before stripping
+        result = response.get("content", "").strip()
+        
         if getattr(self.llm, "last_chat_dropped_current_images", False):
             logger.warning(
                 "Skipping image summary for %r because Ollama rejected the image payload.",

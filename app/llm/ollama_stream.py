@@ -109,7 +109,8 @@ class OllamaClient(LLMClient):
         options_override: dict | None = None,
         timeout_override: float | None = None,
         max_retries_override: int | None = None,
-    ) -> str:
+        tools: list[dict] | None = None, # Add tools parameter
+    ) -> dict:
         """
         Blocking, non-streaming call.
         Used for planners, summarizers, and other structured outputs.
@@ -138,6 +139,7 @@ class OllamaClient(LLMClient):
             stream=False,
             think_value=think_value,
             options=request_options,
+            tools=tools,
         )
 
         logger.info(
@@ -225,9 +227,14 @@ class OllamaClient(LLMClient):
             },
         )
 
-        return message.get("content", "")
+        return message
 
-    def stream_chat(self, messages, think_override=None) -> Iterator[str]:
+    def stream_chat(
+        self, 
+        messages, 
+        think_override=None, 
+        tools: list[dict] | None = None # Add tools parameter
+    ) -> Iterator[str | dict]:
         """
         Streaming call. Yields text chunks for user-facing responses.
 
@@ -249,6 +256,7 @@ class OllamaClient(LLMClient):
             stream=True,
             think_value=think_value,
             options=request_options,
+            tools=tools,
         )
 
         logger.info(
@@ -331,13 +339,9 @@ class OllamaClient(LLMClient):
         payload: dict,
         collected_content: list[str],
         collected_thinking: list[str],
-    ) -> Iterator[str]:
+    ) -> Iterator[str | dict]: # Update return type
         """
         Consume a streaming response from /api/chat (native NDJSON format).
-
-        Each line is a self-contained JSON object; there is no SSE framing.
-        Thinking tokens arrive in `message.thinking`; content in
-        `message.content`. Streaming ends when `chunk["done"]` is True.
         """
         in_thinking_block = False
 
@@ -350,6 +354,11 @@ class OllamaClient(LLMClient):
                 message = chunk.get("message", {})
                 content = message.get("content")
                 thinking = message.get("thinking")
+                
+                # Intercept native tool calls and yield as a dict
+                tool_calls = message.get("tool_calls")
+                if tool_calls:
+                    yield {"tool_calls": tool_calls}
 
                 if thinking:
                     if not in_thinking_block:
@@ -386,13 +395,10 @@ class OllamaClient(LLMClient):
         stream: bool,
         think_value,
         options: dict | None = None,
+        tools: list[dict] | None = None, # Add tools parameter
     ) -> dict:
         """
         Build a request payload for the native /api/chat endpoint.
-
-        Images are passed as a list of base64 strings directly on each
-        message dict under the `images` key — exactly the format Ollama
-        expects. No content-part conversion is needed.
         """
         payload: dict = {
             "model": self.model,
@@ -402,6 +408,11 @@ class OllamaClient(LLMClient):
         }
         if options:
             payload["options"] = self._normalize_options(options)
+            
+        # Natively inject schemas if provided
+        if tools:
+            payload["tools"] = tools
+            
         return payload
 
     def _build_stream_options(self, think_value) -> dict:

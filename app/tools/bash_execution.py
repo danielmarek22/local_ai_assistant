@@ -12,6 +12,18 @@ class BashExecutionTool:
     name = "execute_bash"
     description = "Executes a safe read-only bash command. Allowed commands: ls, cat, pwd, whoami, uptime, df, free, date, head, tail."
 
+    # Add the JSON schema parameters for Ollama
+    parameters = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The bash command to execute"
+            }
+        },
+        "required": ["command"]
+    }
+
     # Define strictly allowed base commands (read-only / safe)
     ALLOWED_COMMANDS = {
         "ls", "cat", "pwd", "whoami", "echo", "uptime", "df", "free", "date", "head", "tail"

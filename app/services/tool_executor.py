@@ -19,6 +19,24 @@ class ToolExecutor:
     def __init__(self, tools):
         self.tools = tools
 
+    def get_native_tools(self) -> list[dict]:
+            """
+            Dynamically extracts available tool metadata and formats it
+            into Ollama-compatible JSON schemas.
+            """
+            native_tools = []
+            for name, tool in self.tools.items():
+                if getattr(tool, "is_available", False):
+                    native_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": getattr(tool, "description", "No description provided."),
+                            "parameters": getattr(tool, "parameters", {"type": "object", "properties": {}})
+                        }
+                    })
+            return native_tools
+
     def execute(
         self,
         action: Action,
