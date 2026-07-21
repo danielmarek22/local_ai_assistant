@@ -446,7 +446,7 @@ class Orchestrator:
 
             action = result["tool_action"]
             
-            # Save the intent to the history tracking array using native assistant format
+            # 1. Save the tool call intent to the messages array FIRST
             messages.append({
                 "role": "assistant",
                 "content": "",
@@ -458,35 +458,48 @@ class Orchestrator:
                 }]
             })
 
+            # 2. Execute the tool (THIS DEFINES THE 'observation' VARIABLE)
             observation = yield from self._execute_late_tool_action(
                 session_id=session_id,
                 action=action,
                 user_text=user_text,
             )
 
+            # 3. Save the trace to your history log
             safe_observation = observation[:1024] + ("..." if len(observation) > 1024 else "")
-            
             self.history.add(
                 session_id, 
                 "system",
                 f"[Tool Execution Trace: {action.type.value}]\n{safe_observation}"
             )
 
-            # Append the tool's result to the messages array using native tool format
+            # 4. Feed the observation and protocol back to the model
             messages.append({
                 "role": "tool",
                 "tool_name": action.type.value,
-                "content": observation,
+                "content": (
+                    f"{observation}\n\n"
+                    "[SYSTEM INTERRUPT: EVALUATION PROTOCOL]\n"
+                    "1. ERROR RECOVERY: If the observation contains an error, DO NOT apologize. Emit a NEW tool call with corrected parameters, or try a different approach.\n"
+                    "2. CONTINUATION: If the data is incomplete, emit another tool call to gather more information.\n"
+                    "3. CLARIFICATION: If you are stuck or need user guidance, stop calling tools and ask the user directly.\n"
+                    "4. COMPLETION: If you have what you need, answer the user directly.\n"
+                    "CRITICAL: Keep your internal reasoning brief and decisive. Do not output conversational filler."
+                ),
             })
 
+        # --- LOOP EXHAUSTION FALLBACK ---
         logger.warning("[%s] Late routing hit max steps; forcing final answer", session_id)
         messages.append({
             "role": "user",
             "content": (
-                "Internal instruction: stop calling tools and answer the original "
-                "user request with the information already available."
+                "[SYSTEM INTERRUPT: MAX TOOL STEPS REACHED]\n"
+                "You have reached the maximum allowed tool calls for this turn. "
+                "Stop calling tools. Answer the original user request based ONLY on the information you have gathered so far. "
+                "If you were unable to complete the task, explicitly explain what you tried, why it failed, and what you need from the user to proceed."
             ),
         })
+        
         response = yield from self._stream_response(
             session_id,
             messages,
