@@ -228,6 +228,7 @@ def build_orchestrator() -> Orchestrator:
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
+        audio_payload_field=config.voice_input.get("native_audio", {}).get("payload_field", "images"),
     )
 
     logger.debug(

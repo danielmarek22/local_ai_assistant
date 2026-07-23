@@ -53,8 +53,13 @@ class Config:
                 "model_size": "small",
                 "device": "cpu",
                 "compute_type": "int8",
+                "vad_filter": True,
+                "vad_parameters": {"min_silence_duration_ms": 300},
             },
         )
+
+        # Voice input routing
+        self.voice_input = self._load_voice_input_config(self.raw.get("voice_input"))
 
         # Logging
         self.logging = self.raw.get(
@@ -148,4 +153,32 @@ class Config:
 
         config["engine"] = str(engine or "qwen3")
         config["qwen3"].update(raw_tts)
+        return config
+
+    @staticmethod
+    def _default_voice_input_config() -> dict:
+        return {
+            "path": "stt",
+            "native_audio": {
+                "payload_field": "images",
+                "prompt_text": "Please answer the user's spoken audio.",
+                "display_text": "Voice message",
+                "convert_to_wav": True,
+                "sample_rate": 16000,
+            },
+        }
+
+    def _load_voice_input_config(self, raw_voice_input: dict | None) -> dict:
+        config = deepcopy(self._default_voice_input_config())
+        if not isinstance(raw_voice_input, dict) or not raw_voice_input:
+            return config
+
+        path = raw_voice_input.get("path")
+        if path:
+            config["path"] = str(path)
+
+        native_audio = raw_voice_input.get("native_audio")
+        if isinstance(native_audio, dict):
+            config["native_audio"].update(native_audio)
+
         return config

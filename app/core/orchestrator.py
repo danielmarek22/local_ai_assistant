@@ -16,7 +16,7 @@ from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
 from app.logging import trace_event
-from app.perception.attachments import Attachment
+from app.perception.attachments import Attachment, ImageAttachment
 from app.perception.state import PerceptionState
 from app.services.tool_executor import ToolExecutor
 from app.perception.keys import PerceptionKey
@@ -138,11 +138,16 @@ class Orchestrator:
             )
 
             # 3. Persist user input (to SQLite + Vector Store)
+            storable_attachments = [
+                attachment
+                for attachment in turn_input.attachments
+                if isinstance(attachment, ImageAttachment)
+            ]
             self.history.add(
                 session_id,
                 "user",
                 history_text,
-                attachments=turn_input.attachments,
+                attachments=storable_attachments,
             )
 
             # 4. Context construction
