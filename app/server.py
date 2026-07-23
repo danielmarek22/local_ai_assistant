@@ -57,6 +57,7 @@ _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
+TOOL_APPROVAL_TIMEOUT_SECONDS = 300.0
 BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
 VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
@@ -383,6 +384,68 @@ async def _send_turn_error(ws: WebSocket, message: str) -> None:
             "type": "assistant_end",
             "content": message,
         })
+
+
+async def _request_tool_approval(
+    ws: WebSocket,
+    request: dict,
+    connection_id: str,
+    timeout_seconds: float = TOOL_APPROVAL_TIMEOUT_SECONDS,
+) -> bool:
+    approval_id = uuid.uuid4().hex
+    command = str(request.get("command", ""))
+    tool_name = str(request.get("tool", "execute_bash"))
+    reason = str(request.get("reason", "This command requires human approval."))
+
+    logger.info("[%s] Requesting human approval for %s command: %s", connection_id, tool_name, command)
+    await _send_ws_payload(ws, {
+        "type": "tool_approval_request",
+        "approval_id": approval_id,
+        "tool": tool_name,
+        "command": command,
+        "reason": reason,
+        "timeout_seconds": timeout_seconds,
+    })
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("[%s] Tool approval timed out for command: %s", connection_id, command)
+            return False
+
+        raw_message = await asyncio.wait_for(ws.receive(), timeout=remaining)
+        if raw_message.get("type") == "websocket.disconnect":
+            raise WebSocketDisconnect()
+
+        text_payload = raw_message.get("text")
+        if text_payload is None:
+            continue
+
+        try:
+            payload = json.loads(text_payload)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        if (
+            payload.get("type") != "tool_approval_response"
+            or payload.get("approval_id") != approval_id
+        ):
+            logger.debug("[%s] Ignoring websocket message while awaiting tool approval", connection_id)
+            continue
+
+        approved = bool(payload.get("approved"))
+        logger.info(
+            "[%s] Human %s %s command: %s",
+            connection_id,
+            "approved" if approved else "denied",
+            tool_name,
+            command,
+        )
+        return approved
 
 
 def _build_session_init_payload(
@@ -824,6 +887,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     orchestrator = app.state.orchestrator
     watchdog = getattr(app.state, "vision_watchdog", None)
+    event_loop = asyncio.get_running_loop()
     assistant_state_tracker = {"state": AssistantState.IDLE}
     last_screen_detection = 0.0
     last_webcam_detection = 0.0
@@ -833,6 +897,21 @@ async def websocket_endpoint(ws: WebSocket):
     connection_instant_mode = False
     connection_reasoning_override: bool | None = None
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
+
+    def request_tool_approval(request: dict) -> bool:
+        future = asyncio.run_coroutine_threadsafe(
+            _request_tool_approval(
+                ws=ws,
+                request=request,
+                connection_id=connection_id,
+            ),
+            event_loop,
+        )
+        try:
+            return bool(future.result(timeout=TOOL_APPROVAL_TIMEOUT_SECONDS + 5.0))
+        except Exception:
+            logger.exception("[%s] Tool approval failed; denying request", connection_id)
+            return False
 
     async def handle_vision_payload(payload: dict) -> Attachment | None:
         nonlocal last_screen_detection
@@ -1141,6 +1220,7 @@ async def websocket_endpoint(ws: WebSocket):
                         instant_mode=instant_mode,
                         attachments=attachments,
                         input_modality=input_modality,
+                        tool_approval_callback=request_tool_approval,
                     ),
                     connection_id=connection_id,
                     original_attachment_count=original_attachment_count,

@@ -86,6 +86,15 @@ export class NetworkClient {
                 else if (data.type === 'user_notice' && this.handlers.onUserNotice) {
                     this.handlers.onUserNotice(data);
                 }
+                else if (data.type === 'tool_approval_request' && this.handlers.onToolApprovalRequest) {
+                    this.handlers.onToolApprovalRequest({
+                        approvalId: data.approval_id,
+                        tool: data.tool,
+                        command: data.command,
+                        reason: data.reason,
+                        timeoutSeconds: data.timeout_seconds,
+                    });
+                }
                 else if (data.type === 'stt_transcript' && this.handlers.onSttTranscript) {
                     this.handlers.onSttTranscript({
                         text: data.text,
@@ -159,6 +168,16 @@ export class NetworkClient {
             }
 
             this.ws.send(JSON.stringify(payload));
+        }
+    }
+
+    sendToolApproval(approvalId, approved) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'tool_approval_response',
+                approval_id: approvalId,
+                approved: Boolean(approved),
+            }));
         }
     }
 

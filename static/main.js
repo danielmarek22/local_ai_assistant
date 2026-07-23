@@ -122,6 +122,11 @@ const handlers = {
             uiManager.addNoticeToLastUserMessage(payload.message, payload?.tone || 'warning');
         }
     },
+    onToolApprovalRequest: (payload) => {
+        uiManager.showToolApprovalRequest(payload, (approvalId, approved) => {
+            client.sendToolApproval(approvalId, approved);
+        });
+    },
     onEnd: (finalContent) => {
         uiManager.finalizeThinkingMessage();
         uiManager.finalizeAiMessage(finalContent);

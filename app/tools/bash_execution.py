@@ -1,16 +1,30 @@
 import subprocess
 import logging
 import shlex
+from typing import Callable, TypedDict
 
 logger = logging.getLogger("bash_tool")
 
+
+class BashApprovalRequest(TypedDict):
+    tool: str
+    command: str
+    reason: str
+
+
 class BashExecutionTool:
     """
-    Executes bash commands on the local system with a strict allowlist.
+    Executes bash commands on the local system.
+
+    Common read-only commands run immediately. Everything else requires an
+    explicit human approval callback before it is passed to bash.
     """
     
     name = "execute_bash"
-    description = "Executes a safe read-only bash command. Allowed commands: ls, cat, pwd, whoami, uptime, df, free, date, head, tail."
+    description = (
+        "Executes local bash commands. Common read-only commands run immediately; "
+        "commands with writes, shell operators, or unrecognized executables require browser approval first."
+    )
 
     # Add the JSON schema parameters for Ollama
     parameters = {
@@ -24,13 +38,38 @@ class BashExecutionTool:
         "required": ["command"]
     }
 
-    # Define strictly allowed base commands (read-only / safe)
-    ALLOWED_COMMANDS = {
-        "ls", "cat", "pwd", "whoami", "echo", "uptime", "df", "free", "date", "head", "tail"
+    # Common read-only commands that can run without interrupting the user.
+    INSTANT_READ_ONLY_COMMANDS = {
+        "awk",
+        "basename",
+        "cat",
+        "date",
+        "df",
+        "dirname",
+        "du",
+        "env",
+        "find",
+        "free",
+        "git",
+        "head",
+        "id",
+        "jq",
+        "ls",
+        "pwd",
+        "rg",
+        "sed",
+        "sort",
+        "stat",
+        "tail",
+        "uname",
+        "uniq",
+        "uptime",
+        "wc",
+        "whoami",
     }
 
-    # Block shell operators that allow command chaining/redirection/execution
-    FORBIDDEN_OPERATORS = {";", "&&", "||", "|", ">", ">>", "<", "$(", "`"}
+    # Shell operators make a command harder to reason about, so they need approval.
+    APPROVAL_OPERATORS = {";", "&&", "||", "|", ">", ">>", "<", "$(", "`"}
 
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
@@ -39,38 +78,61 @@ class BashExecutionTool:
     def is_available(self) -> bool:
         return True
 
-    def _is_command_safe(self, command: str) -> tuple[bool, str]:
-        """Validates the command against the allowlist and checks for shell injection."""
-        # 1. Check for forbidden operators to prevent chaining
-        for op in self.FORBIDDEN_OPERATORS:
+    def _approval_reason(self, command: str) -> tuple[bool, str]:
+        """
+        Return whether the command needs human approval and why.
+
+        Empty or malformed commands are still denied outright because there is
+        nothing useful for a human to approve.
+        """
+        for op in self.APPROVAL_OPERATORS:
             if op in command:
-                return False, f"Command contains forbidden shell operator '{op}'."
+                return True, f"Command contains shell operator '{op}'."
         
-        # 2. Parse the command safely
         try:
             tokens = shlex.split(command)
             if not tokens:
-                return False, "Empty command."
+                raise ValueError("Empty command.")
             
             base_cmd = tokens[0]
-            if base_cmd not in self.ALLOWED_COMMANDS:
-                return False, f"Command '{base_cmd}' is not in the allowlist. Allowed: {', '.join(self.ALLOWED_COMMANDS)}."
+            if base_cmd not in self.INSTANT_READ_ONLY_COMMANDS:
+                return True, f"Command '{base_cmd}' is outside the instant read-only allowlist."
             
-            return True, ""
+            return False, ""
         except ValueError as e:
-            # shlex raises ValueError for unclosed quotes, etc.
-            return False, f"Malformed command: {e}"
+            raise ValueError(f"Malformed command: {e}") from e
 
-    def run(self, command: str) -> str | None:
+    def run(
+        self,
+        command: str,
+        approval_callback: Callable[[BashApprovalRequest], bool] | None = None,
+    ) -> str | None:
         logger.info("Evaluating bash command: %s", command)
         
-        # Security Gate
-        is_safe, reason = self._is_command_safe(command)
-        if not is_safe:
-            logger.warning("Blocked unsafe bash command: %s (Reason: %s)", command, reason)
-            return f"Permission Denied: {reason}"
+        try:
+            needs_approval, reason = self._approval_reason(command)
+        except ValueError as exc:
+            logger.warning("Blocked malformed bash command: %s (Reason: %s)", command, exc)
+            return f"Permission Denied: {exc}"
 
-        logger.info("Command passed security checks. Executing.")
+        if needs_approval:
+            if approval_callback is None:
+                logger.warning("Blocked bash command without approval handler: %s (Reason: %s)", command, reason)
+                return f"Permission Denied: {reason}"
+
+            approved = approval_callback({
+                "tool": self.name,
+                "command": command,
+                "reason": reason,
+            })
+            if not approved:
+                logger.info("Human denied bash command: %s", command)
+                return f"Permission Denied: Human approval was not granted. Reason: {reason}"
+
+            logger.info("Human approved bash command: %s", command)
+        else:
+            logger.info("Command classified as read-only. Executing without approval.")
+
         try:
             result = subprocess.run(
                 command,

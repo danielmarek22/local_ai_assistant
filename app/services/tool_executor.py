@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import Generator, Optional
+from typing import Callable, Generator, Optional
 
 from app.core.actions import Action
 from app.core.events import AssistantStateEvent
@@ -41,6 +41,7 @@ class ToolExecutor:
         self,
         action: Action,
         user_text: str,
+        approval_callback: Callable[[dict], bool] | None = None,
     ) -> Generator[AssistantStateEvent, None, Optional[str]]:
         # Use .value for safe dictionary lookup
         tool = self.tools.get(action.type.value)
@@ -83,7 +84,10 @@ class ToolExecutor:
                 },
             )
 
-            context = tool.run(primary_arg)
+            if action.type.value == "execute_bash":
+                context = tool.run(primary_arg, approval_callback=approval_callback)
+            else:
+                context = tool.run(primary_arg)
 
             logger.info(
                 "Tool '%s' completed (duration=%.2f ms)",

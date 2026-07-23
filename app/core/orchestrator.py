@@ -1,7 +1,7 @@
 import logging
 import time
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 from app.core.actions import Action, ActionType
 from app.core.events import (
@@ -66,6 +66,7 @@ class Orchestrator:
         instant_mode: bool = False,
         attachments: list[Attachment] | None = None,
         input_modality = InputModality.TEXT,
+        tool_approval_callback: Callable[[dict], bool] | None = None,
     ):
         start_ts = time.perf_counter()
         turn_input = TurnInput(
@@ -172,6 +173,7 @@ class Orchestrator:
                     session_id=session_id,
                     messages=messages,
                     user_text=turn_input.user_text,
+                    tool_approval_callback=tool_approval_callback,
                 )
 
             # Prevent History Poisoning by dropping empty responses
@@ -426,6 +428,7 @@ class Orchestrator:
         session_id: str,
         messages,
         user_text: str,
+        tool_approval_callback: Callable[[dict], bool] | None = None,
     ):
         logger.info("[%s] Calling LLM with native late routing", session_id)
         
@@ -468,6 +471,7 @@ class Orchestrator:
                 session_id=session_id,
                 action=action,
                 user_text=user_text,
+                tool_approval_callback=tool_approval_callback,
             )
 
             # 3. Save the trace to your history log
@@ -602,12 +606,17 @@ class Orchestrator:
         session_id: str,
         action: Action,
         user_text: str,
+        tool_approval_callback: Callable[[dict], bool] | None = None,
     ):
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         yield AssistantThinkingEvent(text=f"\n[Using {action.type.value}]\n")
 
         try:
-            observation = yield from self.tool_executor.execute(action, user_text)
+            observation = yield from self.tool_executor.execute(
+                action,
+                user_text,
+                approval_callback=tool_approval_callback,
+            )
         except Exception as exc:
             logger.exception("[%s] Late-routed tool execution failed", session_id)
             observation = f"Tool execution failed: {exc}"

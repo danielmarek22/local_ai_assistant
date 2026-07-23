@@ -41,6 +41,12 @@ export class UIManager {
         this.historyStatus = document.getElementById('history-status');
         this.historyRefreshBtn = document.getElementById('history-refresh-btn');
         this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
+        this.toolApprovalOverlay = document.getElementById('tool-approval-overlay');
+        this.toolApprovalTool = document.getElementById('tool-approval-tool');
+        this.toolApprovalReason = document.getElementById('tool-approval-reason');
+        this.toolApprovalCommand = document.getElementById('tool-approval-command');
+        this.toolApprovalApproveBtn = document.getElementById('tool-approval-approve');
+        this.toolApprovalDenyBtn = document.getElementById('tool-approval-deny');
 
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
@@ -61,6 +67,8 @@ export class UIManager {
         this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
+        this.pendingToolApprovals = [];
+        this.activeToolApproval = null;
 
         // STT recording state
         this._mediaRecorder = null;
@@ -84,6 +92,7 @@ export class UIManager {
         this.initComposerControls();
         this.initConfigControls();
         this.initMicControls();
+        this.initToolApprovalControls();
     }
 
     // ============================================================
@@ -322,6 +331,78 @@ export class UIManager {
 
     onMicHotkeyChange(callback) {
         this._onMicHotkeyChangeHandler = callback;
+    }
+
+    initToolApprovalControls() {
+        this.toolApprovalApproveBtn?.addEventListener('click', () => {
+            this.resolveActiveToolApproval(true);
+        });
+
+        this.toolApprovalDenyBtn?.addEventListener('click', () => {
+            this.resolveActiveToolApproval(false);
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            if (this.toolApprovalOverlay?.classList.contains('hidden')) return;
+
+            event.preventDefault();
+            this.resolveActiveToolApproval(false);
+        });
+    }
+
+    showToolApprovalRequest(request, callback) {
+        if (!request?.approvalId) return;
+
+        this.pendingToolApprovals.push({
+            approvalId: request.approvalId,
+            tool: request.tool || 'execute_bash',
+            command: request.command || '',
+            reason: request.reason || 'This command requires human approval.',
+            callback,
+        });
+
+        if (!this.activeToolApproval) {
+            this.renderNextToolApproval();
+        }
+    }
+
+    renderNextToolApproval() {
+        const nextRequest = this.pendingToolApprovals.shift();
+        if (!nextRequest || !this.toolApprovalOverlay) return;
+
+        this.activeToolApproval = nextRequest;
+
+        if (this.toolApprovalTool) {
+            this.toolApprovalTool.textContent = nextRequest.tool;
+        }
+
+        if (this.toolApprovalReason) {
+            this.toolApprovalReason.textContent = nextRequest.reason;
+        }
+
+        if (this.toolApprovalCommand) {
+            this.toolApprovalCommand.textContent = nextRequest.command;
+        }
+
+        this.toolApprovalOverlay.classList.remove('hidden');
+        this.toolApprovalDenyBtn?.focus();
+    }
+
+    resolveActiveToolApproval(approved) {
+        const activeRequest = this.activeToolApproval;
+        if (!activeRequest) return;
+
+        this.activeToolApproval = null;
+        this.toolApprovalOverlay?.classList.add('hidden');
+
+        try {
+            activeRequest.callback(activeRequest.approvalId, Boolean(approved));
+        } catch (error) {
+            console.warn('Failed to send tool approval decision:', error);
+        }
+
+        this.renderNextToolApproval();
     }
 
     async applyVoiceMode(mode = this.voiceMode) {
