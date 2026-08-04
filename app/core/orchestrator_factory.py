@@ -147,6 +147,7 @@ def build_orchestrator() -> Orchestrator:
     memory_retriever = MemoryRetriever(
         memory_store=memory_store,
         history_store=history_store,
+        semantic_limit=config.context["injected_memory_limit"],
     )
     memory_action_handler = MemoryActionHandler(
         memory_store=memory_store,

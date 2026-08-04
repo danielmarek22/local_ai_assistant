@@ -34,13 +34,7 @@ class Config:
         )
 
         # Context
-        self.context = self.raw.get(
-            "context",
-            {
-                "history_limit": 6,
-                "memory_limit": 5,
-            },
-        )
+        self.context = self._load_context_config(self.raw.get("context"))
 
         # TTS
         self.tts = self._load_tts_config(self.raw.get("tts"))
@@ -181,4 +175,19 @@ class Config:
         if isinstance(native_audio, dict):
             config["native_audio"].update(native_audio)
 
+        return config
+
+    @staticmethod
+    def _default_context_config() -> dict:
+        return {
+            "history_limit": 6,
+            "injected_memory_limit": 5,
+        }
+
+    def _load_context_config(self, raw_context: dict | None) -> dict:
+        config = deepcopy(self._default_context_config())
+        if not isinstance(raw_context, dict) or not raw_context:
+            return config
+
+        config.update(raw_context)
         return config
