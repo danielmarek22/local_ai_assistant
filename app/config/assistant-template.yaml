@@ -1,7 +1,7 @@
 llm:
   backend: ollama
   host: http://localhost:11434
-  model: qwen3.5:9b
+  model: gemma4:12b-it-qat
   timeout_s: 30.0
   max_retries: 2
   retry_backoff_s: 0.25
@@ -48,7 +48,7 @@ orchestrator:
 
 context:
   history_limit: 6
-  memory_limit: 5
+  injected_memory_limit: 5
 
 tts:
   engine: pocket-tts
