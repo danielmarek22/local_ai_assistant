@@ -149,6 +149,42 @@ class ImageAttachment(Attachment):
         return payload[offset:]
 
 
+@dataclass(frozen=True)
+class AudioAttachment(Attachment):
+    base64_data: str | None = None
+
+    @classmethod
+    def from_bytes(
+        cls,
+        payload: bytes,
+        *,
+        name: str = "voice.wav",
+        mime_type: str = "audio/wav",
+    ) -> "AudioAttachment":
+        return cls(
+            name=name,
+            mime_type=mime_type,
+            base64_data=base64.b64encode(payload).decode("ascii"),
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    def as_bytes(self) -> bytes:
+        if self.base64_data:
+            return base64.b64decode(self.base64_data)
+
+        if self.storage_path:
+            return Path(self.storage_path).read_bytes()
+
+        raise ValueError("Audio attachment does not contain data or storage path")
+
+    def to_llm_audio(self) -> str:
+        if self.base64_data:
+            return self.base64_data
+
+        return base64.b64encode(self.as_bytes()).decode("ascii")
+
+
 def attachment_from_payload(payload: dict[str, Any]) -> Attachment:
     mime_type = payload.get("mime_type") or payload.get("mimeType")
     if isinstance(mime_type, str) and mime_type.startswith("image/"):

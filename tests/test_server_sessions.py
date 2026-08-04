@@ -124,6 +124,22 @@ class FakeWebSocket:
         self.messages.append(json.loads(payload))
 
 
+class FakeApprovalWebSocket(FakeWebSocket):
+    def __init__(self, approved=True):
+        super().__init__()
+        self.approved = approved
+
+    async def receive(self):
+        approval_id = self.messages[-1]["approval_id"]
+        return {
+            "text": json.dumps({
+                "type": "tool_approval_response",
+                "approval_id": approval_id,
+                "approved": self.approved,
+            })
+        }
+
+
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -487,6 +503,28 @@ class ServerSessionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(pending_chunks, [])
+
+    def test_request_tool_approval_sends_prompt_and_returns_response(self):
+        ws = FakeApprovalWebSocket(approved=True)
+
+        approved = server_module.asyncio.run(
+            server_module._request_tool_approval(
+                ws,
+                {
+                    "tool": "execute_bash",
+                    "command": "printf hi",
+                    "reason": "Command requires approval.",
+                },
+                connection_id="conn-1",
+                timeout_seconds=1.0,
+            )
+        )
+
+        self.assertTrue(approved)
+        self.assertEqual(ws.messages[0]["type"], "tool_approval_request")
+        self.assertEqual(ws.messages[0]["tool"], "execute_bash")
+        self.assertEqual(ws.messages[0]["command"], "printf hi")
+        self.assertEqual(ws.messages[0]["reason"], "Command requires approval.")
 
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
         text = (

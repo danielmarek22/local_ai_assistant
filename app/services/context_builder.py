@@ -2,7 +2,13 @@ import logging
 from datetime import datetime
 
 from app.logging import trace_event
-from app.perception.attachments import Attachment, ImageAttachment, attachment_from_payload, attachment_from_stored_record
+from app.perception.attachments import (
+    Attachment,
+    AudioAttachment,
+    ImageAttachment,
+    attachment_from_payload,
+    attachment_from_stored_record,
+)
 
 logger = logging.getLogger("context_builder")
 
@@ -14,11 +20,13 @@ class ContextBuilder:
         history_store,
         history_limit: int = 6,
         summary_store=None,
+        audio_payload_field: str = "images",
     ):
         self.system_prompt = system_prompt
         self.history_store = history_store
         self.history_limit = history_limit
         self.summary_store = summary_store
+        self.audio_payload_field = audio_payload_field or "images"
 
         logger.info(
             "ContextBuilder initialized (history_limit=%d, summary=%s)",
@@ -98,13 +106,7 @@ class ContextBuilder:
                 "content": content,
             }
             if role == "user" and row_attachments:
-                message_images = [
-                    attachment.to_llm_image()
-                    for attachment in row_attachments
-                    if isinstance(attachment, ImageAttachment)
-                ]
-                if message_images:
-                    message["images"] = message_images
+                self._attach_multimodal_payloads(message, row_attachments)
 
             messages.append(message)
 
@@ -113,13 +115,7 @@ class ContextBuilder:
             "content": user_text,
         }
         if attachments:
-            user_images = [
-                attachment.to_llm_image()
-                for attachment in attachments
-                if isinstance(attachment, ImageAttachment)
-            ]
-            if user_images:
-                user_message["images"] = user_images
+            self._attach_multimodal_payloads(user_message, attachments)
 
         messages.append(user_message)
 
@@ -177,6 +173,37 @@ class ContextBuilder:
             sections.append(f"Summary of previous conversation:\n{summary}")
 
         return "\n\n---\n\n".join(section for section in sections if section)
+
+    def _attach_multimodal_payloads(
+        self,
+        message: dict,
+        attachments: list[Attachment],
+    ) -> None:
+        image_payloads = [
+            attachment.to_llm_image()
+            for attachment in attachments
+            if isinstance(attachment, ImageAttachment)
+        ]
+        audio_payloads = [
+            attachment.to_llm_audio()
+            for attachment in attachments
+            if isinstance(attachment, AudioAttachment)
+        ]
+
+        if image_payloads:
+            message["images"] = image_payloads
+
+        if not audio_payloads:
+            return
+
+        if self.audio_payload_field == "images":
+            message["images"] = [*audio_payloads, *message.get("images", [])]
+            return
+
+        existing_payloads = message.get(self.audio_payload_field, [])
+        if not isinstance(existing_payloads, list):
+            existing_payloads = []
+        message[self.audio_payload_field] = [*audio_payloads, *existing_payloads]
 
     def _normalize_history_attachments(
         self,

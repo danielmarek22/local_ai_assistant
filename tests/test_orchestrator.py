@@ -42,8 +42,11 @@ class FakeToolExecutor:
         self.context = context
         self.calls = []
 
-    def execute(self, action: Action, user_text: str):
-        self.calls.append((action, user_text))
+    def get_native_tools(self):
+        return []
+
+    def execute(self, action: Action, user_text: str, approval_callback=None):
+        self.calls.append((action, user_text, approval_callback))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         return self.context
 
@@ -82,6 +85,11 @@ class FakeLLM:
         self.chunks = chunks
         self.error = error
         self.calls = []
+        self.chat_calls = []
+
+    def chat(self, messages, think_override=None, options_override=None, timeout_override=None, max_retries_override=None, tools=None):
+        self.chat_calls.append((messages, think_override, tools))
+        return {"content": ""}
 
     def stream_chat(self, messages, think_override=None):
         self.calls.append((messages, think_override))
@@ -153,6 +161,7 @@ class OrchestratorTests(unittest.TestCase):
         summary_existing=None,
         summary_trigger=10,
         llm_error=None,
+        late_routing_enabled=False,
     ):
         llm = FakeLLM(llm_chunks or ["Hello", " world"], error=llm_error)
         history = FakeHistoryStore()
@@ -164,10 +173,6 @@ class OrchestratorTests(unittest.TestCase):
         context_builder = FakeContextBuilder()
         memory_policy = FakeMemoryPolicy()
         memory_retriever = MemoryRetriever(memory_store=memory, history_store=history)
-        memory_action_handler = MemoryActionHandler(
-            memory_store=memory,
-            memory_policy=memory_policy,
-        )
         turn_finalizer = TurnFinalizer(
             history_store=history,
             summary_store=summary_store,
@@ -180,34 +185,31 @@ class OrchestratorTests(unittest.TestCase):
             context_builder=context_builder,
             history_store=history,
             summary_store=summary_store,
-            planner=planner,
             tool_executor=tool_executor,
             memory_retriever=memory_retriever,
-            memory_action_handler=memory_action_handler,
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            late_routing_enabled=late_routing_enabled,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
-    def test_turn_flow_injects_memory_and_tools_into_context(self):
+    def test_turn_flow_injects_memory_into_context(self):
         plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
         orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
 
         list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
-        # 1. Verify perception was updated with retrieved memories BEFORE planner runs
-        perception_snapshot = planner.calls[0][1]
+        perception_snapshot = orch.perception.snapshot()
         self.assertIn(PerceptionKey.MEMORY_RETRIEVED.value, perception_snapshot)
         self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value]["value"])
 
-        # 2. Verify ContextBuilder received memory and tool info separately
         mem_ctx = context_builder.calls[0]["memory_context"]
         tool_ctx = context_builder.calls[0]["tool_context"]
         
         self.assertIn("User likes testing", mem_ctx)
         self.assertIn("Past answer", mem_ctx)
         
-        self.assertEqual("tool info", tool_ctx)
+        self.assertIsNone(tool_ctx)
 
     def test_instant_mode_skips_planner_and_responds_directly(self):
         plan = Plan(actions=[
@@ -221,6 +223,61 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(planner.calls, [])
         self.assertEqual(tool_executor.calls, [])
         self.assertEqual(context_builder.calls[0]["tool_context"], None)
+
+    def test_agent_mode_uses_late_routing_chat_instead_of_streaming(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            llm,
+            _history,
+            _memory,
+            _summary,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["streaming response"],
+            summary_trigger=999,
+            late_routing_enabled=True,
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        self.assertEqual(len(llm.chat_calls), 1)
+        self.assertEqual(len(llm.calls), 0)
+
+    def test_late_tool_execution_forwards_approval_callback(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary,
+            _summarizer,
+            _planner,
+            tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        action = Action(type=ActionType.EXECUTE_BASH, payload={"command": "printf hi"})
+
+        def approve(_request):
+            return True
+
+        events, observation = consume_generator(
+            orch._execute_late_tool_action(
+                session_id=self.SESSION_ID,
+                action=action,
+                user_text="run command",
+                tool_approval_callback=approve,
+            )
+        )
+
+        self.assertEqual(observation, "tool info")
+        self.assertTrue(any(isinstance(e, AssistantStateEvent) for e in events))
+        self.assertEqual(tool_executor.calls, [(action, "run command", approve)])
 
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -652,8 +709,8 @@ class OrchestratorTests(unittest.TestCase):
 
         list(orch.handle_user_input(self.SESSION_ID, "", attachments=[attachment]))
 
-        self.assertEqual(planner.calls[0][0], "user shared image attachments: clipboard.png")
-        perception_snapshot = planner.calls[0][1]
+        self.assertEqual(context_builder.calls[0]["user_text"], "")
+        perception_snapshot = orch.perception.snapshot()
         self.assertEqual(perception_snapshot["user.input"]["image_count"], 1)
         self.assertEqual(
             perception_snapshot["user.input"]["attachments"][0]["name"],
@@ -824,14 +881,9 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(context_builder.calls[0]["session_id"], "session-a")
         self.assertEqual(context_builder.calls[1]["session_id"], "session-b")
 
-        first_perception = planner.calls[0][1]
-        second_perception = planner.calls[1][1]
+        perception_snapshot = orch.perception.snapshot()
         self.assertEqual(
-            first_perception[PerceptionKey.USER_INPUT.value]["text"],
-            "hello",
-        )
-        self.assertEqual(
-            second_perception[PerceptionKey.USER_INPUT.value]["text"],
+            perception_snapshot[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
 

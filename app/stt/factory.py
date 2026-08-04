@@ -14,4 +14,6 @@ def build_stt_engine(stt_config: dict) -> "WhisperSTTEngine | None":
         model_size=stt_config.get("model_size", "small"),
         device=stt_config.get("device", "cpu"),
         compute_type=stt_config.get("compute_type", "int8"),
+        vad_filter=stt_config.get("vad_filter", True),
+        vad_parameters=stt_config.get("vad_parameters"),
     )

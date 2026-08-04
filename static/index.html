@@ -126,20 +126,20 @@
                         </div>
                         <div class="config-control">
                             <div class="config-control-copy">
-                                <span class="config-control-title">Instant mode</span>
-                                <span class="config-control-description">Skip planning and always answer directly.</span>
+                                <span class="config-control-title">Agent mode</span>
+                                <span class="config-control-description">When on, use late routing and reason every message. When off, stream the answer directly.</span>
                             </div>
                             <div class="config-control-input config-control-actions">
-                                <button id="instant-mode-toggle" class="config-toggle-btn" type="button" aria-pressed="false">Off</button>
+                                <button id="agent-mode-toggle" class="config-toggle-btn" type="button" aria-pressed="false">On</button>
                             </div>
                         </div>
                         <div class="config-control">
                             <div class="config-control-copy">
-                                <span class="config-control-title">Thinking every message</span>
-                                <span class="config-control-description">Enable reasoning automatically and hide streamed thinking bubbles.</span>
+                                <span class="config-control-title">Hide thinking</span>
+                                <span class="config-control-description">Keep streamed thinking blocks hidden in the transcript.</span>
                             </div>
                             <div class="config-control-input config-control-actions">
-                                <button id="reasoning-always-toggle" class="config-toggle-btn" type="button" aria-pressed="false">Off</button>
+                                <button id="hide-thinking-toggle" class="config-toggle-btn" type="button" aria-pressed="false">Off</button>
                             </div>
                         </div>
                         <div class="config-control">
@@ -195,6 +195,21 @@
     <canvas id="screen-capture-canvas" class="hidden"></canvas>
     <video id="webcam-capture-video" class="hidden" autoplay muted playsinline></video>
     <canvas id="webcam-capture-canvas" class="hidden"></canvas>
+
+    <div id="tool-approval-overlay" class="tool-approval-overlay hidden" role="presentation">
+        <div class="tool-approval-dialog" role="dialog" aria-modal="true" aria-labelledby="tool-approval-title">
+            <div class="tool-approval-header">
+                <h2 id="tool-approval-title">Approve command?</h2>
+                <span id="tool-approval-tool" class="tool-approval-tool">execute_bash</span>
+            </div>
+            <p id="tool-approval-reason" class="tool-approval-reason"></p>
+            <pre id="tool-approval-command" class="tool-approval-command"></pre>
+            <div class="tool-approval-actions">
+                <button id="tool-approval-deny" class="tool-approval-btn deny" type="button">Deny</button>
+                <button id="tool-approval-approve" class="tool-approval-btn approve" type="button">Approve</button>
+            </div>
+        </div>
+    </div>
 
     <script type="module" src="/static/main.js"></script>
 </body>

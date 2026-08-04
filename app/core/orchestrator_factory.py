@@ -14,7 +14,8 @@ from app.services.summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
-from app.planners.factory import build_planner
+from app.tools.bash_execution import BashExecutionTool
+from app.tools.memory_write import MemoryWriteTool
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -24,6 +25,7 @@ from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
 )
+from app.services.tool_controls import build_prompt_with_tools
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -120,13 +122,6 @@ def build_orchestrator() -> Orchestrator:
     logger.debug("Storage initialized: database, vector_store, history, memory, summary")
 
     # --------------------------------------------------
-    # Planner
-    # --------------------------------------------------
-    logger.info("Building planner")
-    planner = build_planner(config, llm)
-    logger.info("Planner ready: %s", planner.__class__.__name__)
-
-    # --------------------------------------------------
     # Summarizers
     # --------------------------------------------------
     logger.info("Initializing summarizers")
@@ -176,7 +171,7 @@ def build_orchestrator() -> Orchestrator:
 
         web_client = SearXNGClient(
             base_url=web_cfg.get("base_url", config.tools["web"]["base_url"]),
-            timeout=web_cfg.get("timeout", config.planner["timeout_ms"] / 1000),
+            timeout=web_cfg.get("timeout", 10.0),  # Defaulted to 10s if missing
             max_retries=web_cfg.get("max_retries", 2),
             retry_backoff_s=web_cfg.get("retry_backoff_s", 0.25),
         )
@@ -197,6 +192,15 @@ def build_orchestrator() -> Orchestrator:
     else:
         logger.info("Web search tool disabled via config")
 
+        # Inject Bash Execution Tool
+    bash_tool = BashExecutionTool(timeout=15)
+    tools[bash_tool.name] = bash_tool
+    logger.info("Bash execution tool registered as '%s'", bash_tool.name)
+
+    memory_write_tool = MemoryWriteTool(memory_action_handler=memory_action_handler)
+    tools[memory_write_tool.name] = memory_write_tool
+    logger.info("Memory write tool registered as '%s'", memory_write_tool.name)
+
     tool_executor = ToolExecutor(tools)
 
     # --------------------------------------------------
@@ -207,15 +211,24 @@ def build_orchestrator() -> Orchestrator:
     avatar_controls_cfg = config.assistant.get("avatar_controls", {})
     allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
 
+    # Build system prompt with avatar controls and tool information
+    base_system_prompt = config.assistant["system_prompt"]
+    system_prompt_with_avatar = build_prompt_with_avatar_controls(
+        base_system_prompt,
+        gesture_catalog=gesture_catalog,
+        allowed_expressions=allowed_expressions,
+    )
+    system_prompt_with_tools = build_prompt_with_tools(
+        system_prompt_with_avatar,
+        tool_executor=tool_executor,
+    )
+
     context_builder = ContextBuilder(
-        system_prompt=build_prompt_with_avatar_controls(
-            config.assistant["system_prompt"],
-            gesture_catalog=gesture_catalog,
-            allowed_expressions=allowed_expressions,
-        ),
+        system_prompt=system_prompt_with_tools,
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
+        audio_payload_field=config.voice_input.get("native_audio", {}).get("payload_field", "images"),
     )
 
     logger.debug(
@@ -233,12 +246,11 @@ def build_orchestrator() -> Orchestrator:
         context_builder=context_builder,
         history_store=history_store,
         summary_store=summary_store,
-        planner=planner,
         tool_executor=tool_executor,
         memory_retriever=memory_retriever,
-        memory_action_handler=memory_action_handler,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
+        late_routing_enabled=True,
     )
 
     logger.info(

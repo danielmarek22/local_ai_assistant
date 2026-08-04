@@ -10,11 +10,9 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Memory command extraction
   - Search intent routing and default response fallback
 
-- `test_llm_planner.py`
-  - LLM planner JSON parsing behavior
-  - Handling extra text around JSON payloads
-  - Fallback behavior when LLM output is invalid
-  - Planner-specific non-streaming LLM option overrides
+- `test_late_routing_filter.py`
+  - Thinking-stream directive filtering
+  - Tool-call and memory-write directive parsing across chunk boundaries
 
 - `test_context_builder.py`
   - Prompt/context assembly order
@@ -34,7 +32,7 @@ Tests currently focus on deterministic core behavior that can be validated witho
 
 - `test_orchestrator.py`
   - Turn lifecycle and event emission
-  - Memory/tool context injection into prompts
+  - Memory context injection into prompts
   - Avatar expression tag parsing
   - Image-only user turns and attachment persistence
   - Summarization trigger behavior

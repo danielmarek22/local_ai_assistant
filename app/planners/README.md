@@ -1,28 +1,12 @@
 
 # Planners
 
-Decision-making components.
+Legacy planning components.
 
-## Responsibilities
-- Analyzing current state and context
-- Deciding next actions
-- Selecting tools or LLM calls
-- Requesting memory writes by emitting actions
+The active turn architecture now uses late routing in `app/core/orchestrator.py`.
+The model decides whether to call tools or write memory from inside its private
+thinking block, and the orchestrator filters and executes those internal
+directives before the visible answer is delivered.
 
-Planners define the *behavior* of the assistant.
-Multiple planners can coexist or be swapped.
-
-## Current Planner Set
-
-- `rule_planner.py`
-  - heuristic routing for explicit memory commands and obvious web-search intents
-- `llm_planner.py`
-  - asks the model for a JSON action plan
-- `hybrid_planner.py`
-  - lets rules handle confident cases first, otherwise falls back to the LLM planner
-
-Planners return `Plan` objects made of declarative actions such as:
-
-- `web_search`
-- `write_memory`
-- `respond`
+`rule_planner.py`, `plan.py`, and `actions.py` remain as small compatibility
+types around existing tool and memory action handlers.

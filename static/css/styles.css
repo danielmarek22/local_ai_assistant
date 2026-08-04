@@ -161,6 +161,115 @@ body {
 
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 
+.tool-approval-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.56);
+    backdrop-filter: blur(6px);
+}
+
+.tool-approval-dialog {
+    width: min(560px, 100%);
+    max-height: min(520px, calc(100vh - 40px));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px;
+    box-sizing: border-box;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(12, 16, 20, 0.96);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+
+.tool-approval-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.tool-approval-header h2 {
+    margin: 0;
+    font-size: 18px;
+    color: #f5f8fb;
+}
+
+.tool-approval-tool {
+    min-width: 0;
+    padding: 5px 8px;
+    border-radius: 7px;
+    background: rgba(0, 195, 255, 0.14);
+    border: 1px solid rgba(0, 195, 255, 0.28);
+    color: #aeeaff;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.tool-approval-reason {
+    margin: 0;
+    color: #cbd5dd;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.tool-approval-command {
+    margin: 0;
+    max-height: 260px;
+    overflow: auto;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.42);
+    color: #f2f6f9;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.tool-approval-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.tool-approval-btn {
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.tool-approval-btn.deny {
+    background: rgba(255, 255, 255, 0.08);
+    color: #eef5fb;
+}
+
+.tool-approval-btn.approve {
+    background: rgba(0, 255, 153, 0.18);
+    border-color: rgba(0, 255, 153, 0.45);
+    color: #8fffd0;
+}
+
+.tool-approval-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.tool-approval-btn.approve:hover {
+    background: rgba(0, 255, 153, 0.26);
+}
+
 #chat-history {
     flex: 1;
     padding: 20px;

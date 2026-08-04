@@ -301,7 +301,7 @@ class ChatHistoryStore:
 
         return hydrated_rows
 
-    def search_past_conversations(self, query: str, current_session: str, limit: int = 4, max_distance: float = 0.55) -> list[str]:
+    def search_past_conversations(self, query: str, current_session: str, limit: int = 4, max_distance: float = 0.65) -> list[str]:
         results = self.collection.query(
             query_texts=[query],
             n_results=limit,

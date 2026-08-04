@@ -68,6 +68,20 @@ stt:
   model_size: small   # tiny/base/small/medium — small is the sweet spot for local
   device: cpu
   compute_type: int8
+  vad_filter: true
+  vad_parameters:
+    min_silence_duration_ms: 300
+
+voice_input:
+  path: stt   # options: stt | native_audio
+  native_audio:
+    # Ollama Gemma 4 currently accepts WAV audio through the multimodal media slot.
+    # Use "audios" here if your backend exposes a dedicated audio field.
+    payload_field: images
+    prompt_text: Please answer the user's spoken audio.
+    display_text: Voice message
+    convert_to_wav: true
+    sample_rate: 16000
 
 vision_watchdog:
   model: HuggingFaceTB/SmolVLM-256M-Instruct

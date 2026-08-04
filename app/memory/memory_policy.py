@@ -11,7 +11,7 @@ class MemoryDecision:
 
 class SimpleMemoryPolicy:
     """
-    Translates planner memory actions into concrete storage decisions.
+    Translates memory actions into concrete storage decisions.
     """
 
     def decide_from_action(self, action_payload: dict) -> Optional[MemoryDecision]:

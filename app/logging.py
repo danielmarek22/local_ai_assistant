@@ -8,7 +8,7 @@ from typing import Any
 
 _LOGGING_CONFIGURED = False
 _TRACE_LOGGER_NAME = "trace"
-_SENSITIVE_BINARY_KEYS = {"base64_data", "data", "images"}
+_SENSITIVE_BINARY_KEYS = {"base64_data", "data", "images", "audios"}
 _DEFAULT_MAX_STRING_CHARS = 4000
 _DEFAULT_MAX_LOG_CHARS = 12000
 _WARNED_UNREGISTERED_TRACE_EVENTS: set[str] = set()
@@ -24,15 +24,12 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "assistant_response",
         "planner_input",
         "llm_stream_complete",
+        "late_routing_directive",
+        "late_routing_observation",
+        "late_routing_stream_complete",
         "proactive_event",
     ),
     "context_builder": ("context_built",),
-    "llm_planner": (
-        "planner_call",
-        "planner_timeout",
-        "planner_result",
-        "planner_parse_failure",
-    ),
     "llm": (
         "chat_request",
         "chat_response",

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import subprocess
 import uuid
 import time
 import emoji
@@ -27,7 +28,7 @@ from app.core.events import (
     AvatarAnimationEvent,
 )
 from app.logging import setup_logging_from_config
-from app.perception.attachments import Attachment, attachment_from_payload
+from app.perception.attachments import Attachment, AudioAttachment, attachment_from_payload
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
@@ -56,9 +57,12 @@ _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
+TOOL_APPROVAL_TIMEOUT_SECONDS = 300.0
 BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
 VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
+VOICE_INPUT_STT = "stt"
+VOICE_INPUT_NATIVE_AUDIO = "native_audio"
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -76,6 +80,76 @@ _MARKDOWN_ITALIC_RE = re.compile(r"(?<!\w)(\*|_)(.+?)\1(?!\w)")
 _MARKDOWN_STRIKE_RE = re.compile(r"~~(.+?)~~")
 _MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _voice_input_path() -> str:
+    path = str(config.voice_input.get("path", VOICE_INPUT_STT)).strip().lower()
+    if path in {"native", "audio", "gemma4"}:
+        return VOICE_INPUT_NATIVE_AUDIO
+    if path in {VOICE_INPUT_STT, VOICE_INPUT_NATIVE_AUDIO}:
+        return path
+    logger.warning("Unknown voice_input.path=%r; falling back to %s", path, VOICE_INPUT_STT)
+    return VOICE_INPUT_STT
+
+
+def _native_audio_config() -> dict:
+    native_audio = config.voice_input.get("native_audio", {})
+    return native_audio if isinstance(native_audio, dict) else {}
+
+
+def _convert_audio_to_wav(
+    audio_bytes: bytes,
+    *,
+    sample_rate: int = 16000,
+    timeout_s: float = 15.0,
+) -> bytes:
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "wav",
+        "pipe:1",
+    ]
+    result = subprocess.run(
+        command,
+        input=audio_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=timeout_s,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Audio conversion failed: {stderr or 'ffmpeg exited unsuccessfully'}")
+    return result.stdout
+
+
+def _build_native_audio_attachment(audio_bytes: bytes) -> AudioAttachment:
+    native_audio = _native_audio_config()
+    convert_to_wav = bool(native_audio.get("convert_to_wav", True))
+
+    if convert_to_wav:
+        sample_rate = int(native_audio.get("sample_rate", 16000))
+        payload = _convert_audio_to_wav(audio_bytes, sample_rate=sample_rate)
+        return AudioAttachment.from_bytes(
+            payload,
+            name="voice.wav",
+            mime_type="audio/wav",
+        )
+
+    return AudioAttachment.from_bytes(
+        audio_bytes,
+        name=str(native_audio.get("raw_name", "voice.webm")),
+        mime_type=str(native_audio.get("raw_mime_type", "audio/webm")),
+    )
 
 
 def _prepare_tts_text(text: str) -> str:
@@ -310,6 +384,68 @@ async def _send_turn_error(ws: WebSocket, message: str) -> None:
             "type": "assistant_end",
             "content": message,
         })
+
+
+async def _request_tool_approval(
+    ws: WebSocket,
+    request: dict,
+    connection_id: str,
+    timeout_seconds: float = TOOL_APPROVAL_TIMEOUT_SECONDS,
+) -> bool:
+    approval_id = uuid.uuid4().hex
+    command = str(request.get("command", ""))
+    tool_name = str(request.get("tool", "execute_bash"))
+    reason = str(request.get("reason", "This command requires human approval."))
+
+    logger.info("[%s] Requesting human approval for %s command: %s", connection_id, tool_name, command)
+    await _send_ws_payload(ws, {
+        "type": "tool_approval_request",
+        "approval_id": approval_id,
+        "tool": tool_name,
+        "command": command,
+        "reason": reason,
+        "timeout_seconds": timeout_seconds,
+    })
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("[%s] Tool approval timed out for command: %s", connection_id, command)
+            return False
+
+        raw_message = await asyncio.wait_for(ws.receive(), timeout=remaining)
+        if raw_message.get("type") == "websocket.disconnect":
+            raise WebSocketDisconnect()
+
+        text_payload = raw_message.get("text")
+        if text_payload is None:
+            continue
+
+        try:
+            payload = json.loads(text_payload)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        if (
+            payload.get("type") != "tool_approval_response"
+            or payload.get("approval_id") != approval_id
+        ):
+            logger.debug("[%s] Ignoring websocket message while awaiting tool approval", connection_id)
+            continue
+
+        approved = bool(payload.get("approved"))
+        logger.info(
+            "[%s] Human %s %s command: %s",
+            connection_id,
+            "approved" if approved else "denied",
+            tool_name,
+            command,
+        )
+        return approved
 
 
 def _build_session_init_payload(
@@ -618,7 +754,12 @@ async def startup_event():
     app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
     app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
-    app.state.stt = build_stt_engine(config.stt)
+    app.state.voice_input_path = _voice_input_path()
+    if app.state.voice_input_path == VOICE_INPUT_STT:
+        app.state.stt = build_stt_engine(config.stt)
+    else:
+        app.state.stt = None
+    logger.info("Voice input path configured as %s", app.state.voice_input_path)
 
 
 @app.on_event("shutdown")
@@ -746,6 +887,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     orchestrator = app.state.orchestrator
     watchdog = getattr(app.state, "vision_watchdog", None)
+    event_loop = asyncio.get_running_loop()
     assistant_state_tracker = {"state": AssistantState.IDLE}
     last_screen_detection = 0.0
     last_webcam_detection = 0.0
@@ -755,6 +897,21 @@ async def websocket_endpoint(ws: WebSocket):
     connection_instant_mode = False
     connection_reasoning_override: bool | None = None
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
+
+    def request_tool_approval(request: dict) -> bool:
+        future = asyncio.run_coroutine_threadsafe(
+            _request_tool_approval(
+                ws=ws,
+                request=request,
+                connection_id=connection_id,
+            ),
+            event_loop,
+        )
+        try:
+            return bool(future.result(timeout=TOOL_APPROVAL_TIMEOUT_SECONDS + 5.0))
+        except Exception:
+            logger.exception("[%s] Tool approval failed; denying request", connection_id)
+            return False
 
     async def handle_vision_payload(payload: dict) -> Attachment | None:
         nonlocal last_screen_detection
@@ -884,57 +1041,98 @@ async def websocket_endpoint(ws: WebSocket):
                 # value (b"") is falsy, which would wrongly fall through to
                 # the text branch and crash on raw_message["text"].
                 if raw_message.get("bytes") is not None:
-                    stt = getattr(app.state, "stt", None)
-                    if stt is None:
-                        pending_voice_attachments = []
-                        await _send_turn_error(ws, "STT is not available.")
-                        continue
-
                     audio_bytes = raw_message["bytes"]
+                    voice_input_path = getattr(app.state, "voice_input_path", _voice_input_path())
 
-                    logger.info(
-                        "[%s] Received audio frame (%d bytes)",
-                        connection_id,
-                        len(audio_bytes),
-                    )
-
-                    loop = asyncio.get_running_loop()
-                    try:
-                        result = await loop.run_in_executor(
-                            None, stt.transcribe, audio_bytes
+                    if voice_input_path == VOICE_INPUT_NATIVE_AUDIO:
+                        logger.info(
+                            "[%s] Received native audio frame (%d bytes)",
+                            connection_id,
+                            len(audio_bytes),
                         )
-                    except Exception:
-                        logger.exception("[%s] STT transcription failed", connection_id)
-                        pending_voice_attachments = []
-                        await _send_turn_error(ws, "Transcription failed.")
-                        continue
+                        loop = asyncio.get_running_loop()
+                        try:
+                            audio_attachment = await loop.run_in_executor(
+                                None,
+                                _build_native_audio_attachment,
+                                audio_bytes,
+                            )
+                        except Exception:
+                            logger.exception("[%s] Native audio preparation failed", connection_id)
+                            pending_voice_attachments = []
+                            await _send_turn_error(ws, "Audio preparation failed.")
+                            continue
 
-                    if not result.text.strip():
-                        logger.debug("[%s] STT returned empty transcript (silence)", connection_id)
-                        pending_voice_attachments = []
-                        await _send_ws_payload(ws, {"type": "stt_silence"})
-                        continue
+                        native_audio = _native_audio_config()
+                        display_text = str(native_audio.get("display_text", "Voice message"))
+                        user_text = str(
+                            native_audio.get(
+                                "prompt_text",
+                                "Please answer the user's spoken audio.",
+                            )
+                        )
 
-                    logger.info(
-                        "[%s] STT transcript: %r (lang=%s)",
-                        connection_id,
-                        result.text,
-                        result.language,
-                    )
+                        await _send_ws_payload(ws, {
+                            "type": "stt_transcript",
+                            "text": display_text,
+                            "language": None,
+                        })
 
-                    # Echo transcript to the UI so it can render the user bubble
-                    # before the assistant starts responding.
-                    await _send_ws_payload(ws, {
-                        "type": "stt_transcript",
-                        "text": result.text,
-                        "language": result.language,
-                    })
+                        reasoning_override = connection_reasoning_override
+                        instant_mode = connection_instant_mode
+                        attachments = [audio_attachment]
+                        input_modality = InputModality.VOICE
 
-                    user_text = result.text
-                    reasoning_override = connection_reasoning_override
-                    instant_mode = connection_instant_mode
-                    attachments = []
-                    input_modality = InputModality.VOICE
+                    else:
+                        stt = getattr(app.state, "stt", None)
+                        if stt is None:
+                            pending_voice_attachments = []
+                            await _send_turn_error(ws, "STT is not available.")
+                            continue
+
+                        logger.info(
+                            "[%s] Received audio frame (%d bytes)",
+                            connection_id,
+                            len(audio_bytes),
+                        )
+
+                        loop = asyncio.get_running_loop()
+                        try:
+                            result = await loop.run_in_executor(
+                                None, stt.transcribe, audio_bytes
+                            )
+                        except Exception:
+                            logger.exception("[%s] STT transcription failed", connection_id)
+                            pending_voice_attachments = []
+                            await _send_turn_error(ws, "Transcription failed.")
+                            continue
+
+                        if not result.text.strip():
+                            logger.debug("[%s] STT returned empty transcript (silence)", connection_id)
+                            pending_voice_attachments = []
+                            await _send_ws_payload(ws, {"type": "stt_silence"})
+                            continue
+
+                        logger.info(
+                            "[%s] STT transcript: %r (lang=%s)",
+                            connection_id,
+                            result.text,
+                            result.language,
+                        )
+
+                        # Echo transcript to the UI so it can render the user bubble
+                        # before the assistant starts responding.
+                        await _send_ws_payload(ws, {
+                            "type": "stt_transcript",
+                            "text": result.text,
+                            "language": result.language,
+                        })
+
+                        user_text = result.text
+                        reasoning_override = connection_reasoning_override
+                        instant_mode = connection_instant_mode
+                        attachments = []
+                        input_modality = InputModality.VOICE
 
                 # ── TEXT PATH ─────────────────────────────────────────────
                 else:
@@ -1022,6 +1220,7 @@ async def websocket_endpoint(ws: WebSocket):
                         instant_mode=instant_mode,
                         attachments=attachments,
                         input_modality=input_modality,
+                        tool_approval_callback=request_tool_approval,
                     ),
                     connection_id=connection_id,
                     original_attachment_count=original_attachment_count,

@@ -6,6 +6,7 @@ class ActionType(str, Enum):
     WEB_SEARCH = "web_search"
     WRITE_MEMORY = "write_memory"
     RESPOND = "respond"
+    EXECUTE_BASH = "execute_bash"
 
 @dataclass
 class Action:

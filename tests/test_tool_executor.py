@@ -29,6 +29,28 @@ class FakeTool:
         return self.result
 
 
+class FakeMemoryWriteTool:
+    def __init__(self, is_available=True, result="stored"):
+        self.is_available = is_available
+        self.result = result
+        self.queries = []
+
+    def run(self, payload: dict):
+        self.queries.append(payload)
+        return self.result
+
+
+class FakeBashTool:
+    is_available = True
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, command: str, approval_callback=None):
+        self.calls.append((command, approval_callback))
+        return "bash ctx"
+
+
 class ToolExecutorTests(unittest.TestCase):
     def test_unregistered_tool_returns_none_without_events(self):
         executor = ToolExecutor(tools={})
@@ -81,6 +103,41 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].state, AssistantState.SEARCHING)
         self.assertIsNone(result)
+
+    def test_memory_write_tool_receives_full_payload_dict(self):
+        tool = FakeMemoryWriteTool(is_available=True, result="stored")
+        executor = ToolExecutor(tools={"write_memory": tool})
+        action = Action(
+            type=ActionType.WRITE_MEMORY,
+            payload={"content": "remember this", "category": "general", "importance": 3},
+        )
+
+        events, result = consume_generator(executor.execute(action, "user text"))
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].state, AssistantState.SEARCHING)
+        self.assertEqual(result, "stored")
+        self.assertEqual(
+            tool.queries,
+            [{"content": "remember this", "category": "general", "importance": 3}],
+        )
+
+    def test_bash_tool_receives_approval_callback(self):
+        tool = FakeBashTool()
+        executor = ToolExecutor(tools={"execute_bash": tool})
+        action = Action(type=ActionType.EXECUTE_BASH, payload={"command": "printf hi"})
+
+        def approve(_request):
+            return True
+
+        events, result = consume_generator(
+            executor.execute(action, "user text", approval_callback=approve)
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].state, AssistantState.SEARCHING)
+        self.assertEqual(result, "bash ctx")
+        self.assertEqual(tool.calls, [("printf hi", approve)])
 
 
 if __name__ == "__main__":

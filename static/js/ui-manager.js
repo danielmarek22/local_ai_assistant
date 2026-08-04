@@ -25,8 +25,8 @@ export class UIManager {
         this.playbackVolumeValue = document.getElementById('playback-volume-value');
         this.micHotkeyBtn = document.getElementById('mic-hotkey-btn');
         this.micHotkeyCurrent = document.getElementById('mic-hotkey-current');
-        this.instantModeToggle = document.getElementById('instant-mode-toggle');
-        this.reasoningAlwaysToggle = document.getElementById('reasoning-always-toggle');
+        this.agentModeToggle = document.getElementById('agent-mode-toggle');
+        this.hideThinkingToggle = document.getElementById('hide-thinking-toggle');
         this.voiceModeButtons = Array.from(document.querySelectorAll('[data-voice-mode]'));
         this.screenPolicyButtons = Array.from(document.querySelectorAll('[data-screen-policy]'));
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
@@ -41,6 +41,12 @@ export class UIManager {
         this.historyStatus = document.getElementById('history-status');
         this.historyRefreshBtn = document.getElementById('history-refresh-btn');
         this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
+        this.toolApprovalOverlay = document.getElementById('tool-approval-overlay');
+        this.toolApprovalTool = document.getElementById('tool-approval-tool');
+        this.toolApprovalReason = document.getElementById('tool-approval-reason');
+        this.toolApprovalCommand = document.getElementById('tool-approval-command');
+        this.toolApprovalApproveBtn = document.getElementById('tool-approval-approve');
+        this.toolApprovalDenyBtn = document.getElementById('tool-approval-deny');
 
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
@@ -49,15 +55,20 @@ export class UIManager {
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
-        this.instantModeStorageKey = CONFIG.UI.STORAGE_KEYS.INSTANT_MODE;
-        this.instantModeEnabled = this.readStoredInstantMode();
+        this.agentModeStorageKey = CONFIG.UI.STORAGE_KEYS.AGENT_MODE;
+        this.hideThinkingStorageKey = CONFIG.UI.STORAGE_KEYS.HIDE_THINKING;
+        this.agentModeEnabled = this.readStoredAgentMode();
+        this.hideThinkingEnabled = this.readStoredHideThinking();
+        this.instantModeEnabled = !this.agentModeEnabled;
         this.reasoningAlwaysStorageKey = CONFIG.UI.STORAGE_KEYS.REASONING_ALWAYS_ON;
-        this.reasoningAlwaysEnabled = this.readStoredReasoningAlways();
+        this.reasoningAlwaysEnabled = this.agentModeEnabled;
         this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
         this.voiceMode = this.readStoredVoiceMode();
         this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
+        this.pendingToolApprovals = [];
+        this.activeToolApproval = null;
 
         // STT recording state
         this._mediaRecorder = null;
@@ -81,6 +92,7 @@ export class UIManager {
         this.initComposerControls();
         this.initConfigControls();
         this.initMicControls();
+        this.initToolApprovalControls();
     }
 
     // ============================================================
@@ -319,6 +331,78 @@ export class UIManager {
 
     onMicHotkeyChange(callback) {
         this._onMicHotkeyChangeHandler = callback;
+    }
+
+    initToolApprovalControls() {
+        this.toolApprovalApproveBtn?.addEventListener('click', () => {
+            this.resolveActiveToolApproval(true);
+        });
+
+        this.toolApprovalDenyBtn?.addEventListener('click', () => {
+            this.resolveActiveToolApproval(false);
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            if (this.toolApprovalOverlay?.classList.contains('hidden')) return;
+
+            event.preventDefault();
+            this.resolveActiveToolApproval(false);
+        });
+    }
+
+    showToolApprovalRequest(request, callback) {
+        if (!request?.approvalId) return;
+
+        this.pendingToolApprovals.push({
+            approvalId: request.approvalId,
+            tool: request.tool || 'execute_bash',
+            command: request.command || '',
+            reason: request.reason || 'This command requires human approval.',
+            callback,
+        });
+
+        if (!this.activeToolApproval) {
+            this.renderNextToolApproval();
+        }
+    }
+
+    renderNextToolApproval() {
+        const nextRequest = this.pendingToolApprovals.shift();
+        if (!nextRequest || !this.toolApprovalOverlay) return;
+
+        this.activeToolApproval = nextRequest;
+
+        if (this.toolApprovalTool) {
+            this.toolApprovalTool.textContent = nextRequest.tool;
+        }
+
+        if (this.toolApprovalReason) {
+            this.toolApprovalReason.textContent = nextRequest.reason;
+        }
+
+        if (this.toolApprovalCommand) {
+            this.toolApprovalCommand.textContent = nextRequest.command;
+        }
+
+        this.toolApprovalOverlay.classList.remove('hidden');
+        this.toolApprovalDenyBtn?.focus();
+    }
+
+    resolveActiveToolApproval(approved) {
+        const activeRequest = this.activeToolApproval;
+        if (!activeRequest) return;
+
+        this.activeToolApproval = null;
+        this.toolApprovalOverlay?.classList.add('hidden');
+
+        try {
+            activeRequest.callback(activeRequest.approvalId, Boolean(approved));
+        } catch (error) {
+            console.warn('Failed to send tool approval decision:', error);
+        }
+
+        this.renderNextToolApproval();
     }
 
     async applyVoiceMode(mode = this.voiceMode) {
@@ -654,14 +738,14 @@ export class UIManager {
             this.micHotkeyBtn.addEventListener('click', () => this.startHotkeyCapture());
         }
 
-        this.setInstantMode(this.instantModeEnabled, { persist: false });
-        this.instantModeToggle?.addEventListener('click', () => {
-            this.setInstantMode(!this.instantModeEnabled);
+        this.setAgentMode(this.agentModeEnabled, { persist: false });
+        this.agentModeToggle?.addEventListener('click', () => {
+            this.setAgentMode(!this.agentModeEnabled);
         });
 
-        this.setReasoningAlways(this.reasoningAlwaysEnabled, { persist: false });
-        this.reasoningAlwaysToggle?.addEventListener('click', () => {
-            this.setReasoningAlways(!this.reasoningAlwaysEnabled);
+        this.setHideThinking(this.hideThinkingEnabled, { persist: false });
+        this.hideThinkingToggle?.addEventListener('click', () => {
+            this.setHideThinking(!this.hideThinkingEnabled);
         });
 
         this.setVoiceMode(this.voiceMode, { persist: false, activate: false });
@@ -748,53 +832,51 @@ export class UIManager {
         return Number(this.playbackVolumeInput.value) / 100;
     }
 
-    readStoredInstantMode() {
+    readStoredAgentMode() {
         try {
-            return localStorage.getItem(this.instantModeStorageKey) === 'true';
+            const storedValue = localStorage.getItem(this.agentModeStorageKey);
+            if (storedValue !== null) {
+                return storedValue === 'true';
+            }
+
+            const legacyValue = localStorage.getItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
+            if (legacyValue !== null) {
+                const migratedAgentMode = legacyValue === 'false';
+                localStorage.setItem(this.agentModeStorageKey, String(migratedAgentMode));
+                localStorage.removeItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
+                return migratedAgentMode;
+            }
+
+            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
         } catch (error) {
-            console.warn('Failed to restore instant mode:', error);
-            return false;
+            console.warn('Failed to restore agent mode:', error);
+            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
         }
     }
 
-    setInstantMode(isEnabled, { persist = true } = {}) {
-        this.instantModeEnabled = Boolean(isEnabled);
-
-        if (this.instantModeToggle) {
-            this.instantModeToggle.textContent = this.instantModeEnabled ? 'On' : 'Off';
-            this.instantModeToggle.classList.toggle('active', this.instantModeEnabled);
-            this.instantModeToggle.setAttribute('aria-pressed', String(this.instantModeEnabled));
-        }
-
-        if (persist) {
-            try {
-                localStorage.setItem(this.instantModeStorageKey, String(this.instantModeEnabled));
-            } catch (error) {
-                console.warn('Failed to persist instant mode:', error);
-            }
-        }
-    }
-
-    isInstantModeEnabled() {
-        return Boolean(this.instantModeEnabled);
-    }
-
-    readStoredReasoningAlways() {
+    readStoredHideThinking() {
         try {
-            const storedValue = localStorage.getItem(this.reasoningAlwaysStorageKey);
+            const storedValue = localStorage.getItem(this.hideThinkingStorageKey);
             if (storedValue === null) {
-                return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+                return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
             }
-
             return storedValue === 'true';
         } catch (error) {
-            console.warn('Failed to restore thinking every message setting:', error);
-            return Boolean(CONFIG.UI.REASONING_ALWAYS_ON_DEFAULT);
+            console.warn('Failed to restore hide thinking setting:', error);
+            return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
         }
     }
 
-    setReasoningAlways(isEnabled, { persist = true } = {}) {
-        this.reasoningAlwaysEnabled = Boolean(isEnabled);
+    setAgentMode(isEnabled, { persist = true } = {}) {
+        this.agentModeEnabled = Boolean(isEnabled);
+        this.instantModeEnabled = !this.agentModeEnabled;
+        this.reasoningAlwaysEnabled = this.agentModeEnabled;
+
+        if (this.agentModeToggle) {
+            this.agentModeToggle.textContent = this.agentModeEnabled ? 'On' : 'Off';
+            this.agentModeToggle.classList.toggle('active', this.agentModeEnabled);
+            this.agentModeToggle.setAttribute('aria-pressed', String(this.agentModeEnabled));
+        }
 
         if (this.reasoningAlwaysEnabled) {
             this.reasoningEnabledForNextSend = false;
@@ -805,25 +887,71 @@ export class UIManager {
             }
         }
 
-        if (this.reasoningAlwaysToggle) {
-            this.reasoningAlwaysToggle.textContent = this.reasoningAlwaysEnabled ? 'On' : 'Off';
-            this.reasoningAlwaysToggle.classList.toggle('active', this.reasoningAlwaysEnabled);
-            this.reasoningAlwaysToggle.setAttribute('aria-pressed', String(this.reasoningAlwaysEnabled));
-        }
-
         this.syncReasoningToggle();
 
         if (persist) {
             try {
-                localStorage.setItem(this.reasoningAlwaysStorageKey, String(this.reasoningAlwaysEnabled));
+                localStorage.setItem(this.agentModeStorageKey, String(this.agentModeEnabled));
             } catch (error) {
-                console.warn('Failed to persist thinking every message setting:', error);
+                console.warn('Failed to persist agent mode:', error);
             }
         }
     }
 
+    setHideThinking(isEnabled, { persist = true } = {}) {
+        this.hideThinkingEnabled = Boolean(isEnabled);
+
+        if (this.hideThinkingEnabled && this.currentThinkingMessageDiv) {
+            this.currentThinkingMessageDiv.remove();
+            this.currentThinkingMessageDiv = null;
+            this.persistChatHistory();
+        }
+
+        if (this.hideThinkingToggle) {
+            this.hideThinkingToggle.textContent = this.hideThinkingEnabled ? 'On' : 'Off';
+            this.hideThinkingToggle.classList.toggle('active', this.hideThinkingEnabled);
+            this.hideThinkingToggle.setAttribute('aria-pressed', String(this.hideThinkingEnabled));
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem(this.hideThinkingStorageKey, String(this.hideThinkingEnabled));
+            } catch (error) {
+                console.warn('Failed to persist hide thinking setting:', error);
+            }
+        }
+    }
+
+    isAgentModeEnabled() {
+        return Boolean(this.agentModeEnabled);
+    }
+
+    isHideThinkingEnabled() {
+        return Boolean(this.hideThinkingEnabled);
+    }
+
+    readStoredInstantMode() {
+        return !this.readStoredAgentMode();
+    }
+
+    setInstantMode(isEnabled, { persist = true } = {}) {
+        this.setAgentMode(!Boolean(isEnabled), { persist });
+    }
+
+    isInstantModeEnabled() {
+        return !this.isAgentModeEnabled();
+    }
+
+    readStoredReasoningAlways() {
+        return this.readStoredAgentMode();
+    }
+
+    setReasoningAlways(isEnabled, { persist = true } = {}) {
+        this.setAgentMode(Boolean(isEnabled), { persist });
+    }
+
     isReasoningAlwaysEnabled() {
-        return Boolean(this.reasoningAlwaysEnabled);
+        return this.isAgentModeEnabled();
     }
 
     shouldUseReasoningForSend() {
@@ -1009,7 +1137,7 @@ export class UIManager {
 
     appendToThinkingMessage(text) {
         if (!text) return;
-        if (this.isReasoningAlwaysEnabled()) return;
+        if (this.isHideThinkingEnabled()) return;
 
         if (!this.currentThinkingMessageDiv) this.startThinkingMessage();
         const rawText = (this.currentThinkingMessageDiv.dataset.rawText || '') + text;
@@ -1445,7 +1573,7 @@ export class UIManager {
 
             const sendOptions = {
                 reasoning: this.shouldUseReasoningForSend(),
-                instantMode: this.isInstantModeEnabled(),
+                instantMode: !this.isAgentModeEnabled(),
                 attachments,
             };
 

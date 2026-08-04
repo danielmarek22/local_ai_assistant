@@ -1,7 +1,8 @@
-import unittest
 import hashlib
+import unittest
 from datetime import datetime
 
+from app.perception.attachments import AudioAttachment
 from app.perception.state import ImageAttachment
 from app.services.context_builder import ContextBuilder
 
@@ -111,6 +112,61 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(messages[-1]["role"], "user")
         self.assertEqual(messages[-1]["content"], "What is in this image?")
         self.assertEqual(messages[-1]["images"], ["aGVsbG8="])
+
+    def test_build_attaches_audio_to_configured_payload_field(self):
+        history = FakeHistoryStore([])
+        summary = FakeSummaryStore(None)
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+            audio_payload_field="audios",
+        )
+
+        attachment = AudioAttachment.from_bytes(
+            b"audio-bytes",
+            name="voice.wav",
+            mime_type="audio/wav",
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="Please answer the user's spoken audio.",
+            attachments=[attachment],
+        )
+
+        self.assertEqual(messages[-1]["role"], "user")
+        self.assertEqual(messages[-1]["audios"], [attachment.base64_data])
+
+    def test_build_prepends_audio_when_using_images_payload_field(self):
+        history = FakeHistoryStore([])
+        summary = FakeSummaryStore(None)
+
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            history_store=history,
+            summary_store=summary,
+            history_limit=6,
+            audio_payload_field="images",
+        )
+
+        audio = AudioAttachment.from_bytes(b"audio-bytes")
+        image = ImageAttachment(
+            name="cat.png",
+            mime_type="image/png",
+            base64_data="aW1hZ2U=",
+            size_bytes=5,
+        )
+
+        messages = builder.build(
+            session_id="abc123",
+            user_text="Please answer with both inputs.",
+            attachments=[image, audio],
+        )
+
+        self.assertEqual(messages[-1]["images"], [audio.base64_data, "aW1hZ2U="])
 
     def test_build_replays_recent_history_images_for_user_messages(self):
         history = FakeHistoryStore(

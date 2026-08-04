@@ -58,9 +58,13 @@ export const CONFIG = {
             MIC_HOTKEY: 'astra-mic-hotkey',
             SCREEN_CAPTURE_POLICY: 'astra-screen-capture-policy',
             VOICE_MODE: 'astra-voice-mode',
+            AGENT_MODE: 'astra-agent-mode',
+            HIDE_THINKING: 'astra-hide-thinking',
             INSTANT_MODE: 'astra-instant-mode',
             REASONING_ALWAYS_ON: 'astra-reasoning-always-on'
         },
+        AGENT_MODE_DEFAULT: true,
+        HIDE_THINKING_DEFAULT: false,
         REASONING_ALWAYS_ON_DEFAULT: false,
         VOICE_MODE_DEFAULT: 'push_to_talk',
         VOICE_MODES: ['push_to_talk', 'automatic'],

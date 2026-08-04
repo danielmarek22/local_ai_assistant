@@ -62,7 +62,7 @@ class HttpRetryTests(unittest.TestCase):
 
         result = client.chat([{"role": "user", "content": "hello"}])
 
-        self.assertEqual(result, "ok")
+        self.assertEqual(result, {"content": "ok"})
         self.assertEqual(post_mock.call_count, 2)
         self.assertEqual(post_mock.call_args.kwargs["json"]["think"], False)
 
@@ -117,7 +117,7 @@ class HttpRetryTests(unittest.TestCase):
             think_override=False,
         )
 
-        self.assertEqual(result, "text fallback")
+        self.assertEqual(result, {"content": "text fallback"})
         self.assertEqual(post_mock.call_count, 2)
         payload = post_mock.call_args.kwargs["json"]
         self.assertNotIn("images", payload["messages"][0])
@@ -141,7 +141,7 @@ class HttpRetryTests(unittest.TestCase):
             options_override={"num_predict": 160},
         )
 
-        self.assertEqual(result, "image summary")
+        self.assertEqual(result, {"content": "image summary"})
         self.assertEqual(post_mock.call_args.args[0], "http://localhost:11434/api/chat")
         payload = post_mock.call_args.kwargs["json"]
         self.assertEqual(payload["messages"][0]["images"], ["aGVsbG8="])

@@ -32,13 +32,21 @@ class HistorySummarizer:
             if m["role"] in ("user", "assistant"):
                 prompt.append(m)
 
-        buffer = ""
-        for chunk in self.llm.stream_chat(prompt):
-            buffer += chunk
+        # Use blocking chat instead of stream_chat for a background task.
+        # Explicitly disable thinking tokens to keep the summary clean, 
+        # and pass an empty tools list so it doesn't try to route.
+        response = self.llm.chat(
+            messages=prompt,
+            think_override=False,
+            tools=[] 
+        )
+
+        # Safely extract just the visible text content
+        buffer = response.get("content", "").strip()
 
         trace_event(
             "history_summarizer",
             "summary_generated",
             payload={"prompt": prompt, "summary": buffer},
         )
-        return buffer.strip()
+        return buffer
