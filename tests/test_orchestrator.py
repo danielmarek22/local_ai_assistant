@@ -45,8 +45,8 @@ class FakeToolExecutor:
     def get_native_tools(self):
         return []
 
-    def execute(self, action: Action, user_text: str):
-        self.calls.append((action, user_text))
+    def execute(self, action: Action, user_text: str, approval_callback=None):
+        self.calls.append((action, user_text, approval_callback))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         return self.context
 
@@ -161,6 +161,7 @@ class OrchestratorTests(unittest.TestCase):
         summary_existing=None,
         summary_trigger=10,
         llm_error=None,
+        late_routing_enabled=False,
     ):
         llm = FakeLLM(llm_chunks or ["Hello", " world"], error=llm_error)
         history = FakeHistoryStore()
@@ -188,6 +189,7 @@ class OrchestratorTests(unittest.TestCase):
             memory_retriever=memory_retriever,
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            late_routing_enabled=late_routing_enabled,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
@@ -221,6 +223,61 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(planner.calls, [])
         self.assertEqual(tool_executor.calls, [])
         self.assertEqual(context_builder.calls[0]["tool_context"], None)
+
+    def test_agent_mode_uses_late_routing_chat_instead_of_streaming(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            llm,
+            _history,
+            _memory,
+            _summary,
+            _summarizer,
+            _planner,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            llm_chunks=["streaming response"],
+            summary_trigger=999,
+            late_routing_enabled=True,
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        self.assertEqual(len(llm.chat_calls), 1)
+        self.assertEqual(len(llm.calls), 0)
+
+    def test_late_tool_execution_forwards_approval_callback(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch,
+            _llm,
+            _history,
+            _memory,
+            _summary,
+            _summarizer,
+            _planner,
+            tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        action = Action(type=ActionType.EXECUTE_BASH, payload={"command": "printf hi"})
+
+        def approve(_request):
+            return True
+
+        events, observation = consume_generator(
+            orch._execute_late_tool_action(
+                session_id=self.SESSION_ID,
+                action=action,
+                user_text="run command",
+                tool_approval_callback=approve,
+            )
+        )
+
+        self.assertEqual(observation, "tool info")
+        self.assertTrue(any(isinstance(e, AssistantStateEvent) for e in events))
+        self.assertEqual(tool_executor.calls, [(action, "run command", approve)])
 
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

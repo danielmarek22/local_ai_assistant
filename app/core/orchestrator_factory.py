@@ -250,6 +250,7 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
+        late_routing_enabled=True,
     )
 
     logger.info(

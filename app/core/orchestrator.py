@@ -39,6 +39,7 @@ class Orchestrator:
         memory_retriever,
         turn_finalizer,
         gesture_catalog: dict[str, str] | None = None,
+        late_routing_enabled: bool = False,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -49,10 +50,14 @@ class Orchestrator:
         self.turn_finalizer = turn_finalizer
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
+        self.late_routing_enabled = late_routing_enabled
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
-        logger.info("Orchestrator initialized with native late routing")
+        logger.info(
+            "Orchestrator initialized (native late routing=%s)",
+            self.late_routing_enabled,
+        )
 
     # ============================================================
     # Public entry point
@@ -160,9 +165,12 @@ class Orchestrator:
                 attachments=turn_input.attachments,
             )
 
-            # 5. LLM streaming response with native late routing
-            if turn_input.instant_mode:
-                logger.info("[%s] Instant mode enabled; late routing disabled", session_id)
+            # 5. LLM response: stream directly unless agent/native tool routing is active.
+            if turn_input.instant_mode or not self.late_routing_enabled:
+                if turn_input.instant_mode:
+                    logger.info("[%s] Instant mode enabled; late routing disabled", session_id)
+                else:
+                    logger.info("[%s] Native late routing disabled; streaming response", session_id)
                 response = yield from self._stream_response(
                     session_id,
                     messages,
@@ -420,6 +428,15 @@ class Orchestrator:
             len(visible_buffer),
             len(thinking_buffer),
             (time.perf_counter() - start_ts) * 1000,
+        )
+        trace_event(
+            "orchestrator",
+            "llm_stream_complete",
+            session_id=session_id,
+            payload={
+                "visible_response": visible_buffer,
+                "reasoning_response": thinking_buffer,
+            },
         )
         return visible_buffer
 
