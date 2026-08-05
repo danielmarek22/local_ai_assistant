@@ -38,8 +38,12 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Summarization trigger behavior
 
 - `test_tool_executor.py`
-  - Tool lookup and availability behavior
-  - Error handling and fallback behavior
+  - Registry-backed execution events and typed results
+  - Approval request transport conversion
+
+- `test_integration_registry.py` and `test_builtin_integrations.py`
+  - Capability and schema contract validation
+  - Availability, passive context isolation, and built-in adapter behavior
 
 - `test_server_sessions.py`
   - Session listing/open/delete behavior

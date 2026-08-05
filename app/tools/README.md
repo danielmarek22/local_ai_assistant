@@ -1,11 +1,11 @@
 
 # Tools
 
-Actionable capabilities exposed to late-routing tool directives.
+Low-level implementations used by built-in integrations.
 
 ## Responsibilities
-- Executing well-scoped actions (search, file access, system info, etc.)
-- Declaring availability and constraints
-- Returning structured results
+- Communicating with concrete backends such as SearXNG
+- Executing shell commands under the local approval policy
+- Keeping backend-specific retries and result formatting out of the registry
 
-Tools should be deterministic and side-effect aware.
+Model-facing names, schemas, validation, and typed results live in `app/integrations`.

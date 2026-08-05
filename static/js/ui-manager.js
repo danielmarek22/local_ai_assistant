@@ -42,8 +42,10 @@ export class UIManager {
         this.historyRefreshBtn = document.getElementById('history-refresh-btn');
         this.historyNewChatBtn = document.getElementById('history-new-chat-btn');
         this.toolApprovalOverlay = document.getElementById('tool-approval-overlay');
+        this.toolApprovalTitle = document.getElementById('tool-approval-title');
         this.toolApprovalTool = document.getElementById('tool-approval-tool');
         this.toolApprovalReason = document.getElementById('tool-approval-reason');
+        this.toolApprovalDetailLabel = document.getElementById('tool-approval-detail-label');
         this.toolApprovalCommand = document.getElementById('tool-approval-command');
         this.toolApprovalApproveBtn = document.getElementById('tool-approval-approve');
         this.toolApprovalDenyBtn = document.getElementById('tool-approval-deny');
@@ -356,9 +358,11 @@ export class UIManager {
 
         this.pendingToolApprovals.push({
             approvalId: request.approvalId,
-            tool: request.tool || 'execute_bash',
-            command: request.command || '',
-            reason: request.reason || 'This command requires human approval.',
+            tool: request.tool || 'unknown',
+            title: request.title || 'Approve action?',
+            reason: request.reason || 'This action requires human approval.',
+            detailLabel: request.detailLabel || 'Details',
+            detail: request.detail || '',
             callback,
         });
 
@@ -373,6 +377,10 @@ export class UIManager {
 
         this.activeToolApproval = nextRequest;
 
+        if (this.toolApprovalTitle) {
+            this.toolApprovalTitle.textContent = nextRequest.title;
+        }
+
         if (this.toolApprovalTool) {
             this.toolApprovalTool.textContent = nextRequest.tool;
         }
@@ -381,8 +389,12 @@ export class UIManager {
             this.toolApprovalReason.textContent = nextRequest.reason;
         }
 
+        if (this.toolApprovalDetailLabel) {
+            this.toolApprovalDetailLabel.textContent = nextRequest.detailLabel;
+        }
+
         if (this.toolApprovalCommand) {
-            this.toolApprovalCommand.textContent = nextRequest.command;
+            this.toolApprovalCommand.textContent = nextRequest.detail;
         }
 
         this.toolApprovalOverlay.classList.remove('hidden');

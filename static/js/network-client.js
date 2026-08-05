@@ -90,8 +90,10 @@ export class NetworkClient {
                     this.handlers.onToolApprovalRequest({
                         approvalId: data.approval_id,
                         tool: data.tool,
-                        command: data.command,
+                        title: data.title,
                         reason: data.reason,
+                        detailLabel: data.detail_label,
+                        detail: data.detail,
                         timeoutSeconds: data.timeout_seconds,
                     });
                 }

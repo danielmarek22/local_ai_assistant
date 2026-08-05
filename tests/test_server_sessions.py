@@ -511,9 +511,11 @@ class ServerSessionTests(unittest.TestCase):
             server_module._request_tool_approval(
                 ws,
                 {
-                    "tool": "execute_bash",
-                    "command": "printf hi",
+                    "tool": "shell__execute",
+                    "title": "Approve command?",
                     "reason": "Command requires approval.",
+                    "detail_label": "Command",
+                    "detail": "printf hi",
                 },
                 connection_id="conn-1",
                 timeout_seconds=1.0,
@@ -522,8 +524,10 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertTrue(approved)
         self.assertEqual(ws.messages[0]["type"], "tool_approval_request")
-        self.assertEqual(ws.messages[0]["tool"], "execute_bash")
-        self.assertEqual(ws.messages[0]["command"], "printf hi")
+        self.assertEqual(ws.messages[0]["tool"], "shell__execute")
+        self.assertEqual(ws.messages[0]["title"], "Approve command?")
+        self.assertEqual(ws.messages[0]["detail_label"], "Command")
+        self.assertEqual(ws.messages[0]["detail"], "printf hi")
         self.assertEqual(ws.messages[0]["reason"], "Command requires approval.")
 
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):

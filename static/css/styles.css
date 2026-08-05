@@ -219,6 +219,13 @@ body {
     line-height: 1.45;
 }
 
+.tool-approval-detail-label {
+    margin: 0 0 -6px;
+    color: #9eabb5;
+    font-size: 12px;
+    font-weight: 700;
+}
+
 .tool-approval-command {
     margin: 0;
     max-height: 260px;

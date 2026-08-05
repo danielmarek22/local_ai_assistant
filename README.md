@@ -32,7 +32,7 @@ The assistant currently uses a **hybrid memory system**:
 - The orchestrator retrieves:
   - relevant long-term facts from semantic memory
   - relevant messages and stored image summaries from past sessions via episodic memory
-- Retrieved memory and tool output are injected into the prompt as background context before response generation.
+- Retrieved memory and optional passive integration state are injected into the prompt as background context before response generation.
 
 Attachments are handled as a first-class part of the conversation. The current implementation supports images and keeps a lightweight base `Attachment` model so other types can be added later without reshaping the turn pipeline:
 

@@ -1,6 +1,10 @@
 from copy import deepcopy
+import logging
 from pathlib import Path
 import yaml
+
+
+logger = logging.getLogger("config")
 
 
 class Config:
@@ -22,8 +26,12 @@ class Config:
             },
         )
 
-        # Tools
+        # Integrations and temporary legacy tool configuration
         self.tools = self.raw.get("tools", {})
+        self.integrations = self._load_integrations_config(
+            self.raw.get("integrations"),
+            self.tools,
+        )
 
         # Orchestrator
         self.orchestrator = self.raw.get(
@@ -182,6 +190,7 @@ class Config:
         return {
             "history_limit": 6,
             "injected_memory_limit": 5,
+            "integration_context_limit": 4000,
         }
 
     def _load_context_config(self, raw_context: dict | None) -> dict:
@@ -191,3 +200,25 @@ class Config:
 
         config.update(raw_context)
         return config
+
+    @staticmethod
+    def _load_integrations_config(
+        raw_integrations: dict | None,
+        legacy_tools: dict | None,
+    ) -> dict:
+        integrations = deepcopy(raw_integrations) if isinstance(raw_integrations, dict) else {}
+        integrations.setdefault("memory", {"enabled": True})
+        integrations.setdefault("shell", {"enabled": True, "timeout": 15})
+
+        legacy_web = legacy_tools.get("web") if isinstance(legacy_tools, dict) else None
+        if "web" not in integrations and isinstance(legacy_web, dict):
+            logger.warning(
+                "Configuration key 'tools.web' is deprecated; use 'integrations.web'"
+            )
+            integrations["web"] = deepcopy(legacy_web)
+
+        for name, integration_config in integrations.items():
+            if not isinstance(name, str) or not isinstance(integration_config, dict):
+                raise ValueError(f"Invalid integration configuration: {name!r}")
+
+        return integrations

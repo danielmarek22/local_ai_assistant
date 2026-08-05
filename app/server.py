@@ -393,17 +393,21 @@ async def _request_tool_approval(
     timeout_seconds: float = TOOL_APPROVAL_TIMEOUT_SECONDS,
 ) -> bool:
     approval_id = uuid.uuid4().hex
-    command = str(request.get("command", ""))
-    tool_name = str(request.get("tool", "execute_bash"))
-    reason = str(request.get("reason", "This command requires human approval."))
+    tool_name = str(request.get("tool", "unknown"))
+    title = str(request.get("title", "Approve action?"))
+    reason = str(request.get("reason", "This action requires human approval."))
+    detail_label = str(request.get("detail_label", "Details"))
+    detail = str(request.get("detail", ""))
 
-    logger.info("[%s] Requesting human approval for %s command: %s", connection_id, tool_name, command)
+    logger.info("[%s] Requesting human approval for %s", connection_id, tool_name)
     await _send_ws_payload(ws, {
         "type": "tool_approval_request",
         "approval_id": approval_id,
         "tool": tool_name,
-        "command": command,
+        "title": title,
         "reason": reason,
+        "detail_label": detail_label,
+        "detail": detail,
         "timeout_seconds": timeout_seconds,
     })
 
@@ -411,7 +415,7 @@ async def _request_tool_approval(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            logger.warning("[%s] Tool approval timed out for command: %s", connection_id, command)
+            logger.warning("[%s] Tool approval timed out for %s", connection_id, tool_name)
             return False
 
         raw_message = await asyncio.wait_for(ws.receive(), timeout=remaining)
@@ -439,11 +443,10 @@ async def _request_tool_approval(
 
         approved = bool(payload.get("approved"))
         logger.info(
-            "[%s] Human %s %s command: %s",
+            "[%s] Human %s capability %s",
             connection_id,
             "approved" if approved else "denied",
             tool_name,
-            command,
         )
         return approved
 

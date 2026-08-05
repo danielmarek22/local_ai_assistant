@@ -49,6 +49,7 @@ orchestrator:
 context:
   history_limit: 6
   injected_memory_limit: 5
+  integration_context_limit: 4000
 
 tts:
   engine: pocket-tts
@@ -104,7 +105,7 @@ logging:
   trace_max_bytes: 10000000
   trace_backup_count: 5
 
-tools:
+integrations:
   web:
     enabled: true
     base_url: http://localhost:8080
@@ -112,3 +113,8 @@ tools:
     max_retries: 2
     retry_backoff_s: 0.25
     max_results: 5
+  memory:
+    enabled: true
+  shell:
+    enabled: true
+    timeout: 15

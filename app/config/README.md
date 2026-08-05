@@ -5,7 +5,7 @@ Configuration management for the assistant.
 
 ## Responsibilities
 - Loading YAML configuration files
-- Providing structured access to config sections (LLM, assistant, tools, etc.)
+- Providing structured access to config sections (LLM, assistant, integrations, etc.)
 - Acting as a single source of truth for runtime parameters
 
 ## Key Files
@@ -20,3 +20,12 @@ Configuration management for the assistant.
 - `llm.generation.max_tokens` - maximum generated tokens, forwarded to Ollama as `num_predict`
 
 This layer should remain *dumb*: no business logic, only structured data.
+
+## Integrations
+
+- `integrations.web` configures the optional SearXNG-backed search capability.
+- `integrations.memory` enables structured long-term memory writes.
+- `integrations.shell` enables local shell execution and its approval policy.
+- `context.integration_context_limit` bounds passive integration state injected per turn.
+
+Legacy `tools.web` configuration is accepted temporarily when `integrations.web` is absent.

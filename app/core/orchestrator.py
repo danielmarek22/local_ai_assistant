@@ -3,7 +3,6 @@ import time
 import os
 from typing import Callable, Optional
 
-from app.core.actions import Action, ActionType
 from app.core.events import (
     AssistantSpeechEvent,
     AssistantThinkingEvent,
@@ -16,6 +15,7 @@ from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
 from app.logging import trace_event
+from app.integrations import CapabilityId, ToolCall, ToolResult
 from app.perception.attachments import Attachment, ImageAttachment
 from app.perception.state import PerceptionState
 from app.services.tool_executor import ToolExecutor
@@ -40,6 +40,7 @@ class Orchestrator:
         turn_finalizer,
         gesture_catalog: dict[str, str] | None = None,
         late_routing_enabled: bool = False,
+        integration_context_limit: int = 4000,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -51,6 +52,7 @@ class Orchestrator:
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
         self.late_routing_enabled = late_routing_enabled
+        self.integration_context_limit = integration_context_limit
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -156,12 +158,17 @@ class Orchestrator:
                 attachments=storable_attachments,
             )
 
+            integration_context = self._collect_integration_context(
+                session_id=session_id,
+                user_text=turn_input.user_text,
+            )
+
             # 4. Context construction
             messages = self._build_context(
                 session_id=session_id,
                 user_text=turn_input.user_text,
                 memory_context=memory_context,
-                tool_context=None,
+                integration_context=integration_context,
                 attachments=turn_input.attachments,
             )
 
@@ -264,7 +271,10 @@ class Orchestrator:
                 session_id=session_id,
                 user_text="",
                 memory_context=memory_context,
-                tool_context=None,
+                integration_context=self._collect_integration_context(
+                    session_id=session_id,
+                    user_text=event_text,
+                ),
                 attachments=attachments,
             )
             self._inject_hidden_system_message(
@@ -318,7 +328,7 @@ class Orchestrator:
         session_id: str,
         user_text: str,
         memory_context: Optional[str],
-        tool_context: Optional[str],
+        integration_context: Optional[str],
         attachments: list[Attachment] | None = None,
     ):
         logger.info("[%s] Building context", session_id)
@@ -327,18 +337,32 @@ class Orchestrator:
             session_id=session_id,
             user_text=user_text,
             memory_context=memory_context,
-            tool_context=tool_context,
+            integration_context=integration_context,
             attachments=attachments or [],
         )
 
         logger.debug(
-            "[%s] Context built (messages=%d, memory=%s, tools=%s)",
+            "[%s] Context built (messages=%d, memory=%s, integrations=%s)",
             session_id,
             len(messages),
             bool(memory_context),
-            bool(tool_context),
+            bool(integration_context),
         )
         return messages
+
+    def _collect_integration_context(self, session_id: str, user_text: str) -> str | None:
+        collector = getattr(self.tool_executor, "collect_context", None)
+        if not callable(collector):
+            return None
+        try:
+            return collector(
+                session_id=session_id,
+                user_text=user_text,
+                max_chars=self.integration_context_limit,
+            )
+        except Exception:
+            logger.exception("[%s] Integration context collection failed", session_id)
+            return None
     
     def _inject_late_routing_system_message(self, messages: list[dict]) -> None:
         self._inject_hidden_system_message(
@@ -466,43 +490,45 @@ class Orchestrator:
                 user_text=user_text,
             )
 
-            if result["tool_action"] is None:
+            if result["tool_call"] is None and result["tool_error"] is None:
                 return result["response"]
 
-            action = result["tool_action"]
+            tool_call = result["tool_call"]
+            tool_name = result["tool_name"]
+            tool_arguments = result["tool_arguments"]
             
-            # 1. Save the tool call intent to the messages array FIRST
             messages.append({
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [{
                     "function": {
-                        "name": action.type.value,
-                        "arguments": action.payload
+                        "name": tool_name,
+                        "arguments": tool_arguments,
                     }
                 }]
             })
 
-            # 2. Execute the tool (THIS DEFINES THE 'observation' VARIABLE)
-            observation = yield from self._execute_late_tool_action(
-                session_id=session_id,
-                action=action,
-                user_text=user_text,
-                tool_approval_callback=tool_approval_callback,
-            )
+            if result["tool_error"] is not None:
+                tool_result = ToolResult.error(result["tool_error"])
+            else:
+                tool_result = yield from self._execute_late_tool_call(
+                    session_id=session_id,
+                    call=tool_call,
+                    user_text=user_text,
+                    tool_approval_callback=tool_approval_callback,
+                )
+            observation = f"[{tool_result.status.value}] {tool_result.content}"
 
-            # 3. Save the trace to your history log
             safe_observation = observation[:1024] + ("..." if len(observation) > 1024 else "")
             self.history.add(
                 session_id, 
                 "system",
-                f"[Tool Execution Trace: {action.type.value}]\n{safe_observation}"
+                f"[Tool Execution Trace: {tool_name}]\n{safe_observation}"
             )
 
-            # 4. Feed the observation and protocol back to the model
             messages.append({
                 "role": "tool",
-                "tool_name": action.type.value,
+                "tool_name": tool_name,
                 "content": (
                     f"{observation}\n\n"
                     "[SYSTEM INTERRUPT: EVALUATION PROTOCOL]\n"
@@ -555,7 +581,10 @@ class Orchestrator:
             timeout_override=120.0,  # Ensure the LLM call doesn't hang indefinitely
         )
 
-        tool_action: Action | None = None
+        tool_call: ToolCall | None = None
+        tool_error: str | None = None
+        tool_name = ""
+        tool_arguments: object = {}
 
         # 1. Yield any background thinking the model did in one chunk
         thinking_text = message.get("thinking")
@@ -566,14 +595,22 @@ class Orchestrator:
         if message.get("tool_calls"):
             # Gemma 4 usually only calls one tool at a time in this loop
             tc = message["tool_calls"][0]
-            func_name = tc["function"]["name"]
-            kwargs = tc["function"]["arguments"]
-            
             try:
-                tool_action = Action(type=ActionType(func_name), payload=kwargs)
-                logger.info("[%s] Native routing selected tool '%s'", session_id, tool_action.type.value)
-            except ValueError:
-                logger.warning("[%s] Unknown native tool called: %s", session_id, func_name)
+                if not isinstance(tc, dict):
+                    raise ValueError("Tool call must be an object")
+                function = tc.get("function", {})
+                if not isinstance(function, dict):
+                    raise ValueError("Tool function must be an object")
+                tool_name = function.get("name", "")
+                tool_arguments = function.get("arguments", {})
+                capability = CapabilityId.parse(tool_name)
+                if not isinstance(tool_arguments, dict):
+                    raise ValueError("Tool arguments must be an object")
+                tool_call = ToolCall(capability=capability, arguments=tool_arguments)
+                logger.info("[%s] Native routing selected capability '%s'", session_id, capability)
+            except (TypeError, ValueError) as exc:
+                tool_error = f"Invalid tool call {tool_name!r}: {exc}"
+                logger.warning("[%s] %s", session_id, tool_error)
 
         logger.info(
             "[%s] Late-routed response step complete (duration=%.2f ms)",
@@ -581,8 +618,14 @@ class Orchestrator:
             (time.perf_counter() - start_ts) * 1000,
         )
         
-        if tool_action is not None:
-            return {"response": "", "tool_action": tool_action}
+        if tool_call is not None or tool_error is not None:
+            return {
+                "response": "",
+                "tool_call": tool_call,
+                "tool_error": tool_error,
+                "tool_name": tool_name,
+                "tool_arguments": tool_arguments,
+            }
         
         # If no tool was called, process whatever visible text it generated
         visible_content = message.get("content", "")
@@ -616,41 +659,46 @@ class Orchestrator:
                 logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
                 yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
             
-        return {"response": clean_response, "tool_action": None}
+        return {
+            "response": clean_response,
+            "tool_call": None,
+            "tool_error": None,
+            "tool_name": "",
+            "tool_arguments": {},
+        }
 
-    def _execute_late_tool_action(
+    def _execute_late_tool_call(
         self,
         session_id: str,
-        action: Action,
+        call: ToolCall,
         user_text: str,
         tool_approval_callback: Callable[[dict], bool] | None = None,
     ):
-        yield AssistantStateEvent(state=AssistantState.SEARCHING)
-        yield AssistantThinkingEvent(text=f"\n[Using {action.type.value}]\n")
+        capability = str(call.capability)
+        yield AssistantThinkingEvent(text=f"\n[Using {capability}]\n")
 
         try:
-            observation = yield from self.tool_executor.execute(
-                action,
-                user_text,
+            result = yield from self.tool_executor.execute(
+                call,
+                session_id=session_id,
+                user_text=user_text,
                 approval_callback=tool_approval_callback,
             )
         except Exception as exc:
             logger.exception("[%s] Late-routed tool execution failed", session_id)
-            observation = f"Tool execution failed: {exc}"
-
-        if not observation:
-            observation = "The tool returned no usable results."
+            result = ToolResult.error(f"Tool execution failed: {exc}")
 
         trace_event(
             "orchestrator",
             "late_routing_observation",
             session_id=session_id,
             payload={
-                "tool": action.type.value,
-                "observation": observation,
+                "tool": capability,
+                "status": result.status.value,
+                "observation": result.content,
             },
         )
-        return observation
+        return result
 
     def _emit_processor_events(
         self,

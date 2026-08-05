@@ -47,7 +47,7 @@ class ContextBuilderTests(unittest.TestCase):
             session_id="abc123",
             user_text="Current question",
             memory_context="Some retrieved facts from VectorDB",
-            tool_context="Some tool results",
+            integration_context="Some integration state",
         )
 
         system_messages = [m for m in messages if m["role"] == "system"]
@@ -69,11 +69,11 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIsNotNone(datetime.fromisoformat(datetime_line.split(": ", 1)[1]))
 
         # Verify the new structured background context
-        self.assertIn("BACKGROUND CONTEXT (Retrieved Memories & Tool Results):", system_content)
+        self.assertIn("BACKGROUND CONTEXT (Retrieved Memories & Integration State):", system_content)
         self.assertIn("--- RETRIEVED MEMORY ---", system_content)
         self.assertIn("Some retrieved facts from VectorDB", system_content)
-        self.assertIn("--- TOOL RESULTS ---", system_content)
-        self.assertIn("Some tool results", system_content)
+        self.assertIn("--- OBSERVED INTEGRATION STATE ---", system_content)
+        self.assertIn("Some integration state", system_content)
         
         self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
 
