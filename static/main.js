@@ -22,6 +22,9 @@ const screenVideo = document.getElementById('screen-capture-video');
 const screenCanvas = document.getElementById('screen-capture-canvas');
 const webcamVideo = document.getElementById('webcam-capture-video');
 const webcamCanvas = document.getElementById('webcam-capture-canvas');
+const autonomyToggle = document.getElementById('autonomy-toggle');
+let autonomyPaused = true;
+let autonomyEnabled = false;
 
 function readStoredSessionContext() {
     const rawValue = sessionStorage.getItem(sessionStorageKey);
@@ -150,6 +153,33 @@ const handlers = {
 };
 
 const client = new NetworkClient(handlers);
+
+function renderAutonomyStatus(status) {
+    const enabled = Boolean(status?.enabled);
+    autonomyEnabled = enabled;
+    autonomyPaused = !enabled || Boolean(status?.paused);
+    if (!autonomyToggle) return;
+    autonomyToggle.textContent = enabled && !autonomyPaused ? 'On' : 'Paused';
+    autonomyToggle.classList.toggle('active', enabled && !autonomyPaused);
+    autonomyToggle.setAttribute('aria-pressed', String(enabled && !autonomyPaused));
+    autonomyToggle.disabled = !enabled;
+}
+
+autonomyToggle?.addEventListener('click', async () => {
+    autonomyToggle.disabled = true;
+    try {
+        renderAutonomyStatus(await client.setAutonomyPaused(!autonomyPaused));
+    } catch (error) {
+        console.error('Failed to update autonomous activity:', error);
+    } finally {
+        autonomyToggle.disabled = !autonomyEnabled;
+    }
+});
+
+void client.getAutonomyStatus().then(renderAutonomyStatus).catch((error) => {
+    console.warn('Failed to load autonomous activity status:', error);
+    renderAutonomyStatus({ enabled: false, paused: true });
+});
 const storedSessionContext = readStoredSessionContext();
 
 if (storedSessionContext?.sessionId && storedSessionContext?.serverInstanceId) {

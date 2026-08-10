@@ -244,6 +244,22 @@ export class NetworkClient {
         return response.json();
     }
 
+    async getAutonomyStatus() {
+        const response = await fetch('/api/autonomy');
+        if (!response.ok) throw new Error(`Failed to load autonomy status (${response.status})`);
+        return response.json();
+    }
+
+    async setAutonomyPaused(paused) {
+        const response = await fetch('/api/autonomy', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paused: Boolean(paused) }),
+        });
+        if (!response.ok) throw new Error(`Failed to update autonomy status (${response.status})`);
+        return response.json();
+    }
+
     async reflectMemories(daysOld = 0) {
         const response = await fetch('/api/admin/reflect', {
             method: 'POST',

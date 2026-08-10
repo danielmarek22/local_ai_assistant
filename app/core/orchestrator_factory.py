@@ -18,9 +18,14 @@ from app.tools.bash_execution import BashExecutionTool
 from app.integrations import (
     IntegrationRegistry,
     MemoryIntegration,
+    MindcraftClient,
+    MindcraftIntegration,
     ShellIntegration,
     WebIntegration,
+    RuntimeIntegration,
+    VisionIntegration,
 )
+from app.autonomy import AutonomyRuntime, AutonomyStore
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -117,6 +122,7 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database()
+    autonomy_store = AutonomyStore(db.path)
     vector_store = VectorStore()
 
     history_store = ChatHistoryStore(db, vector_store)
@@ -167,7 +173,7 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     # Integrations
     # --------------------------------------------------
-    integrations = []
+    integrations = [RuntimeIntegration(), VisionIntegration()]
     web_cfg = config.integrations.get("web", {})
 
     if web_cfg.get("enabled", False):
@@ -208,8 +214,26 @@ def build_orchestrator() -> Orchestrator:
         integrations.append(MemoryIntegration(memory_action_handler))
         logger.info("Memory integration registered")
 
+    mindcraft_cfg = config.integrations.get("mindcraft", {})
+    if mindcraft_cfg.get("enabled", False):
+        mindcraft_client = MindcraftClient(
+            url=str(mindcraft_cfg.get("url", "http://localhost:8081")),
+            agent_name=mindcraft_cfg.get("agent_name"),
+            connect_timeout=float(mindcraft_cfg.get("connect_timeout", 3.0)),
+            reconnect_delay_s=float(mindcraft_cfg.get("reconnect_delay_s", 2.0)),
+            reconnect_max_delay_s=float(mindcraft_cfg.get("reconnect_max_delay_s", 30.0)),
+            recent_output_limit=int(mindcraft_cfg.get("recent_output_limit", 3)),
+        )
+        integrations.append(MindcraftIntegration(
+            mindcraft_client,
+            context_enabled=bool(mindcraft_cfg.get("context_enabled", True)),
+            events_enabled=bool(mindcraft_cfg.get("events_enabled", True)),
+            ambient_session_id=str(mindcraft_cfg.get("ambient_session_id", "")).strip() or None,
+        ))
+        logger.info("Mindcraft integration registered (url=%s)", mindcraft_client.url)
+
     integration_registry = IntegrationRegistry(integrations)
-    tool_executor = ToolExecutor(integration_registry)
+    tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
 
     # --------------------------------------------------
     # Context builder
@@ -255,6 +279,13 @@ def build_orchestrator() -> Orchestrator:
         gesture_catalog=gesture_catalog,
         late_routing_enabled=True,
         integration_context_limit=config.context["integration_context_limit"],
+    )
+    orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
+    orchestrator.autonomy_runtime = AutonomyRuntime(
+        orchestrator=orchestrator,
+        registry=integration_registry,
+        store=autonomy_store,
+        config=config.autonomy,
     )
 
     logger.info(

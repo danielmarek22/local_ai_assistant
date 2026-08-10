@@ -9,10 +9,21 @@ from app.core.events import (
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AutonomyOutcomeEvent,
 )
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
-from app.integrations import CapabilityId, ToolCall, ToolResult
+from app.integrations import (
+    CapabilityId,
+    EventId,
+    EventSpec,
+    IntegrationEvent,
+    IntegrationRegistry,
+    RuntimeIntegration,
+    ToolCall,
+    ToolResult,
+)
+from app.services.tool_executor import ToolExecutor
 from app.perception.state import ImageAttachment
 from app.perception.keys import PerceptionKey
 from app.services.memory_action_handler import MemoryActionHandler
@@ -44,8 +55,8 @@ class FakeToolExecutor:
         self.integration_context = integration_context
         self.calls = []
 
-    def get_native_tools(self):
-        return [{
+    def get_native_tools(self, allowed_capabilities=None):
+        tools = [{
             "type": "function",
             "function": {
                 "name": "shell__execute",
@@ -53,11 +64,14 @@ class FakeToolExecutor:
                 "parameters": {"type": "object", "properties": {}},
             },
         }]
+        if allowed_capabilities is not None and CapabilityId("shell", "execute") not in allowed_capabilities:
+            return []
+        return tools
 
     def collect_context(self, session_id: str, user_text: str, max_chars: int):
         return self.integration_context[:max_chars] if self.integration_context else None
 
-    def execute(self, call: ToolCall, session_id: str, user_text: str, approval_callback=None):
+    def execute(self, call: ToolCall, session_id: str, user_text: str, approval_callback=None, **_kwargs):
         self.calls.append((call, session_id, user_text, approval_callback))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         return ToolResult.success(self.context or "tool info")
@@ -898,6 +912,76 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(history.records), 1)
         self.assertEqual(history.records[0][1], "assistant")
         self.assertEqual(history.records[0][2], "Hello world")
+
+    def test_integration_event_is_silent_and_does_not_create_user_history(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            _tool_executor, context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            summary_trigger=999,
+            chat_responses=[{"content": "Internal event summary."}],
+        )
+        event = IntegrationEvent(
+            EventId("demo", "finished"), {"ok": True}, self.SESSION_ID
+        )
+        spec = EventSpec(
+            event=event.event,
+            description="Demo finished.",
+            payload_schema={"type": "object", "properties": {}},
+        )
+
+        events = list(orch.handle_integration_event(self.SESSION_ID, event, spec))
+
+        outcome = next(item for item in events if isinstance(item, AutonomyOutcomeEvent))
+        self.assertEqual(outcome.summary, "Internal event summary.")
+        self.assertIsNone(outcome.notification)
+        self.assertFalse(any(record[1] in {"user", "assistant"} for record in history.records))
+        self.assertEqual(context_builder.calls[0]["user_text"], "")
+        self.assertEqual(
+            {tool["function"]["name"] for tool in llm.chat_calls[0][2]},
+            set(),
+        )
+
+    def test_integration_event_can_request_text_notification(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            _fake_executor, _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            summary_trigger=999,
+            chat_responses=[
+                {
+                    "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "runtime__notify",
+                        "arguments": {"message": "The command failed.", "delivery": "text"},
+                    }}],
+                },
+                {"content": "Notified the user about the failure."},
+            ],
+        )
+        orch.tool_executor = ToolExecutor(IntegrationRegistry([RuntimeIntegration()]))
+        event = IntegrationEvent(
+            EventId("demo", "failed"), {"ok": False}, self.SESSION_ID
+        )
+        spec = EventSpec(
+            event=event.event,
+            description="Demo failed.",
+            payload_schema={"type": "object", "properties": {}},
+        )
+
+        events = list(orch.handle_integration_event(self.SESSION_ID, event, spec))
+
+        outcome = next(item for item in events if isinstance(item, AutonomyOutcomeEvent))
+        self.assertEqual(outcome.notification["message"], "The command failed.")
+        self.assertIn((self.SESSION_ID, "assistant", "The command failed.", []), history.records)
+        self.assertNotIn(
+            (self.SESSION_ID, "assistant", "Notified the user about the failure.", []),
+            history.records,
+        )
 
     def test_turn_emits_idle_when_llm_stream_raises(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

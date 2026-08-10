@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Mapping, Protocol
 
@@ -30,6 +32,73 @@ class CapabilityId:
         return f"{self.integration}__{self.action}"
 
 
+@dataclass(frozen=True, order=True)
+class EventId:
+    integration: str
+    event: str
+
+    def __post_init__(self) -> None:
+        for label, value in (("integration", self.integration), ("event", self.event)):
+            if not isinstance(value, str) or not _IDENTIFIER_PATTERN.fullmatch(value):
+                raise ValueError(f"Invalid event {label}: {value!r}")
+
+    @classmethod
+    def parse(cls, value: str) -> "EventId":
+        if not isinstance(value, str) or value.count("__") != 1:
+            raise ValueError(f"Invalid event ID: {value!r}")
+        integration, event = value.split("__", 1)
+        return cls(integration, event)
+
+    def __str__(self) -> str:
+        return f"{self.integration}__{self.event}"
+
+
+class NotificationPolicy(str, Enum):
+    MODEL_DECIDES = "model_decides"
+    ALWAYS_NOTIFY = "always_notify"
+    NEVER_NOTIFY = "never_notify"
+
+
+class ReplayPolicy(str, Enum):
+    NEVER = "never"
+    SAFE = "safe"
+
+
+@dataclass(frozen=True)
+class EventSpec:
+    event: EventId
+    description: str
+    payload_schema: Mapping[str, object]
+    allowed_capabilities: tuple[CapabilityId, ...] = ()
+    notification_policy: NotificationPolicy = NotificationPolicy.MODEL_DECIDES
+    replay_policy: ReplayPolicy = ReplayPolicy.NEVER
+    priority: int = 100
+    coalesce_window_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class EventAttachmentRef:
+    name: str
+    mime_type: str
+    storage_path: str
+    sha256: str
+    size_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class IntegrationEvent:
+    event: EventId
+    payload: Mapping[str, object]
+    session_id: str | None = None
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    root_event_id: str | None = None
+    deduplication_key: str | None = None
+    attachments: tuple[EventAttachmentRef, ...] = ()
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     capability: CapabilityId
@@ -48,12 +117,14 @@ class ToolResultStatus(str, Enum):
     ERROR = "error"
     DENIED = "denied"
     UNAVAILABLE = "unavailable"
+    PENDING = "pending"
 
 
 @dataclass(frozen=True)
 class ToolResult:
     status: ToolResultStatus
     content: str
+    operation_id: str | None = None
 
     @classmethod
     def success(cls, content: str) -> "ToolResult":
@@ -70,6 +141,12 @@ class ToolResult:
     @classmethod
     def unavailable(cls, content: str) -> "ToolResult":
         return cls(ToolResultStatus.UNAVAILABLE, content)
+
+    @classmethod
+    def pending(cls, content: str, operation_id: str) -> "ToolResult":
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise ValueError("Pending tool results require an operation ID")
+        return cls(ToolResultStatus.PENDING, content, operation_id.strip())
 
 
 @dataclass(frozen=True)
@@ -96,11 +173,30 @@ class ApprovalRequest:
 ApprovalCallback = Callable[[ApprovalRequest], bool]
 
 
+class NotificationDelivery(str, Enum):
+    TEXT = "text"
+    SPEECH = "speech"
+
+
+@dataclass(frozen=True)
+class NotificationRequest:
+    message: str
+    delivery: NotificationDelivery = NotificationDelivery.TEXT
+
+
+NotificationCallback = Callable[[NotificationRequest], bool]
+
+
 @dataclass(frozen=True)
 class InvocationContext:
     session_id: str
     user_text: str
     approval_callback: ApprovalCallback | None = None
+    invocation_id: str | None = None
+    event_id: str | None = None
+    root_event_id: str | None = None
+    causation_id: str | None = None
+    notification_callback: NotificationCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -127,3 +223,6 @@ class Integration(Protocol):
     name: str
 
     def registered_tools(self) -> list[RegisteredTool]: ...
+
+
+EventPublisher = Callable[[IntegrationEvent], str]

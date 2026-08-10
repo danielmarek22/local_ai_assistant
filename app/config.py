@@ -44,6 +44,8 @@ class Config:
         # Context
         self.context = self._load_context_config(self.raw.get("context"))
 
+        self.autonomy = self._load_autonomy_config(self.raw.get("autonomy"))
+
         # TTS
         self.tts = self._load_tts_config(self.raw.get("tts"))
 
@@ -202,6 +204,22 @@ class Config:
         return config
 
     @staticmethod
+    def _load_autonomy_config(raw_autonomy: dict | None) -> dict:
+        config = {
+            "enabled": False,
+            "max_chain_events": 20,
+            "max_chain_age_s": 1800,
+            "max_queue_size": 256,
+            "max_tool_steps": 5,
+            "global_llm_concurrency": 1,
+            "approval_timeout_s": 300,
+            "recent_context_limit": 4000,
+        }
+        if isinstance(raw_autonomy, dict):
+            config.update(raw_autonomy)
+        return config
+
+    @staticmethod
     def _load_integrations_config(
         raw_integrations: dict | None,
         legacy_tools: dict | None,
@@ -209,6 +227,18 @@ class Config:
         integrations = deepcopy(raw_integrations) if isinstance(raw_integrations, dict) else {}
         integrations.setdefault("memory", {"enabled": True})
         integrations.setdefault("shell", {"enabled": True, "timeout": 15})
+        integrations.setdefault("mindcraft", {
+            "enabled": False,
+            "url": "http://localhost:8081",
+            "agent_name": "",
+            "connect_timeout": 3.0,
+            "reconnect_delay_s": 2.0,
+            "reconnect_max_delay_s": 30.0,
+            "context_enabled": True,
+            "recent_output_limit": 3,
+            "events_enabled": True,
+            "ambient_session_id": "",
+        })
 
         legacy_web = legacy_tools.get("web") if isinstance(legacy_tools, dict) else None
         if "web" not in integrations and isinstance(legacy_web, dict):

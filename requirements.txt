@@ -1,6 +1,7 @@
 requests
 pydantic
 jsonschema
+python-socketio[client]
 rich
 pyyaml
 fastapi

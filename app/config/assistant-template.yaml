@@ -51,6 +51,16 @@ context:
   injected_memory_limit: 5
   integration_context_limit: 4000
 
+autonomy:
+  enabled: false
+  max_chain_events: 20
+  max_chain_age_s: 1800
+  max_queue_size: 256
+  max_tool_steps: 5
+  global_llm_concurrency: 1
+  approval_timeout_s: 300
+  recent_context_limit: 4000
+
 tts:
   engine: pocket-tts
   gpt_sovits:
@@ -118,3 +128,14 @@ integrations:
   shell:
     enabled: true
     timeout: 15
+  mindcraft:
+    enabled: false
+    url: http://localhost:8081
+    agent_name: ""
+    connect_timeout: 3.0
+    reconnect_delay_s: 2.0
+    reconnect_max_delay_s: 30.0
+    context_enabled: true
+    recent_output_limit: 3
+    events_enabled: true
+    ambient_session_id: ""

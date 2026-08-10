@@ -9,6 +9,9 @@ from app.integrations import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    EventId,
+    EventSpec,
+    IntegrationEvent,
 )
 
 
@@ -19,6 +22,7 @@ class FakeIntegration:
         self.calls = []
         self.available = available
         self.raises = raises
+        self.closed = False
 
     def registered_tools(self):
         return [RegisteredTool(
@@ -47,8 +51,70 @@ class FakeIntegration:
             return None
         return ContextContribution(self.name, self.context_text)
 
+    def close(self):
+        self.closed = True
+
 
 class IntegrationRegistryTests(unittest.TestCase):
+    def test_event_ids_and_payloads_are_strictly_validated(self):
+        integration = FakeIntegration()
+        integration.registered_events = lambda: [EventSpec(
+            event=EventId("demo", "finished"),
+            description="Finished.",
+            payload_schema={
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+            allowed_capabilities=(CapabilityId("demo", "run"),),
+        )]
+        registry = IntegrationRegistry([integration])
+
+        spec = registry.validate_event(IntegrationEvent(
+            EventId.parse("demo__finished"), {"ok": True}, "session-1"
+        ))
+        self.assertEqual(str(spec.event), "demo__finished")
+        with self.assertRaises(ValueError):
+            registry.validate_event(IntegrationEvent(spec.event, {"ok": "yes"}, "session-1"))
+        with self.assertRaises(ValueError):
+            registry.validate_event(IntegrationEvent(
+                spec.event,
+                {"ok": True},
+                "session-1",
+                root_event_id="root-without-cause",
+            ))
+
+    def test_event_unknown_allowlist_is_rejected(self):
+        integration = FakeIntegration()
+        integration.registered_events = lambda: [EventSpec(
+            event=EventId("demo", "finished"),
+            description="Finished.",
+            payload_schema={"type": "object", "properties": {}},
+            allowed_capabilities=(CapabilityId("missing", "run"),),
+        )]
+        with self.assertRaises(ValueError):
+            IntegrationRegistry([integration])
+
+    def test_close_calls_integration_cleanup(self):
+        integration = FakeIntegration()
+        registry = IntegrationRegistry([integration])
+
+        registry.close()
+
+        self.assertTrue(integration.closed)
+
+    def test_cleanup_failure_does_not_stop_other_integrations(self):
+        healthy = FakeIntegration(name="healthy")
+        failing = FakeIntegration(name="failing")
+        failing.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        registry = IntegrationRegistry([healthy, failing])
+
+        with self.assertLogs("integration_registry", level="ERROR"):
+            registry.close()
+
+        self.assertTrue(healthy.closed)
+
     def test_capability_ids_require_namespaced_safe_format(self):
         self.assertEqual(str(CapabilityId.parse("demo__run")), "demo__run")
         with self.assertRaises(ValueError):
@@ -80,6 +146,11 @@ class IntegrationRegistryTests(unittest.TestCase):
 
         unavailable = IntegrationRegistry([FakeIntegration(available=False)])
         self.assertEqual(unavailable.get_native_tools(), [])
+
+        self.assertEqual(
+            registry.get_native_tools({CapabilityId("missing", "run")}),
+            [],
+        )
 
     def test_namespace_and_invalid_schema_are_rejected_at_startup(self):
         wrong_namespace = FakeIntegration(name="demo")

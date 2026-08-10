@@ -140,6 +140,25 @@ class FakeApprovalWebSocket(FakeWebSocket):
         }
 
 
+class InvalidSttAudioErrorTests(unittest.TestCase):
+    def test_pyav_invalid_data_error_is_expected_stt_silence(self):
+        invalid_data_error_type = type(
+            "InvalidDataError",
+            (Exception,),
+            {"__module__": "av.error"},
+        )
+        exc = invalid_data_error_type(
+            "[Errno 1094995529] Invalid data found when processing input: '<none>'"
+        )
+
+        self.assertTrue(server_module._is_invalid_stt_audio_error(exc))
+
+    def test_other_errors_are_not_treated_as_stt_silence(self):
+        self.assertFalse(
+            server_module._is_invalid_stt_audio_error(RuntimeError("model unavailable"))
+        )
+
+
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

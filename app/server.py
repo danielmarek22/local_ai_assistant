@@ -28,13 +28,15 @@ from app.core.events import (
     AvatarAnimationEvent,
 )
 from app.logging import setup_logging_from_config
-from app.perception.attachments import Attachment, AudioAttachment, attachment_from_payload
+from app.perception.attachments import Attachment, AudioAttachment, ImageAttachment, attachment_from_payload
+from app.integrations import EventAttachmentRef, EventId, IntegrationEvent
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
 from app.services.vision_watchdog import VisionWatchdog
+from app.services.connection_hub import SessionConnectionHub
 from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 
 config = Config()
@@ -63,6 +65,7 @@ VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
 VOICE_INPUT_STT = "stt"
 VOICE_INPUT_NATIVE_AUDIO = "native_audio"
+_PYAV_INVALID_DATA_ERRNO = "1094995529"
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -95,6 +98,23 @@ def _voice_input_path() -> str:
 def _native_audio_config() -> dict:
     native_audio = config.voice_input.get("native_audio", {})
     return native_audio if isinstance(native_audio, dict) else {}
+
+
+def _is_invalid_stt_audio_error(exc: Exception) -> bool:
+    """Return True for decoder errors caused by incomplete or non-audio blobs."""
+    exc_type = type(exc)
+    if exc_type.__name__ != "InvalidDataError":
+        return False
+
+    module = getattr(exc_type, "__module__", "")
+    if module and not module.startswith("av"):
+        return False
+
+    message = str(exc)
+    return (
+        _PYAV_INVALID_DATA_ERRNO in message
+        or "Invalid data found when processing input" in message
+    )
 
 
 def _convert_audio_to_wav(
@@ -360,7 +380,11 @@ async def synthesize_async(text: str, output_path: Path, session_id: str):
 
 
 async def _send_ws_payload(ws: WebSocket, payload: dict) -> None:
-    await ws.send_text(json.dumps(payload))
+    hub = getattr(app.state, "connection_hub", None)
+    if hub is not None:
+        await hub.send_websocket(ws, payload)
+    else:
+        await ws.send_text(json.dumps(payload))
 
 
 async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> None:
@@ -558,6 +582,28 @@ def _dedupe_attachments_by_hash(attachments: list[Attachment]) -> list[Attachmen
     return deduped
 
 
+def _persist_event_attachment(event_id: str, attachment: ImageAttachment) -> EventAttachmentRef:
+    event_dir = Path("static/uploads/events") / event_id
+    event_dir.mkdir(parents=True, exist_ok=True)
+    suffix = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }.get(attachment.mime_type, ".bin")
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(attachment.name).stem) or "attachment"
+    path = event_dir / f"{safe_stem}{suffix}"
+    payload = attachment.as_bytes()
+    path.write_bytes(payload)
+    return EventAttachmentRef(
+        name=attachment.name,
+        mime_type=attachment.mime_type,
+        storage_path=str(path),
+        sha256=attachment.sha256 or hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+
+
 async def _stream_orchestrator_events(
     ws: WebSocket,
     orchestrator,
@@ -566,6 +612,10 @@ async def _stream_orchestrator_events(
     original_attachment_count: int,
     state_tracker: dict[str, str],
 ) -> None:
+    hub = getattr(app.state, "connection_hub", None)
+    turn_id = uuid.uuid4().hex
+    if hub is not None:
+        hub.set_turn(connection_id, turn_id, "user")
     text_buffer = ""
     thinking_filter = ThinkingBlockFilter()
     pending_chunks: list[str] = []
@@ -724,12 +774,79 @@ async def _stream_orchestrator_events(
 
                 logger.info("[%s] Assistant turn completed", connection_id)
 
+    if hub is not None:
+        hub.set_turn(connection_id, None, None)
+
+
+async def _autonomy_output_sink(session_id: str, event, turn_id: str) -> None:
+    if not isinstance(event, AssistantStateEvent):
+        return
+    hub = getattr(app.state, "connection_hub", None)
+    if hub is not None:
+        await hub.broadcast(session_id, {
+            "type": "assistant_state",
+            "state": event.state,
+            "turn_id": turn_id,
+            "origin": "integration_event",
+        })
+
+
+async def _autonomy_notification_sink(
+    session_id: str,
+    notification: dict[str, object],
+    turn_id: str,
+) -> None:
+    hub = getattr(app.state, "connection_hub", None)
+    if hub is None or not hub.has_session(session_id):
+        return
+    message = str(notification.get("message", "")).strip()
+    if not message:
+        return
+    await hub.broadcast(session_id, {
+        "type": "assistant_chunk",
+        "content": message,
+        "turn_id": turn_id,
+        "origin": "integration_event",
+    })
+    if notification.get("delivery") == "speech" and tts is not None:
+        audio_id = uuid.uuid4().hex
+        audio_path = AUDIO_DIR / f"{audio_id}.wav"
+        try:
+            await synthesize_async(message, audio_path, session_id)
+        except Exception:
+            logger.exception("[%s] Autonomous notification TTS failed", session_id)
+        else:
+            await hub.broadcast(session_id, {
+                "type": "assistant_audio",
+                "url": f"/static/audio/{audio_id}.wav",
+                "turn_id": turn_id,
+                "origin": "integration_event",
+            })
+    await hub.broadcast(session_id, {
+        "type": "assistant_end",
+        "content": message,
+        "turn_id": turn_id,
+        "origin": "integration_event",
+    })
+
+
+async def _autonomy_approval_provider(session_id: str, request: dict[str, object]) -> bool:
+    hub = getattr(app.state, "connection_hub", None)
+    if hub is None:
+        return False
+    return await hub.request_approval(
+        session_id,
+        request,
+        timeout_seconds=float(config.autonomy.get("approval_timeout_s", 300)),
+    )
+
 
 @app.on_event("startup")
 async def startup_event():
     global tts
 
     app.state.server_instance_id = uuid.uuid4().hex[:8]
+    app.state.connection_hub = SessionConnectionHub()
     app.state.orchestrator = build_orchestrator()
     app.state.memory_reflector = MemoryReflector(
         llm=app.state.orchestrator.llm,
@@ -763,12 +880,29 @@ async def startup_event():
     else:
         app.state.stt = None
     logger.info("Voice input path configured as %s", app.state.voice_input_path)
+    autonomy_runtime = getattr(app.state.orchestrator, "autonomy_runtime", None)
+    if autonomy_runtime is not None:
+        autonomy_runtime.output_sink = _autonomy_output_sink
+        autonomy_runtime.notification_sink = _autonomy_notification_sink
+        autonomy_runtime.approval_provider = _autonomy_approval_provider
+        await autonomy_runtime.start()
+        app.state.autonomy_runtime = autonomy_runtime
+        logger.info("Autonomy runtime started")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     queue = getattr(app.state, "tts_queue", None)
     worker_task = getattr(app.state, "tts_worker_task", None)
+    orchestrator = getattr(app.state, "orchestrator", None)
+    autonomy_runtime = getattr(app.state, "autonomy_runtime", None)
+
+    if autonomy_runtime is not None:
+        await autonomy_runtime.close()
+    else:
+        close_orchestrator = getattr(orchestrator, "close", None)
+        if callable(close_orchestrator):
+            close_orchestrator()
 
     if queue is not None:
         await queue.put(_TTS_STOP)
@@ -859,6 +993,27 @@ async def run_memory_reflection(payload: ReflectRequest):
     return result
 
 
+@app.get("/api/autonomy")
+async def get_autonomy_status():
+    runtime = getattr(app.state, "autonomy_runtime", None)
+    if runtime is None:
+        return {"enabled": False, "paused": True, "queued": 0, "running": False}
+    return runtime.status()
+
+
+class AutonomyStateRequest(BaseModel):
+    paused: bool
+
+
+@app.put("/api/autonomy")
+async def set_autonomy_status(payload: AutonomyStateRequest):
+    runtime = getattr(app.state, "autonomy_runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Autonomy runtime is unavailable")
+    await runtime.set_paused(payload.paused)
+    return runtime.status()
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     connection_id = uuid.uuid4().hex[:8]
@@ -876,17 +1031,19 @@ async def websocket_endpoint(ws: WebSocket):
     )
 
     await ws.accept()
+    hub = app.state.connection_hub
+    hub.register(session_id, connection_id, ws)
     logger.info(
         "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
         connection_id,
         session_id,
         session_mode,
     )
-    await ws.send_text(json.dumps(_build_session_init_payload(
+    await _send_ws_payload(ws, _build_session_init_payload(
         server_instance_id=server_instance_id,
         session_id=session_id,
         gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
-    )))
+    ))
 
     orchestrator = app.state.orchestrator
     watchdog = getattr(app.state, "vision_watchdog", None)
@@ -980,9 +1137,6 @@ async def websocket_endpoint(ws: WebSocket):
         if now - last_detection < 5.0:
             return None
 
-        if assistant_state_tracker["state"] != AssistantState.IDLE:
-            return None
-
         if evaluate is None:
             logger.debug("[%s] Vision watchdog unavailable; stored %s perception only", connection_id, source)
             return None
@@ -1010,19 +1164,25 @@ async def websocket_endpoint(ws: WebSocket):
                 "Proactively check in briefly and helpfully."
             )
 
-        logger.info("[%s] Vision watchdog triggered proactive %s turn", connection_id, source)
-        await _stream_orchestrator_events(
-            ws=ws,
-            orchestrator=orchestrator,
-            event_iterator=orchestrator.handle_proactive_event(
-                session_id=session_id,
-                event_text=event_text,
-                attachments=[attachment],
-            ),
-            connection_id=connection_id,
-            original_attachment_count=1,
-            state_tracker=assistant_state_tracker,
-        )
+        runtime = getattr(orchestrator, "autonomy_runtime", None)
+        if runtime is None:
+            logger.warning("[%s] Vision event ignored because autonomy is unavailable", connection_id)
+            return None
+        event_id = str(uuid.uuid4())
+        event_attachment = _persist_event_attachment(event_id, attachment)
+        await runtime.publish(IntegrationEvent(
+            event=EventId("vision", "attention_detected"),
+            event_id=event_id,
+            session_id=session_id,
+            payload={
+                "source": source,
+                "description": event_text,
+                "sha256": image_hash,
+            },
+            deduplication_key=f"{source}:{image_hash}",
+            attachments=(event_attachment,),
+        ))
+        logger.info("[%s] Vision watchdog published autonomous %s event", connection_id, source)
         return None
 
     try:
@@ -1030,6 +1190,7 @@ async def websocket_endpoint(ws: WebSocket):
             # receive() instead of receive_text() so we can handle both
             # text frames (keyboard) and binary frames (microphone audio).
             raw_message = await ws.receive()
+            hub.touch(connection_id)
 
             # Starlette surfaces disconnects as a message dict rather than
             # raising WebSocketDisconnect, so we must check before touching
@@ -1104,7 +1265,18 @@ async def websocket_endpoint(ws: WebSocket):
                             result = await loop.run_in_executor(
                                 None, stt.transcribe, audio_bytes
                             )
-                        except Exception:
+                        except Exception as exc:
+                            if _is_invalid_stt_audio_error(exc):
+                                logger.debug(
+                                    "[%s] Ignoring undecodable STT audio frame (%d bytes): %s",
+                                    connection_id,
+                                    len(audio_bytes),
+                                    exc,
+                                )
+                                pending_voice_attachments = []
+                                await _send_ws_payload(ws, {"type": "stt_silence"})
+                                continue
+
                             logger.exception("[%s] STT transcription failed", connection_id)
                             pending_voice_attachments = []
                             await _send_turn_error(ws, "Transcription failed.")
@@ -1144,6 +1316,13 @@ async def websocket_endpoint(ws: WebSocket):
                         parsed_payload = json.loads(text_payload)
                     except json.JSONDecodeError:
                         parsed_payload = None
+
+                    if (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "tool_approval_response"
+                        and hub.resolve_approval(connection_id, parsed_payload)
+                    ):
+                        continue
 
                     if (
                         isinstance(parsed_payload, dict)
@@ -1213,22 +1392,31 @@ async def websocket_endpoint(ws: WebSocket):
                 )
                 logger.debug("[%s] User input text: %r", connection_id, user_text)
 
-                await _stream_orchestrator_events(
-                    ws=ws,
-                    orchestrator=orchestrator,
-                    event_iterator=orchestrator.handle_user_input(
-                        session_id,
-                        user_text,
-                        think_override=reasoning_override,
-                        instant_mode=instant_mode,
-                        attachments=attachments,
-                        input_modality=input_modality,
-                        tool_approval_callback=request_tool_approval,
-                    ),
-                    connection_id=connection_id,
-                    original_attachment_count=original_attachment_count,
-                    state_tracker=assistant_state_tracker,
-                )
+                runtime = getattr(orchestrator, "autonomy_runtime", None)
+                turn_context = runtime.coordinator.user_turn(session_id) if runtime else None
+                if turn_context is None:
+                    await _stream_orchestrator_events(
+                        ws, orchestrator,
+                        orchestrator.handle_user_input(
+                            session_id, user_text, think_override=reasoning_override,
+                            instant_mode=instant_mode, attachments=attachments,
+                            input_modality=input_modality,
+                            tool_approval_callback=request_tool_approval,
+                        ),
+                        connection_id, original_attachment_count, assistant_state_tracker,
+                    )
+                else:
+                    async with turn_context:
+                        await _stream_orchestrator_events(
+                            ws, orchestrator,
+                            orchestrator.handle_user_input(
+                                session_id, user_text, think_override=reasoning_override,
+                                instant_mode=instant_mode, attachments=attachments,
+                                input_modality=input_modality,
+                                tool_approval_callback=request_tool_approval,
+                            ),
+                            connection_id, original_attachment_count, assistant_state_tracker,
+                        )
 
             except WebSocketDisconnect:
                 raise
@@ -1258,6 +1446,7 @@ async def websocket_endpoint(ws: WebSocket):
         logger.exception("[%s] WebSocket handler crashed", connection_id)
 
     finally:
+        hub.unregister(connection_id)
         logger.debug("[%s] WebSocket cleanup complete", connection_id)
 
 @app.get("/")

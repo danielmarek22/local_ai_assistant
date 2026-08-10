@@ -170,19 +170,51 @@ export class UIManager {
                 ? 'audio/webm;codecs=opus'
                 : '';
 
-            this._mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+            this._mediaRecorder = null;
             this._audioChunks = [];
             this._speechDetectedTime = 0;
             this._isSendingAlwaysListeningChunk = false;
             this._alwaysListeningVoiceContextSent = false;
 
-            this._mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) {
-                    this._audioChunks.push(e.data);
+            const startSpeechSegment = () => {
+                if (this._mediaRecorder?.state === 'recording') return;
+
+                const chunks = [];
+                const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+                this._mediaRecorder = recorder;
+                recorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        chunks.push(e.data);
+                    }
+                };
+                recorder.onstop = () => {
+                    this._isSendingAlwaysListeningChunk = false;
+                    if (this._mediaRecorder === recorder) {
+                        this._mediaRecorder = null;
+                    }
+
+                    if (!this._isAlwaysListening || !chunks.length || !this._onMicPressHandler) return;
+
+                    const blob = new Blob(chunks, {
+                        type: recorder.mimeType || 'audio/webm',
+                    });
+                    this._onMicPressHandler(blob, {
+                        includeScreenContext: !this._alwaysListeningVoiceContextSent,
+                    });
+                    this._alwaysListeningVoiceContextSent = true;
+                };
+                this._isSendingAlwaysListeningChunk = true;
+                recorder.start();
+            };
+
+            const stopSpeechSegment = () => {
+                if (this._mediaRecorder?.state === 'recording') {
+                    this._mediaRecorder.stop();
                 }
             };
 
-            // Check for speech activity every 100ms and send accumulated audio if speech detected
+            // Check for speech activity every 100ms and send each complete utterance
+            // after a short silence, so STT receives a decodable WebM blob.
             this._alwaysListeningSpeechCheck = setInterval(() => {
                 if (!this._isAlwaysListening) return;
 
@@ -190,35 +222,15 @@ export class UIManager {
                 
                 if (hasSpeech) {
                     this._speechDetectedTime = Date.now();
+                    startSpeechSegment();
                 }
 
-                // Send accumulated audio if speech was detected recently
                 const timeSinceSpeech = Date.now() - this._speechDetectedTime;
                 if (timeSinceSpeech >= 800) {
+                    stopSpeechSegment();
                     this._alwaysListeningVoiceContextSent = false;
                 }
-                if (this._audioChunks.length > 0 && timeSinceSpeech < 800 && !this._isSendingAlwaysListeningChunk) {
-                    this._isSendingAlwaysListeningChunk = true;
-                    const blob = new Blob(this._audioChunks, {
-                        type: this._mediaRecorder.mimeType || 'audio/webm',
-                    });
-                    this._audioChunks = [];
-                    
-                    if (this._onMicPressHandler) {
-                        this._onMicPressHandler(blob, {
-                            includeScreenContext: !this._alwaysListeningVoiceContextSent,
-                        });
-                        this._alwaysListeningVoiceContextSent = true;
-                    }
-                    
-                    // Add a small delay to prevent rapid successive sends
-                    setTimeout(() => {
-                        this._isSendingAlwaysListeningChunk = false;
-                    }, 300);
-                }
             }, 100);
-
-            this._mediaRecorder.start(100); // Collect audio every 100ms
         } catch (err) {
             console.warn('Microphone access denied:', err);
             this._isAlwaysListening = false;
@@ -247,10 +259,10 @@ export class UIManager {
             this._alwaysListeningSpeechCheck = null;
         }
 
-        if (this._mediaRecorder) {
+        if (this._mediaRecorder?.state === 'recording') {
             this._mediaRecorder.stop();
-            this._mediaRecorder = null;
         }
+        this._mediaRecorder = null;
 
         if (this._alwaysListeningStream) {
             this._alwaysListeningStream.getTracks().forEach((t) => t.stop());
