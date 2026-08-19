@@ -27,6 +27,13 @@ capabilities bypass Mindcraft's planning model for supported commands, while
 direct commands return pending operations and publish correlated success/failure events.
 General bot output remains passive context and is not treated as command completion.
 
+The enhanced Mindcraft fork is feature-detected through a versioned handshake. It uses
+typed action requests, terminal operation recovery, exact Mineflayer events, semantic
+resource actions, and verified first-person JPEG attachments. Player speech is journaled
+without waking Astra by default. `controller_mode: external` disables Mindcraft model
+initialization while preserving typed control, pathfinding, safety modes, and capture;
+`hybrid` retains natural-language delegation.
+
 Integrations that own background resources may implement `start(publisher)` and `close()`.
 Startup occurs only after the server event loop and journal are ready; shutdown runs in
 reverse registration order and isolates cleanup failures.

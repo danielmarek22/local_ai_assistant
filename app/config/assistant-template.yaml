@@ -139,3 +139,5 @@ integrations:
     recent_output_limit: 3
     events_enabled: true
     ambient_session_id: ""
+    autonomous_events: [critical_health, died, disconnected]
+    attachment_dir: static/uploads/events/mindcraft

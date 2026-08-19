@@ -41,6 +41,9 @@ one warning per outage.
 `integrations.mindcraft.events_enabled` enables correlated command completion events.
 `integrations.mindcraft.ambient_session_id` is the explicit target for spontaneous events;
 an empty value journals unbound events without invoking the assistant.
+`integrations.mindcraft.autonomous_events` lists exact game events allowed to start bounded
+turns after a session controls the bot. `integrations.mindcraft.attachment_dir` stores
+verified first-person captures received from the enhanced fork.
 
 Autonomy is globally pausable through `/api/autonomy` and the Web UI. Pausing leaves queued
 events durable and does not cancel an already-running external action.

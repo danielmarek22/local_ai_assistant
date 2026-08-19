@@ -1,5 +1,10 @@
+import base64
+import hashlib
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from app.integrations import (
     CapabilityId,
@@ -22,8 +27,16 @@ class FakeSocketClient:
     def on(self, event, handler):
         self.handlers[event] = handler
 
-    def emit(self, event, *args):
+    def emit(self, event, *args, callback=None):
         self.emitted.append((event, args))
+        if event == "integration-hello" and callback is not None:
+            callback({
+                "protocol_version": 1,
+                "features": [
+                    "typed_actions", "operation_lifecycle", "agent_events",
+                    "vision_attachments",
+                ],
+            })
 
     def disconnect(self):
         self.disconnect_calls += 1
@@ -65,8 +78,14 @@ class MindcraftIntegrationTests(unittest.TestCase):
             {tool["function"]["name"] for tool in self.registry.get_native_tools()},
             {
                 "mindcraft__collect_blocks",
+                "mindcraft__collect_resource",
+                "mindcraft__chop_tree",
+                "mindcraft__capture_view",
                 "mindcraft__follow_player",
                 "mindcraft__go_to_player",
+                "mindcraft__look_at_player",
+                "mindcraft__look_at_position",
+                "mindcraft__say",
                 "mindcraft__send_message",
                 "mindcraft__stop",
             },
@@ -195,7 +214,7 @@ class MindcraftIntegrationTests(unittest.TestCase):
             {"name": "Sam", "in_game": True, "socket_connected": True},
         ])
 
-        self.assertEqual(len(registry.get_native_tools()), 5)
+        self.assertEqual(len(registry.get_native_tools()), 11)
 
     def test_context_contains_world_state_and_recent_output(self):
         self.connect_with_agents([
@@ -275,6 +294,7 @@ class MindcraftIntegrationTests(unittest.TestCase):
         published = []
         integration._publisher = lambda event: published.append(event) or event.event_id
         self.client.set_command_result_handler(integration._publish_command_result)
+        self.client.set_operation_event_handler(integration._publish_operation_event)
         self.connect_with_agents([
             {"name": "Andy", "in_game": True, "socket_connected": True}
         ])
@@ -288,21 +308,173 @@ class MindcraftIntegrationTests(unittest.TestCase):
 
         self.assertEqual(result.status.value, "pending")
         self.assertEqual(result.operation_id, "op-123")
-        self.assertEqual(self.socket.emitted[-1][0], "execute-command")
-        self.assertEqual(self.socket.emitted[-1][1][0][1]["request_id"], "op-123")
+        self.assertEqual(self.socket.emitted[-1][0], "execute-action")
+        self.assertEqual(self.socket.emitted[-1][1][0][1]["operation_id"], "op-123")
 
-        self.socket.trigger("command-result", {
-            "request_id": "op-123",
+        self.socket.trigger("operation-event", {
+            "operation_id": "op-123",
             "agent_name": "Andy",
-            "command": '!goToPlayer("Biszeq", 2)',
-            "status": "success",
+            "action": "go_to_player",
+            "status": "completed",
             "message": "Arrived.",
             "interrupted": False,
             "timed_out": False,
+            "terminal": True,
             "state": {"gameplay": {"position": {"x": 1}}},
         })
         self.assertEqual(str(published[0].event), "mindcraft__command_completed")
         self.assertEqual(published[0].correlation_id, "op-123")
+
+    def test_exact_agent_events_bind_only_after_session_controls_bot(self):
+        integration = MindcraftIntegration(
+            self.client,
+            events_enabled=True,
+            autonomous_events=("critical_health",),
+        )
+        published = []
+        integration._publisher = lambda event: published.append(event) or event.event_id
+        self.client.set_agent_event_handler(integration._publish_agent_event)
+        self.connect_with_agents([
+            {"name": "Andy", "in_game": True, "socket_connected": True}
+        ])
+
+        common = {
+            "protocol_version": 1,
+            "sequence": 1,
+            "agent_name": "Andy",
+            "occurred_at": "2026-08-11T10:00:00.000Z",
+            "state": {"gameplay": {"health": 4}},
+        }
+        self.socket.trigger("agent-event", {
+            **common,
+            "event_id": "boot:1",
+            "event": "critical_health",
+            "payload": {"health": 4},
+        })
+        self.assertIsNone(published[-1].session_id)
+
+        integration._send_action(
+            "go_to_player",
+            {"player_name": "Biszeq", "closeness": 2},
+            "Go",
+            InvocationContext("session-1", "go", invocation_id="op-1"),
+        )
+        self.socket.trigger("agent-event", {
+            **common,
+            "sequence": 2,
+            "event_id": "boot:2",
+            "event": "critical_health",
+            "payload": {"health": 3},
+        })
+        self.socket.trigger("agent-event", {
+            **common,
+            "sequence": 3,
+            "event_id": "boot:3",
+            "event": "player_spoke",
+            "payload": {"player_name": "Alex", "message": "hello"},
+        })
+
+        self.assertEqual(published[-2].session_id, "session-1")
+        self.assertIsNone(published[-1].session_id)
+        player_spec = next(
+            spec for spec in integration.registered_events()
+            if str(spec.event) == "mindcraft__player_spoke"
+        )
+        self.assertEqual(
+            {str(capability) for capability in player_spec.allowed_capabilities},
+            {"mindcraft__say"},
+        )
+
+    def test_external_controller_mode_hides_planner_delegation(self):
+        self.connect_with_agents([
+            {"name": "Andy", "in_game": True, "socket_connected": True}
+        ])
+        self.client._on_protocol_manifest({
+            "protocol_version": 1,
+            "features": ["typed_actions"],
+            "agent_controller_modes": {"Andy": "external"},
+        })
+
+        names = {tool["function"]["name"] for tool in self.registry.get_native_tools()}
+
+        self.assertNotIn("mindcraft__send_message", names)
+        self.assertIn("mindcraft__collect_resource", names)
+
+    def test_vision_operation_persists_verified_attachment(self):
+        image = b"jpeg-payload"
+        digest = hashlib.sha256(image).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            integration = MindcraftIntegration(
+                self.client,
+                events_enabled=True,
+                attachment_dir=directory,
+            )
+            published = []
+            integration._publisher = lambda event: published.append(event) or event.event_id
+            self.client.set_operation_event_handler(integration._publish_operation_event)
+            self.socket.trigger("operation-event", {
+                "operation_id": "op-image",
+                "agent_name": "Andy",
+                "action": "capture_view",
+                "status": "completed",
+                "message": "Captured.",
+                "terminal": True,
+                "data": {
+                    "attachment": {
+                        "name": "view.jpg",
+                        "mime_type": "image/jpeg",
+                        "sha256": digest,
+                        "data_base64": base64.b64encode(image).decode("ascii"),
+                    }
+                },
+                "state": {},
+            })
+
+            attachment = published[0].attachments[0]
+            self.assertEqual(attachment.sha256, digest)
+            self.assertEqual(Path(attachment.storage_path).read_bytes(), image)
+
+    def test_reconnect_recovers_terminal_pending_operation(self):
+        class FakeOperationStore:
+            def __init__(self):
+                self.finished = []
+
+            def pending_operations(self, prefix):
+                self.prefix = prefix
+                return [SimpleNamespace(
+                    invocation_id="op-recovered",
+                    capability="mindcraft__collect_resource",
+                )]
+
+            def has_event_deduplication_key(self, _event_type, _key):
+                return False
+
+            def finish_operation(self, operation_id, status, result):
+                self.finished.append((operation_id, status, result))
+
+        store = FakeOperationStore()
+        integration = MindcraftIntegration(
+            self.client,
+            events_enabled=True,
+            operation_store=store,
+        )
+        published = []
+        integration._publisher = lambda event: published.append(event) or event.event_id
+        self.client.query_operation = lambda _operation_id: {
+            "operation_id": "op-recovered",
+            "agent_name": "Andy",
+            "action": "collect_resource",
+            "status": "completed",
+            "message": "Collected ten coal ore.",
+            "terminal": True,
+            "state": {},
+        }
+
+        integration._reconcile_pending_operations()
+
+        self.assertEqual(store.prefix, "mindcraft__")
+        self.assertEqual(str(published[0].event), "mindcraft__command_completed")
+        self.assertEqual(store.finished[0][1], "success")
 
 
 if __name__ == "__main__":

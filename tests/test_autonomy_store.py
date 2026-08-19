@@ -91,6 +91,14 @@ class AutonomyStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_operation("op-1").status, "pending")
         self.assertTrue(self.store.is_paused())
 
+    def test_late_pending_update_does_not_overwrite_terminal_operation(self):
+        self.store.begin_operation("op-1", "mindcraft__say", "session-1", None, None, None)
+        self.store.finish_operation("op-1", "success", "done")
+        self.store.finish_operation("op-1", "pending", "accepted")
+
+        self.assertEqual(self.store.get_operation("op-1").status, "success")
+        self.assertEqual(self.store.pending_operations("mindcraft__"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

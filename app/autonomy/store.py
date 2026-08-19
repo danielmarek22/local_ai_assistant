@@ -244,13 +244,22 @@ class AutonomyStore:
 
     def finish_operation(self, invocation_id: str, status: str, result: str | None = None) -> None:
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
-                WHERE invocation_id = ?
-                """,
-                (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
-            )
+            if status == "pending":
+                self._conn.execute(
+                    """
+                    UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
+                    WHERE invocation_id = ? AND status = 'running'
+                    """,
+                    (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
+                    WHERE invocation_id = ?
+                    """,
+                    (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
+                )
             self._conn.commit()
 
     def get_operation(self, invocation_id: str) -> OperationRecord | None:
@@ -266,6 +275,36 @@ class AutonomyStore:
             session_id=row["session_id"], status=row["status"], event_id=row["event_id"],
             root_event_id=row["root_event_id"], causation_id=row["causation_id"],
         )
+
+    def pending_operations(self, capability_prefix: str | None = None) -> list[OperationRecord]:
+        query = "SELECT * FROM integration_operations WHERE status IN ('running', 'pending')"
+        parameters: tuple[object, ...] = ()
+        if capability_prefix:
+            query += " AND capability LIKE ?"
+            parameters = (f"{capability_prefix}%",)
+        query += " ORDER BY created_at, invocation_id"
+        with self._lock:
+            rows = self._conn.execute(query, parameters).fetchall()
+        return [
+            OperationRecord(
+                invocation_id=row["invocation_id"], capability=row["capability"],
+                session_id=row["session_id"], status=row["status"], event_id=row["event_id"],
+                root_event_id=row["root_event_id"], causation_id=row["causation_id"],
+            )
+            for row in rows
+        ]
+
+    def has_event_deduplication_key(self, event_type: str, deduplication_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1 FROM integration_events
+                WHERE event_type = ? AND deduplication_key = ?
+                LIMIT 1
+                """,
+                (event_type, deduplication_key),
+            ).fetchone()
+        return row is not None
 
     def is_paused(self) -> bool:
         with self._lock:

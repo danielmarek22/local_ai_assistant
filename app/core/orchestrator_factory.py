@@ -229,6 +229,13 @@ def build_orchestrator() -> Orchestrator:
             context_enabled=bool(mindcraft_cfg.get("context_enabled", True)),
             events_enabled=bool(mindcraft_cfg.get("events_enabled", True)),
             ambient_session_id=str(mindcraft_cfg.get("ambient_session_id", "")).strip() or None,
+            autonomous_events=tuple(mindcraft_cfg.get("autonomous_events", [
+                "critical_health", "died", "disconnected",
+            ])),
+            attachment_dir=str(
+                mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+            ),
+            operation_store=autonomy_store,
         ))
         logger.info("Mindcraft integration registered (url=%s)", mindcraft_client.url)
 
