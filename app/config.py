@@ -44,6 +44,8 @@ class Config:
         # Context
         self.context = self._load_context_config(self.raw.get("context"))
 
+        self.beliefs = self._load_beliefs_config(self.raw.get("beliefs"))
+
         self.autonomy = self._load_autonomy_config(self.raw.get("autonomy"))
 
         # TTS
@@ -201,6 +203,24 @@ class Config:
             return config
 
         config.update(raw_context)
+        return config
+
+    @staticmethod
+    def _load_beliefs_config(raw_beliefs: dict | None) -> dict:
+        config = {
+            "enabled": True,
+            "extraction_enabled": False,
+            "timezone": "UTC",
+            "max_candidates": 4,
+            "max_existing_beliefs": 24,
+            "max_snapshot_chars": 2000,
+            "max_disambiguating_context_chars": 1000,
+            "max_generation_tokens": 384,
+            "timeout_s": 30.0,
+            "max_expiry_days": 90,
+        }
+        if isinstance(raw_beliefs, dict):
+            config.update(raw_beliefs)
         return config
 
     @staticmethod

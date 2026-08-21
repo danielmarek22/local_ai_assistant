@@ -84,6 +84,10 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "reflection_complete",
         "reflection_parse_error",
     ),
+    "belief_observer": (
+        "extraction_complete",
+        "extraction_failed",
+    ),
 }
 
 

@@ -22,6 +22,7 @@ llm:
       min_p: null
 
 assistant:
+  id: default-agent
   system_prompt: |
     You are Astra, a local, user-aligned personal assistant.
 
@@ -50,6 +51,18 @@ context:
   history_limit: 6
   injected_memory_limit: 5
   integration_context_limit: 4000
+
+beliefs:
+  enabled: true
+  extraction_enabled: false
+  timezone: UTC
+  max_candidates: 4
+  max_existing_beliefs: 24
+  max_snapshot_chars: 2000
+  max_disambiguating_context_chars: 1000
+  max_generation_tokens: 384
+  timeout_s: 30.0
+  max_expiry_days: 90
 
 autonomy:
   enabled: false

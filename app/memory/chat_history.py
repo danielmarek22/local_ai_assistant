@@ -359,6 +359,22 @@ class ChatHistoryStore:
         )
         return hydrated
 
+    def get_before(self, session_id: str, message_id: int, limit: int = 2):
+        if limit <= 0:
+            return []
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, role, content
+            FROM chat_history
+            WHERE session_id = ? AND id < ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, message_id, limit),
+        )
+        return list(reversed([dict(row) for row in cursor.fetchall()]))
+
     def get_all(self, session_id: str):
         cursor = self.db.conn.cursor()
         cursor.execute(

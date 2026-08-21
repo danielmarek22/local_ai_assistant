@@ -12,13 +12,25 @@ class TurnFinalizer:
         summary_store,
         summarizer,
         summary_trigger: int = 10,
+        completion_observers=None,
     ):
         self.history = history_store
         self.summary_store = summary_store
         self.summarizer = summarizer
         self.summary_trigger = summary_trigger
+        self.completion_observers = list(completion_observers or [])
 
-    def finalize(self, session_id: str) -> None:
+    def finalize(self, session_id: str, completed_turn=None) -> None:
+        if completed_turn is not None:
+            for observer in self.completion_observers:
+                try:
+                    observer.observe(completed_turn)
+                except Exception:
+                    logger.exception(
+                        "[%s] Turn completion observer failed; continuing finalization",
+                        session_id,
+                    )
+
         summary_data = self.summary_store.get(session_id)
         if summary_data:
             existing_summary, last_count = summary_data

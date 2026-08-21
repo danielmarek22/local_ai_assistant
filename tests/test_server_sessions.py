@@ -67,6 +67,17 @@ class FakeOrchestrator:
         self.history = history_store
         self.summary_store = summary_store
         self.gesture_catalog = gesture_catalog or {}
+        self.agent_id = "agent-a"
+        self.belief_repository = FakeBeliefRepository()
+
+
+class FakeBeliefRepository:
+    def __init__(self):
+        self.deleted_sessions = []
+
+    def delete_session(self, owner_agent_id, session_id):
+        self.deleted_sessions.append((owner_agent_id, session_id))
+        return 0
 
 
 class FakeMemoryReflector:
@@ -260,6 +271,10 @@ class ServerSessionTests(unittest.TestCase):
             self.vector_store.episodic_collection.deleted_wheres,
         )
         self.assertFalse(attachment_dir.exists())
+        self.assertEqual(
+            self.fake_orchestrator.belief_repository.deleted_sessions,
+            [("agent-a", "session-b")],
+        )
 
     def test_run_memory_reflection_returns_reflector_summary(self):
         payload = server_module.asyncio.run(

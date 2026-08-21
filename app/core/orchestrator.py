@@ -2,6 +2,7 @@ import logging
 import time
 import os
 import json
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from app.core.events import (
@@ -16,6 +17,7 @@ from app.core.assistant_state import AssistantState
 from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
+from app.core.turn_completion import CompletedUserTurn
 from app.logging import trace_event
 from app.integrations import (
     CapabilityId,
@@ -53,6 +55,9 @@ class Orchestrator:
         gesture_catalog: dict[str, str] | None = None,
         late_routing_enabled: bool = False,
         integration_context_limit: int = 4000,
+        agent_id: str = "default-agent",
+        timezone_name: str = "UTC",
+        belief_context_provider=None,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -65,6 +70,9 @@ class Orchestrator:
         self.allowed_animations = set(self.gesture_catalog.keys())
         self.late_routing_enabled = late_routing_enabled
         self.integration_context_limit = integration_context_limit
+        self.agent_id = agent_id
+        self.timezone_name = timezone_name
+        self.belief_context_provider = belief_context_provider
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -92,6 +100,7 @@ class Orchestrator:
         tool_approval_callback: Callable[[dict], bool] | None = None,
     ):
         start_ts = time.perf_counter()
+        observed_at = datetime.now(timezone.utc)
         turn_input = TurnInput(
             user_text=user_text,
             attachments=attachments or [],
@@ -167,7 +176,7 @@ class Orchestrator:
                 for attachment in turn_input.attachments
                 if isinstance(attachment, ImageAttachment)
             ]
-            self.history.add(
+            user_message_id = self.history.add(
                 session_id,
                 "user",
                 history_text,
@@ -223,7 +232,17 @@ class Orchestrator:
                 yield AssistantSpeechEvent(text=fallback, is_final=True)
 
             # 6. Post-processing (summarization)
-            self.turn_finalizer.finalize(session_id)
+            self.turn_finalizer.finalize(
+                session_id,
+                completed_turn=CompletedUserTurn(
+                    owner_agent_id=self.agent_id,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    user_text=turn_input.user_text,
+                    observed_at=observed_at,
+                    timezone_name=self.timezone_name,
+                ),
+            )
 
             logger.info(
                 "[%s] Turn completed (duration=%.2f ms)",
@@ -450,6 +469,7 @@ class Orchestrator:
             user_text=user_text,
             memory_context=memory_context,
             integration_context=integration_context,
+            belief_context=self._collect_belief_context(session_id),
             attachments=attachments or [],
         )
 
@@ -461,6 +481,16 @@ class Orchestrator:
             bool(integration_context),
         )
         return messages
+
+    def _collect_belief_context(self, session_id: str) -> str | None:
+        provider = self.belief_context_provider
+        if provider is None:
+            return None
+        try:
+            return provider.context_for_turn(session_id)
+        except Exception:
+            logger.exception("[%s] Belief context collection failed", session_id)
+            return None
 
     def _collect_integration_context(self, session_id: str, user_text: str) -> str | None:
         collector = getattr(self.tool_executor, "collect_context", None)

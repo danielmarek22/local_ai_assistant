@@ -36,6 +36,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.autonomy["max_chain_events"], 20)
         self.assertEqual(config.autonomy["global_llm_concurrency"], 1)
 
+    def test_belief_storage_defaults_enabled_but_extraction_requires_opt_in(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({}, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertTrue(config.beliefs["enabled"])
+        self.assertFalse(config.beliefs["extraction_enabled"])
+        self.assertEqual(config.beliefs["max_candidates"], 4)
+        self.assertEqual(config.beliefs["max_generation_tokens"], 384)
+        self.assertEqual(config.beliefs["max_existing_beliefs"], 24)
+
+    def test_belief_extraction_can_be_enabled_explicitly(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump(
+                {"beliefs": {"enabled": True, "extraction_enabled": True}},
+                config_file,
+            )
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertTrue(config.beliefs["enabled"])
+        self.assertTrue(config.beliefs["extraction_enabled"])
+
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
             yaml.safe_dump({}, config_file)

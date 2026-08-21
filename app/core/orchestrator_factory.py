@@ -35,6 +35,15 @@ from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
 )
+from app.beliefs import (
+    BeliefCandidateExtractor,
+    BeliefContextProvider,
+    BeliefRepository,
+    BeliefSnapshotFormatter,
+    BeliefSnapshotService,
+    BeliefUpdateService,
+    ConversationalBeliefObserver,
+)
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -61,6 +70,44 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
         options[target_key] = generation[source_key]
 
     return options
+
+
+def _build_belief_components(*, config, llm, db, history_store, agent_id: str):
+    """Build storage/context independently from the opt-in extraction observer."""
+    if not config.beliefs.get("enabled", True):
+        return None, None, []
+
+    repository = BeliefRepository(db)
+    snapshot_service = BeliefSnapshotService(
+        repository,
+        max_beliefs=config.beliefs["max_existing_beliefs"],
+    )
+    context_provider = BeliefContextProvider(
+        owner_agent_id=agent_id,
+        snapshot_service=snapshot_service,
+        formatter=BeliefSnapshotFormatter(
+            max_chars=config.beliefs["max_snapshot_chars"],
+        ),
+    )
+    observers = []
+    if config.beliefs.get("extraction_enabled", False):
+        extractor = BeliefCandidateExtractor(
+            llm,
+            max_candidates=config.beliefs["max_candidates"],
+            max_context_chars=config.beliefs["max_disambiguating_context_chars"],
+            max_tokens=config.beliefs["max_generation_tokens"],
+            timeout_s=config.beliefs["timeout_s"],
+        )
+        observers.append(ConversationalBeliefObserver(
+            extractor=extractor,
+            update_service=BeliefUpdateService(
+                repository,
+                max_expiry_days=config.beliefs["max_expiry_days"],
+            ),
+            snapshot_service=snapshot_service,
+            history_store=history_store,
+        ))
+    return repository, context_provider, observers
 
 
 def build_orchestrator() -> Orchestrator:
@@ -163,11 +210,22 @@ def build_orchestrator() -> Orchestrator:
         memory_store=memory_store,
         memory_policy=memory_policy,
     )
+    agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
+    belief_repository, belief_context_provider, completion_observers = (
+        _build_belief_components(
+            config=config,
+            llm=llm,
+            db=db,
+            history_store=history_store,
+            agent_id=agent_id,
+        )
+    )
     turn_finalizer = TurnFinalizer(
         history_store=history_store,
         summary_store=summary_store,
         summarizer=history_summarizer,
         summary_trigger=config.orchestrator["summary_trigger"],
+        completion_observers=completion_observers,
     )
 
     # --------------------------------------------------
@@ -286,7 +344,11 @@ def build_orchestrator() -> Orchestrator:
         gesture_catalog=gesture_catalog,
         late_routing_enabled=True,
         integration_context_limit=config.context["integration_context_limit"],
+        agent_id=agent_id,
+        timezone_name=str(config.beliefs.get("timezone", "UTC")),
+        belief_context_provider=belief_context_provider,
     )
+    orchestrator.belief_repository = belief_repository
     orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
     orchestrator.autonomy_runtime = AutonomyRuntime(
         orchestrator=orchestrator,

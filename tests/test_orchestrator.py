@@ -29,6 +29,14 @@ from app.perception.keys import PerceptionKey
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 from app.services.turn_finalizer import TurnFinalizer
+from app.beliefs import (
+    BeliefCandidateExtractor,
+    BeliefRepository,
+    BeliefSnapshotService,
+    BeliefUpdateService,
+    ConversationalBeliefObserver,
+)
+from app.storage.database import Database
 
 def consume_generator(gen):
     events = []
@@ -83,9 +91,13 @@ class FakeHistoryStore:
 
     def add(self, session_id: str, role: str, content: str, attachments=None):
         self.records.append((session_id, role, content, attachments or []))
+        return len(self.records)
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
+
+    def get_before(self, _session_id: str, _message_id: int, limit: int = 2):
+        return self.recent_rows[-limit:]
 
     def search_past_conversations(self, query: str, current_session: str, limit: int = 4):
         # Fake retrieved episodic memory
@@ -102,9 +114,19 @@ class FakeContextBuilder:
             "user_text": user_text,
             "memory_context": memory_context,
             "integration_context": integration_context,
+            "belief_context": kwargs.get("belief_context"),
             "attachments": kwargs.get("attachments", []),
         })
         return [{"role": "user", "content": user_text}]
+
+
+class FakeBeliefContextProvider:
+    def __init__(self):
+        self.calls = []
+
+    def context_for_turn(self, session_id):
+        self.calls.append(session_id)
+        return f"snapshot-{len(self.calls)}"
 
 class FakeLLM:
     def __init__(self, chunks, error=None, chat_responses=None):
@@ -193,6 +215,7 @@ class OrchestratorTests(unittest.TestCase):
         late_routing_enabled=False,
         chat_responses=None,
         integration_context=None,
+        belief_context_provider=None,
     ):
         llm = FakeLLM(
             llm_chunks or ["Hello", " world"],
@@ -228,6 +251,7 @@ class OrchestratorTests(unittest.TestCase):
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
             late_routing_enabled=late_routing_enabled,
+            belief_context_provider=belief_context_provider,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
@@ -309,6 +333,113 @@ class OrchestratorTests(unittest.TestCase):
         )
         list(agent[0].handle_user_input(self.SESSION_ID, "hello"))
         self.assertEqual(agent[-1].calls[0]["integration_context"], "connected state")
+
+    def test_orchestrator_collects_belief_context_for_normal_turn(self):
+        provider = FakeBeliefContextProvider()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+        )
+        list(built[0].handle_user_input(self.SESSION_ID, "hello", instant_mode=True))
+
+        self.assertEqual(provider.calls, [self.SESSION_ID])
+        self.assertEqual(built[-1].calls[0]["belief_context"], "snapshot-1")
+
+    def test_background_and_integration_turns_collect_belief_context(self):
+        provider = FakeBeliefContextProvider()
+        proactive = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+        )
+        list(proactive[0].handle_proactive_event(self.SESSION_ID, event_text="changed"))
+        self.assertEqual(proactive[-1].calls[0]["belief_context"], "snapshot-1")
+
+        integration = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+            chat_responses=[{"content": "done"}],
+        )
+        event = IntegrationEvent(EventId("demo", "finished"), {}, self.SESSION_ID)
+        spec = EventSpec(
+            event=event.event,
+            description="finished",
+            payload_schema={"type": "object", "properties": {}},
+        )
+        list(integration[0].handle_integration_event(self.SESSION_ID, event, spec))
+        self.assertEqual(integration[-1].calls[0]["belief_context"], "snapshot-2")
+
+    def test_late_routing_loop_uses_one_frozen_belief_snapshot(self):
+        provider = FakeBeliefContextProvider()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+            belief_context_provider=provider,
+            chat_responses=[
+                {
+                    "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "shell__execute",
+                        "arguments": {"command": "pwd"},
+                    }}],
+                },
+                {"content": "done"},
+            ],
+        )
+        list(built[0].handle_user_input(self.SESSION_ID, "run pwd"))
+
+        self.assertEqual(provider.calls, [self.SESSION_ID])
+        self.assertEqual(built[-1].calls[0]["belief_context"], "snapshot-1")
+        self.assertEqual(len(built[1].chat_calls), 2)
+
+    def test_extractor_failure_and_malformed_output_do_not_break_real_turn(self):
+        class ExtractionLLM:
+            def __init__(self, response=None, error=None):
+                self.response = response
+                self.error = error
+
+            def chat(self, **_kwargs):
+                if self.error:
+                    raise self.error
+                return self.response
+
+        cases = [
+            ExtractionLLM(error=RuntimeError("extractor unavailable")),
+            ExtractionLLM(response={"content": "not a tool call"}),
+        ]
+        for extraction_llm in cases:
+            with self.subTest(error=extraction_llm.error):
+                built = self._build_orchestrator(
+                    plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+                    summary_trigger=999,
+                )
+                belief_db = Database(":memory:")
+                repository = BeliefRepository(belief_db)
+                observer = ConversationalBeliefObserver(
+                    extractor=BeliefCandidateExtractor(extraction_llm),
+                    update_service=BeliefUpdateService(repository),
+                    snapshot_service=BeliefSnapshotService(repository),
+                    history_store=built[2],
+                )
+                built[0].turn_finalizer.completion_observers = [observer]
+
+                events = list(built[0].handle_user_input(
+                    self.SESSION_ID, "I'm busy for an hour", instant_mode=True
+                ))
+
+                self.assertTrue(any(
+                    isinstance(event, AssistantSpeechEvent) and event.is_final
+                    for event in events
+                ))
+                self.assertEqual(
+                    repository.get_active("default-agent", self.SESSION_ID),
+                    [],
+                )
+                repository.close()
+                belief_db.conn.close()
 
     def test_agent_mode_executes_namespaced_tool_call_and_continues(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

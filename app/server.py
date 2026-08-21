@@ -959,6 +959,9 @@ async def delete_session(session_id: str):
     orchestrator = app.state.orchestrator
     deleted_count = orchestrator.history.delete_session(session_id)
     orchestrator.summary_store.delete(session_id)
+    belief_repository = getattr(orchestrator, "belief_repository", None)
+    if belief_repository is not None:
+        belief_repository.delete_session(orchestrator.agent_id, session_id)
 
     if deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
