@@ -1,6 +1,10 @@
 from copy import deepcopy
+import logging
 from pathlib import Path
 import yaml
+
+
+logger = logging.getLogger("config")
 
 
 class Config:
@@ -22,8 +26,12 @@ class Config:
             },
         )
 
-        # Tools
+        # Integrations and temporary legacy tool configuration
         self.tools = self.raw.get("tools", {})
+        self.integrations = self._load_integrations_config(
+            self.raw.get("integrations"),
+            self.tools,
+        )
 
         # Orchestrator
         self.orchestrator = self.raw.get(
@@ -35,6 +43,8 @@ class Config:
 
         # Context
         self.context = self._load_context_config(self.raw.get("context"))
+
+        self.autonomy = self._load_autonomy_config(self.raw.get("autonomy"))
 
         # TTS
         self.tts = self._load_tts_config(self.raw.get("tts"))
@@ -182,6 +192,7 @@ class Config:
         return {
             "history_limit": 6,
             "injected_memory_limit": 5,
+            "integration_context_limit": 4000,
         }
 
     def _load_context_config(self, raw_context: dict | None) -> dict:
@@ -191,3 +202,53 @@ class Config:
 
         config.update(raw_context)
         return config
+
+    @staticmethod
+    def _load_autonomy_config(raw_autonomy: dict | None) -> dict:
+        config = {
+            "enabled": False,
+            "max_chain_events": 20,
+            "max_chain_age_s": 1800,
+            "max_queue_size": 256,
+            "max_tool_steps": 5,
+            "global_llm_concurrency": 1,
+            "approval_timeout_s": 300,
+            "recent_context_limit": 4000,
+        }
+        if isinstance(raw_autonomy, dict):
+            config.update(raw_autonomy)
+        return config
+
+    @staticmethod
+    def _load_integrations_config(
+        raw_integrations: dict | None,
+        legacy_tools: dict | None,
+    ) -> dict:
+        integrations = deepcopy(raw_integrations) if isinstance(raw_integrations, dict) else {}
+        integrations.setdefault("memory", {"enabled": True})
+        integrations.setdefault("shell", {"enabled": True, "timeout": 15})
+        integrations.setdefault("mindcraft", {
+            "enabled": False,
+            "url": "http://localhost:8081",
+            "agent_name": "",
+            "connect_timeout": 3.0,
+            "reconnect_delay_s": 2.0,
+            "reconnect_max_delay_s": 30.0,
+            "context_enabled": True,
+            "recent_output_limit": 3,
+            "events_enabled": True,
+            "ambient_session_id": "",
+        })
+
+        legacy_web = legacy_tools.get("web") if isinstance(legacy_tools, dict) else None
+        if "web" not in integrations and isinstance(legacy_web, dict):
+            logger.warning(
+                "Configuration key 'tools.web' is deprecated; use 'integrations.web'"
+            )
+            integrations["web"] = deepcopy(legacy_web)
+
+        for name, integration_config in integrations.items():
+            if not isinstance(name, str) or not isinstance(integration_config, dict):
+                raise ValueError(f"Invalid integration configuration: {name!r}")
+
+        return integrations

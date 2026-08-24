@@ -4,6 +4,7 @@ from pathlib import Path
 
 class Database:
     def __init__(self, path: str = "data/assistant.db"):
+        self.path = path
         Path("data").mkdir(exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row

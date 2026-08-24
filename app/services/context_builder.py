@@ -39,7 +39,7 @@ class ContextBuilder:
         session_id: str,
         user_text: str,
         memory_context: str | None = None,
-        tool_context: str | None = None,
+        integration_context: str | None = None,
         attachments: list[Attachment] | None = None,
     ) -> list[dict]:
         logger.info("[%s] Building context", session_id)
@@ -60,17 +60,17 @@ class ContextBuilder:
             "content": self._build_system_message(
                 now_local_iso=now_local.isoformat(),
                 memory_context=memory_context,
-                tool_context=tool_context,
+                integration_context=integration_context,
                 summary=summary,
             ),
         })
 
-        if memory_context or tool_context:
+        if memory_context or integration_context:
             logger.info(
-                "[%s] Added injected context (memory=%s, tool=%s)", 
+                "[%s] Added injected context (memory=%s, integration=%s)",
                 session_id, 
                 bool(memory_context), 
-                bool(tool_context)
+                bool(integration_context)
             )
 
         history_limit = 2 if summary else self.history_limit
@@ -133,7 +133,7 @@ class ContextBuilder:
                 "user_text": user_text,
                 "summary": summary,
                 "memory_context": memory_context,
-                "tool_context": tool_context,
+                "integration_context": integration_context,
                 "history_limit_used": history_limit,
                 "messages": messages,
             },
@@ -144,7 +144,7 @@ class ContextBuilder:
         self,
         now_local_iso: str,
         memory_context: str | None,
-        tool_context: str | None,
+        integration_context: str | None,
         summary: str | None,
     ) -> str:
         sections = [
@@ -156,13 +156,15 @@ class ContextBuilder:
         combined_context_parts = []
         if memory_context:
             combined_context_parts.append(f"--- RETRIEVED MEMORY ---\n{memory_context}")
-        if tool_context:
-            combined_context_parts.append(f"--- TOOL RESULTS ---\n{tool_context}")
+        if integration_context:
+            combined_context_parts.append(
+                f"--- OBSERVED INTEGRATION STATE ---\n{integration_context}"
+            )
 
         if combined_context_parts:
             injected_context = "\n\n".join(combined_context_parts)
             sections.append(
-                "BACKGROUND CONTEXT (Retrieved Memories & Tool Results):\n"
+                "BACKGROUND CONTEXT (Retrieved Memories & Integration State):\n"
                 f"{injected_context}\n\n"
                 "Use the above background context to inform your response. "
                 "Blend this information naturally into the conversation. "

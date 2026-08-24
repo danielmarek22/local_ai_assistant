@@ -15,7 +15,17 @@ from app.tools.web_search import SearXNGClient
 from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
-from app.tools.memory_write import MemoryWriteTool
+from app.integrations import (
+    IntegrationRegistry,
+    MemoryIntegration,
+    MindcraftClient,
+    MindcraftIntegration,
+    ShellIntegration,
+    WebIntegration,
+    RuntimeIntegration,
+    VisionIntegration,
+)
+from app.autonomy import AutonomyRuntime, AutonomyStore
 from app.memory.memory_policy import SimpleMemoryPolicy
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
@@ -25,7 +35,6 @@ from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
 )
-from app.services.tool_controls import build_prompt_with_tools
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -64,9 +73,9 @@ def build_orchestrator() -> Orchestrator:
     config = Config()
 
     logger.debug(
-        "Config summary: llm_model=%s, tools=%s",
+        "Config summary: llm_model=%s, integrations=%s",
         config.llm.get("model"),
-        list(config.tools.keys()),
+        list(config.integrations.keys()),
     )
 
     # --------------------------------------------------
@@ -113,6 +122,7 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database()
+    autonomy_store = AutonomyStore(db.path)
     vector_store = VectorStore()
 
     history_store = ChatHistoryStore(db, vector_store)
@@ -161,18 +171,17 @@ def build_orchestrator() -> Orchestrator:
     )
 
     # --------------------------------------------------
-    # Tools
+    # Integrations
     # --------------------------------------------------
-    tools = {}
-    
-    web_cfg = config.tools.get("web", {})
+    integrations = [RuntimeIntegration(), VisionIntegration()]
+    web_cfg = config.integrations.get("web", {})
 
     if web_cfg.get("enabled", False):
-        logger.info("Web search tool enabled via config")
+        logger.info("Web integration enabled via config")
 
         web_client = SearXNGClient(
-            base_url=web_cfg.get("base_url", config.tools["web"]["base_url"]),
-            timeout=web_cfg.get("timeout", 10.0),  # Defaulted to 10s if missing
+            base_url=web_cfg.get("base_url", "http://localhost:8080"),
+            timeout=web_cfg.get("timeout", 10.0),
             max_retries=web_cfg.get("max_retries", 2),
             retry_backoff_s=web_cfg.get("retry_backoff_s", 0.25),
         )
@@ -187,22 +196,51 @@ def build_orchestrator() -> Orchestrator:
             summarizer=search_summarizer,
         )
 
-        tools[web_tool.name] = web_tool
-        logger.info("Web search tool registered as '%s'", web_tool.name)
+        integrations.append(WebIntegration(web_tool))
+        logger.info("Web integration registered")
 
     else:
-        logger.info("Web search tool disabled via config")
+        logger.info("Web integration disabled via config")
 
-        # Inject Bash Execution Tool
-    bash_tool = BashExecutionTool(timeout=15)
-    tools[bash_tool.name] = bash_tool
-    logger.info("Bash execution tool registered as '%s'", bash_tool.name)
+    shell_cfg = config.integrations.get("shell", {})
+    if shell_cfg.get("enabled", True):
+        integrations.append(ShellIntegration(
+            BashExecutionTool(timeout=int(shell_cfg.get("timeout", 15)))
+        ))
+        logger.info("Shell integration registered")
 
-    memory_write_tool = MemoryWriteTool(memory_action_handler=memory_action_handler)
-    tools[memory_write_tool.name] = memory_write_tool
-    logger.info("Memory write tool registered as '%s'", memory_write_tool.name)
+    memory_cfg = config.integrations.get("memory", {})
+    if memory_cfg.get("enabled", True):
+        integrations.append(MemoryIntegration(memory_action_handler))
+        logger.info("Memory integration registered")
 
-    tool_executor = ToolExecutor(tools)
+    mindcraft_cfg = config.integrations.get("mindcraft", {})
+    if mindcraft_cfg.get("enabled", False):
+        mindcraft_client = MindcraftClient(
+            url=str(mindcraft_cfg.get("url", "http://localhost:8081")),
+            agent_name=mindcraft_cfg.get("agent_name"),
+            connect_timeout=float(mindcraft_cfg.get("connect_timeout", 3.0)),
+            reconnect_delay_s=float(mindcraft_cfg.get("reconnect_delay_s", 2.0)),
+            reconnect_max_delay_s=float(mindcraft_cfg.get("reconnect_max_delay_s", 30.0)),
+            recent_output_limit=int(mindcraft_cfg.get("recent_output_limit", 3)),
+        )
+        integrations.append(MindcraftIntegration(
+            mindcraft_client,
+            context_enabled=bool(mindcraft_cfg.get("context_enabled", True)),
+            events_enabled=bool(mindcraft_cfg.get("events_enabled", True)),
+            ambient_session_id=str(mindcraft_cfg.get("ambient_session_id", "")).strip() or None,
+            autonomous_events=tuple(mindcraft_cfg.get("autonomous_events", [
+                "critical_health", "died", "disconnected",
+            ])),
+            attachment_dir=str(
+                mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+            ),
+            operation_store=autonomy_store,
+        ))
+        logger.info("Mindcraft integration registered (url=%s)", mindcraft_client.url)
+
+    integration_registry = IntegrationRegistry(integrations)
+    tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
 
     # --------------------------------------------------
     # Context builder
@@ -212,20 +250,15 @@ def build_orchestrator() -> Orchestrator:
     avatar_controls_cfg = config.assistant.get("avatar_controls", {})
     allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
 
-    # Build system prompt with avatar controls and tool information
+    # Executable capabilities are supplied only through native schemas in agent mode.
     base_system_prompt = config.assistant["system_prompt"]
     system_prompt_with_avatar = build_prompt_with_avatar_controls(
         base_system_prompt,
         gesture_catalog=gesture_catalog,
         allowed_expressions=allowed_expressions,
     )
-    system_prompt_with_tools = build_prompt_with_tools(
-        system_prompt_with_avatar,
-        tool_executor=tool_executor,
-    )
-
     context_builder = ContextBuilder(
-        system_prompt=system_prompt_with_tools,
+        system_prompt=system_prompt_with_avatar,
         history_store=history_store,
         summary_store=summary_store,
         history_limit=config.context["history_limit"],
@@ -252,11 +285,19 @@ def build_orchestrator() -> Orchestrator:
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
         late_routing_enabled=True,
+        integration_context_limit=config.context["integration_context_limit"],
+    )
+    orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
+    orchestrator.autonomy_runtime = AutonomyRuntime(
+        orchestrator=orchestrator,
+        registry=integration_registry,
+        store=autonomy_store,
+        config=config.autonomy,
     )
 
     logger.info(
-        "Orchestrator built successfully (tools=%d)",
-        len(tools),
+        "Orchestrator built successfully (capabilities=%d)",
+        len(integration_registry.get_native_tools()),
     )
 
     return orchestrator

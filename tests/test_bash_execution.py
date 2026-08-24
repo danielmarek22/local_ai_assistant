@@ -26,6 +26,7 @@ class BashExecutionToolTests(unittest.TestCase):
         self.assertEqual(len(approvals), 1)
         self.assertEqual(approvals[0]["tool"], "execute_bash")
         self.assertIn("outside the instant read-only allowlist", approvals[0]["reason"])
+        self.assertEqual(approvals[0]["command"], "printf approved")
         self.assertIn("approved", result)
 
     def test_unrecognized_command_is_denied_without_human_approval(self):

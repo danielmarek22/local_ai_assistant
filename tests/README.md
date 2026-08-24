@@ -38,8 +38,17 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Summarization trigger behavior
 
 - `test_tool_executor.py`
-  - Tool lookup and availability behavior
-  - Error handling and fallback behavior
+  - Registry-backed execution events and typed results
+  - Approval request transport conversion
+
+- `test_integration_registry.py` and `test_builtin_integrations.py`
+  - Capability and schema contract validation
+  - Availability, passive context isolation, and built-in adapter behavior
+
+- `test_autonomy_store.py`, `test_autonomy_broker.py`, and `test_autonomy_coordination.py`
+  - Durable event and operation lifecycle
+  - Restart recovery, coalescing, session correlation, and pause/resume
+  - User-turn priority, global model serialization, connection routing, and approvals
 
 - `test_server_sessions.py`
   - Session listing/open/delete behavior
@@ -60,7 +69,7 @@ Tests currently focus on deterministic core behavior that can be validated witho
 Run all tests from the repository root:
 
 ```bash
-python -m unittest discover -s tests -v
+venv_app/bin/python -m unittest discover -s tests -v
 ```
 
 Run a single test module:

@@ -13,9 +13,12 @@ class MemoryActionHandler:
         self.memory_policy = memory_policy
 
     def handle(self, session_id: str, action: Action) -> None:
+        self.handle_payload(session_id, action.payload or {})
+
+    def handle_payload(self, session_id: str, payload: dict) -> bool:
         logger.debug("[%s] Processing memory action", session_id)
 
-        decision = self.memory_policy.decide_from_action(action.payload or {})
+        decision = self.memory_policy.decide_from_action(payload)
 
         if not decision:
             logger.debug("[%s] Memory action ignored by policy", session_id)
@@ -23,16 +26,16 @@ class MemoryActionHandler:
                 "memory_action",
                 "memory_action_skipped",
                 session_id=session_id,
-                payload={"action_payload": action.payload},
+                payload={"action_payload": payload},
             )
-            return
+            return False
 
         trace_event(
             "memory_action",
             "memory_action_applied",
             session_id=session_id,
             payload={
-                "action_payload": action.payload,
+                "action_payload": payload,
                 "decision": {
                     "content": decision.content,
                     "category": decision.category,
@@ -53,3 +56,4 @@ class MemoryActionHandler:
             decision.category,
             decision.importance,
         )
+        return True

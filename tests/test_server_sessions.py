@@ -140,6 +140,25 @@ class FakeApprovalWebSocket(FakeWebSocket):
         }
 
 
+class InvalidSttAudioErrorTests(unittest.TestCase):
+    def test_pyav_invalid_data_error_is_expected_stt_silence(self):
+        invalid_data_error_type = type(
+            "InvalidDataError",
+            (Exception,),
+            {"__module__": "av.error"},
+        )
+        exc = invalid_data_error_type(
+            "[Errno 1094995529] Invalid data found when processing input: '<none>'"
+        )
+
+        self.assertTrue(server_module._is_invalid_stt_audio_error(exc))
+
+    def test_other_errors_are_not_treated_as_stt_silence(self):
+        self.assertFalse(
+            server_module._is_invalid_stt_audio_error(RuntimeError("model unavailable"))
+        )
+
+
 class ServerSessionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -511,9 +530,11 @@ class ServerSessionTests(unittest.TestCase):
             server_module._request_tool_approval(
                 ws,
                 {
-                    "tool": "execute_bash",
-                    "command": "printf hi",
+                    "tool": "shell__execute",
+                    "title": "Approve command?",
                     "reason": "Command requires approval.",
+                    "detail_label": "Command",
+                    "detail": "printf hi",
                 },
                 connection_id="conn-1",
                 timeout_seconds=1.0,
@@ -522,8 +543,10 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertTrue(approved)
         self.assertEqual(ws.messages[0]["type"], "tool_approval_request")
-        self.assertEqual(ws.messages[0]["tool"], "execute_bash")
-        self.assertEqual(ws.messages[0]["command"], "printf hi")
+        self.assertEqual(ws.messages[0]["tool"], "shell__execute")
+        self.assertEqual(ws.messages[0]["title"], "Approve command?")
+        self.assertEqual(ws.messages[0]["detail_label"], "Command")
+        self.assertEqual(ws.messages[0]["detail"], "printf hi")
         self.assertEqual(ws.messages[0]["reason"], "Command requires approval.")
 
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):

@@ -9,9 +9,21 @@ from app.core.events import (
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AutonomyOutcomeEvent,
 )
 from app.core.orchestrator import Orchestrator
 from app.core.plan import Plan
+from app.integrations import (
+    CapabilityId,
+    EventId,
+    EventSpec,
+    IntegrationEvent,
+    IntegrationRegistry,
+    RuntimeIntegration,
+    ToolCall,
+    ToolResult,
+)
+from app.services.tool_executor import ToolExecutor
 from app.perception.state import ImageAttachment
 from app.perception.keys import PerceptionKey
 from app.services.memory_action_handler import MemoryActionHandler
@@ -38,17 +50,31 @@ class FakePlanner:
 
 
 class FakeToolExecutor:
-    def __init__(self, context: str | None = None):
+    def __init__(self, context: str | None = None, integration_context: str | None = None):
         self.context = context
+        self.integration_context = integration_context
         self.calls = []
 
-    def get_native_tools(self):
-        return []
+    def get_native_tools(self, allowed_capabilities=None):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "shell__execute",
+                "description": "Execute a command.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        if allowed_capabilities is not None and CapabilityId("shell", "execute") not in allowed_capabilities:
+            return []
+        return tools
 
-    def execute(self, action: Action, user_text: str, approval_callback=None):
-        self.calls.append((action, user_text, approval_callback))
+    def collect_context(self, session_id: str, user_text: str, max_chars: int):
+        return self.integration_context[:max_chars] if self.integration_context else None
+
+    def execute(self, call: ToolCall, session_id: str, user_text: str, approval_callback=None, **_kwargs):
+        self.calls.append((call, session_id, user_text, approval_callback))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
-        return self.context
+        return ToolResult.success(self.context or "tool info")
 
 class FakeHistoryStore:
     def __init__(self):
@@ -70,25 +96,28 @@ class FakeContextBuilder:
     def __init__(self):
         self.calls = []
 
-    def build(self, session_id: str, user_text: str, memory_context=None, tool_context=None, **kwargs):
+    def build(self, session_id: str, user_text: str, memory_context=None, integration_context=None, **kwargs):
         self.calls.append({
             "session_id": session_id,
             "user_text": user_text,
             "memory_context": memory_context,
-            "tool_context": tool_context,
+            "integration_context": integration_context,
             "attachments": kwargs.get("attachments", []),
         })
         return [{"role": "user", "content": user_text}]
 
 class FakeLLM:
-    def __init__(self, chunks, error=None):
+    def __init__(self, chunks, error=None, chat_responses=None):
         self.chunks = chunks
         self.error = error
         self.calls = []
         self.chat_calls = []
+        self.chat_responses = list(chat_responses or [])
 
     def chat(self, messages, think_override=None, options_override=None, timeout_override=None, max_retries_override=None, tools=None):
         self.chat_calls.append((messages, think_override, tools))
+        if self.chat_responses:
+            return self.chat_responses.pop(0)
         return {"content": ""}
 
     def stream_chat(self, messages, think_override=None):
@@ -162,14 +191,23 @@ class OrchestratorTests(unittest.TestCase):
         summary_trigger=10,
         llm_error=None,
         late_routing_enabled=False,
+        chat_responses=None,
+        integration_context=None,
     ):
-        llm = FakeLLM(llm_chunks or ["Hello", " world"], error=llm_error)
+        llm = FakeLLM(
+            llm_chunks or ["Hello", " world"],
+            error=llm_error,
+            chat_responses=chat_responses,
+        )
         history = FakeHistoryStore()
         memory = FakeMemoryStore()
         summary_store = FakeSummaryStore(existing=summary_existing)
         summarizer = FakeSummarizer()
         planner = FakePlanner(plan=plan)
-        tool_executor = FakeToolExecutor(context="tool info")
+        tool_executor = FakeToolExecutor(
+            context="tool info",
+            integration_context=integration_context,
+        )
         context_builder = FakeContextBuilder()
         memory_policy = FakeMemoryPolicy()
         memory_retriever = MemoryRetriever(memory_store=memory, history_store=history)
@@ -204,7 +242,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("User likes testing", perception_snapshot[PerceptionKey.MEMORY_RETRIEVED.value]["value"])
 
         mem_ctx = context_builder.calls[0]["memory_context"]
-        tool_ctx = context_builder.calls[0]["tool_context"]
+        tool_ctx = context_builder.calls[0]["integration_context"]
         
         self.assertIn("User likes testing", mem_ctx)
         self.assertIn("Past answer", mem_ctx)
@@ -222,7 +260,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(planner.calls, [])
         self.assertEqual(tool_executor.calls, [])
-        self.assertEqual(context_builder.calls[0]["tool_context"], None)
+        self.assertEqual(context_builder.calls[0]["integration_context"], None)
 
     def test_agent_mode_uses_late_routing_chat_instead_of_streaming(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -247,6 +285,85 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(len(llm.chat_calls), 1)
         self.assertEqual(len(llm.calls), 0)
+        self.assertEqual(llm.chat_calls[0][2][0]["function"]["name"], "shell__execute")
+
+    def test_integration_context_is_injected_in_direct_and_agent_modes(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        direct = self._build_orchestrator(
+            plan=plan,
+            integration_context="connected state",
+            summary_trigger=999,
+        )
+        list(direct[0].handle_user_input(self.SESSION_ID, "hello", instant_mode=True))
+        self.assertEqual(
+            direct[-1].calls[0]["integration_context"],
+            "connected state",
+        )
+
+        agent = self._build_orchestrator(
+            plan=plan,
+            integration_context="connected state",
+            late_routing_enabled=True,
+            chat_responses=[{"content": "Ready"}],
+            summary_trigger=999,
+        )
+        list(agent[0].handle_user_input(self.SESSION_ID, "hello"))
+        self.assertEqual(agent[-1].calls[0]["integration_context"], "connected state")
+
+    def test_agent_mode_executes_namespaced_tool_call_and_continues(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        orch, llm, _history, _memory, _summary, _summarizer, _planner, executor, _context = (
+            self._build_orchestrator(
+                plan=plan,
+                late_routing_enabled=True,
+                chat_responses=[
+                    {
+                        "content": "",
+                        "tool_calls": [{
+                            "function": {
+                                "name": "shell__execute",
+                                "arguments": {"command": "pwd"},
+                            },
+                        }],
+                    },
+                    {"content": "Done"},
+                ],
+                summary_trigger=999,
+            )
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "run pwd"))
+
+        self.assertEqual(len(llm.chat_calls), 2)
+        self.assertEqual(str(executor.calls[0][0].capability), "shell__execute")
+
+    def test_malformed_tool_name_becomes_observation_without_execution(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        orch, llm, history, _memory, _summary, _summarizer, _planner, executor, _context = (
+            self._build_orchestrator(
+                plan=plan,
+                late_routing_enabled=True,
+                chat_responses=[
+                    {
+                        "content": "",
+                        "tool_calls": [{
+                            "function": {"name": "shell.execute", "arguments": {}},
+                        }],
+                    },
+                    {"content": "Recovered"},
+                ],
+                summary_trigger=999,
+            )
+        )
+
+        list(orch.handle_user_input(self.SESSION_ID, "run something"))
+
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(len(llm.chat_calls), 2)
+        self.assertTrue(any(
+            record[1] == "system" and "Invalid tool call" in record[2]
+            for record in history.records
+        ))
 
     def test_late_tool_execution_forwards_approval_callback(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -261,23 +378,29 @@ class OrchestratorTests(unittest.TestCase):
             tool_executor,
             _context_builder,
         ) = self._build_orchestrator(plan=plan, summary_trigger=999)
-        action = Action(type=ActionType.EXECUTE_BASH, payload={"command": "printf hi"})
+        call = ToolCall(
+            capability=CapabilityId("shell", "execute"),
+            arguments={"command": "printf hi"},
+        )
 
         def approve(_request):
             return True
 
         events, observation = consume_generator(
-            orch._execute_late_tool_action(
+            orch._execute_late_tool_call(
                 session_id=self.SESSION_ID,
-                action=action,
+                call=call,
                 user_text="run command",
                 tool_approval_callback=approve,
             )
         )
 
-        self.assertEqual(observation, "tool info")
+        self.assertEqual(observation.content, "tool info")
         self.assertTrue(any(isinstance(e, AssistantStateEvent) for e in events))
-        self.assertEqual(tool_executor.calls, [(action, "run command", approve)])
+        self.assertEqual(
+            tool_executor.calls,
+            [(call, self.SESSION_ID, "run command", approve)],
+        )
 
     def test_summarization_runs_when_threshold_reached(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -789,6 +912,76 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(history.records), 1)
         self.assertEqual(history.records[0][1], "assistant")
         self.assertEqual(history.records[0][2], "Hello world")
+
+    def test_integration_event_is_silent_and_does_not_create_user_history(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            _tool_executor, context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            summary_trigger=999,
+            chat_responses=[{"content": "Internal event summary."}],
+        )
+        event = IntegrationEvent(
+            EventId("demo", "finished"), {"ok": True}, self.SESSION_ID
+        )
+        spec = EventSpec(
+            event=event.event,
+            description="Demo finished.",
+            payload_schema={"type": "object", "properties": {}},
+        )
+
+        events = list(orch.handle_integration_event(self.SESSION_ID, event, spec))
+
+        outcome = next(item for item in events if isinstance(item, AutonomyOutcomeEvent))
+        self.assertEqual(outcome.summary, "Internal event summary.")
+        self.assertIsNone(outcome.notification)
+        self.assertFalse(any(record[1] in {"user", "assistant"} for record in history.records))
+        self.assertEqual(context_builder.calls[0]["user_text"], "")
+        self.assertEqual(
+            {tool["function"]["name"] for tool in llm.chat_calls[0][2]},
+            set(),
+        )
+
+    def test_integration_event_can_request_text_notification(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        (
+            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            _fake_executor, _context_builder,
+        ) = self._build_orchestrator(
+            plan=plan,
+            summary_trigger=999,
+            chat_responses=[
+                {
+                    "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "runtime__notify",
+                        "arguments": {"message": "The command failed.", "delivery": "text"},
+                    }}],
+                },
+                {"content": "Notified the user about the failure."},
+            ],
+        )
+        orch.tool_executor = ToolExecutor(IntegrationRegistry([RuntimeIntegration()]))
+        event = IntegrationEvent(
+            EventId("demo", "failed"), {"ok": False}, self.SESSION_ID
+        )
+        spec = EventSpec(
+            event=event.event,
+            description="Demo failed.",
+            payload_schema={"type": "object", "properties": {}},
+        )
+
+        events = list(orch.handle_integration_event(self.SESSION_ID, event, spec))
+
+        outcome = next(item for item in events if isinstance(item, AutonomyOutcomeEvent))
+        self.assertEqual(outcome.notification["message"], "The command failed.")
+        self.assertIn((self.SESSION_ID, "assistant", "The command failed.", []), history.records)
+        self.assertNotIn(
+            (self.SESSION_ID, "assistant", "Notified the user about the failure.", []),
+            history.records,
+        )
 
     def test_turn_emits_idle_when_llm_stream_raises(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

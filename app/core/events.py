@@ -33,6 +33,12 @@ class AvatarAnimationEvent(BaseEvent):
     animation: str
 
 
+class AutonomyOutcomeEvent(BaseEvent):
+    type: Literal["autonomy_outcome"] = "autonomy_outcome"
+    summary: str
+    notification: dict | None = None
+
+
 # Type alias for the generator signatures!
 TurnEvent = Union[
     AssistantSpeechEvent,
@@ -40,4 +46,5 @@ TurnEvent = Union[
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AutonomyOutcomeEvent,
 ]

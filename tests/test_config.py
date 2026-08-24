@@ -24,6 +24,49 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.context["history_limit"], 8)
         self.assertEqual(config.context["injected_memory_limit"], 7)
+        self.assertEqual(config.context["integration_context_limit"], 4000)
+
+    def test_autonomy_defaults_are_bounded_and_disabled(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({}, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertFalse(config.autonomy["enabled"])
+        self.assertEqual(config.autonomy["max_chain_events"], 20)
+        self.assertEqual(config.autonomy["global_llm_concurrency"], 1)
+
+    def test_integration_config_defaults_memory_and_shell_enabled(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({}, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertTrue(config.integrations["memory"]["enabled"])
+        self.assertTrue(config.integrations["shell"]["enabled"])
+        self.assertFalse(config.integrations["mindcraft"]["enabled"])
+        self.assertEqual(config.integrations["mindcraft"]["url"], "http://localhost:8081")
+        self.assertEqual(config.integrations["mindcraft"]["reconnect_max_delay_s"], 30.0)
+
+    def test_legacy_web_config_is_used_only_without_new_config(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({"tools": {"web": {"enabled": True, "base_url": "legacy"}}}, config_file)
+            config_file.flush()
+            with self.assertLogs("config", level="WARNING"):
+                config = Config(config_file.name)
+
+        self.assertEqual(config.integrations["web"]["base_url"], "legacy")
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({
+                "tools": {"web": {"enabled": True, "base_url": "legacy"}},
+                "integrations": {"web": {"enabled": False, "base_url": "new"}},
+            }, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertEqual(config.integrations["web"]["base_url"], "new")
+        self.assertFalse(config.integrations["web"]["enabled"])
 
     def test_voice_input_defaults_to_stt(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
