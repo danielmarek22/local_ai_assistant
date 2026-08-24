@@ -109,7 +109,8 @@ class OllamaClient(LLMClient):
         options_override: dict | None = None,
         timeout_override: float | None = None,
         max_retries_override: int | None = None,
-        tools: list[dict] | None = None, # Add tools parameter
+        tools: list[dict] | None = None,
+        format_override: dict | str | None = None,
     ) -> dict:
         """
         Blocking, non-streaming call.
@@ -140,6 +141,7 @@ class OllamaClient(LLMClient):
             think_value=think_value,
             options=request_options,
             tools=tools,
+            format_override=format_override,
         )
 
         logger.info(
@@ -395,11 +397,15 @@ class OllamaClient(LLMClient):
         stream: bool,
         think_value,
         options: dict | None = None,
-        tools: list[dict] | None = None, # Add tools parameter
+        tools: list[dict] | None = None,
+        format_override: dict | str | None = None,
     ) -> dict:
         """
         Build a request payload for the native /api/chat endpoint.
         """
+        if tools and format_override is not None:
+            raise ValueError("Ollama tools and format_override cannot be combined")
+
         payload: dict = {
             "model": self.model,
             "messages": messages,
@@ -412,6 +418,8 @@ class OllamaClient(LLMClient):
         # Natively inject schemas if provided
         if tools:
             payload["tools"] = tools
+        if format_override is not None:
+            payload["format"] = format_override
             
         return payload
 

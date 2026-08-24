@@ -77,7 +77,14 @@ def _build_belief_components(*, config, llm, db, history_store, agent_id: str):
     if not config.beliefs.get("enabled", True):
         return None, None, []
 
-    repository = BeliefRepository(db)
+    local_human = getattr(config, "local_human", None) or {
+        "id": "local-human", "display_name": "You"
+    }
+    repository = BeliefRepository(
+        db,
+        legacy_local_human_id=local_human["id"],
+        legacy_local_human_name=local_human["display_name"],
+    )
     snapshot_service = BeliefSnapshotService(
         repository,
         max_beliefs=config.beliefs["max_existing_beliefs"],
@@ -168,11 +175,23 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Initializing database and stores")
 
-    db = Database()
+    db = Database(
+        legacy_local_human_id=config.local_human["id"],
+        legacy_local_human_name=config.local_human["display_name"],
+    )
     autonomy_store = AutonomyStore(db.path)
     vector_store = VectorStore()
 
-    history_store = ChatHistoryStore(db, vector_store)
+    agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
+    assistant_name = str(config.assistant.get("display_name", "Astra")).strip() or "Astra"
+    history_store = ChatHistoryStore(
+        db,
+        vector_store,
+        local_human_id=config.local_human["id"],
+        local_human_name=config.local_human["display_name"],
+        local_assistant_id=agent_id,
+        local_assistant_name=assistant_name,
+    )
     memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
 
@@ -210,7 +229,6 @@ def build_orchestrator() -> Orchestrator:
         memory_store=memory_store,
         memory_policy=memory_policy,
     )
-    agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
     belief_repository, belief_context_provider, completion_observers = (
         _build_belief_components(
             config=config,
@@ -347,6 +365,9 @@ def build_orchestrator() -> Orchestrator:
         agent_id=agent_id,
         timezone_name=str(config.beliefs.get("timezone", "UTC")),
         belief_context_provider=belief_context_provider,
+        local_human_id=config.local_human["id"],
+        local_human_name=config.local_human["display_name"],
+        local_assistant_name=assistant_name,
     )
     orchestrator.belief_repository = belief_repository
     orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))

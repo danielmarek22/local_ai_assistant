@@ -20,6 +20,7 @@ from app.config import Config
 from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
+from app.core.conversation import SessionKind, relay_sender
 from app.core.events import (
     AssistantSpeechEvent,
     AssistantThinkingEvent,
@@ -249,6 +250,16 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
     if payload.get("type") != "user_message":
         return raw_text, None, False, []
 
+    forbidden_fields = {
+        "role", "sender_id", "sender_display_name", "sender_type", "input_source",
+        "target", "system", "tool", "tool_name", "tool_calls",
+    }
+    supplied_forbidden = sorted(forbidden_fields.intersection(payload))
+    if supplied_forbidden:
+        raise ValueError(
+            "User message contains server-controlled fields: " + ", ".join(supplied_forbidden)
+        )
+
     text = payload.get("text")
     if not isinstance(text, str):
         raise ValueError("User message payload is missing text")
@@ -277,6 +288,22 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
         raise ValueError("User message instant_mode flag must be boolean")
 
     return text, reasoning_override, instant_mode, attachments
+
+
+def parse_relay_message(payload: dict, session_kind: SessionKind | str):
+    if SessionKind(session_kind) != SessionKind.MANUAL_GROUP:
+        raise ValueError("Relay messages are only allowed in manual_group sessions")
+    allowed_fields = {"type", "sender_display_name", "sender_type", "text"}
+    unexpected = sorted(set(payload) - allowed_fields)
+    if unexpected:
+        raise ValueError("Relay message contains unsupported fields: " + ", ".join(unexpected))
+    if payload.get("type") != "relay_message":
+        raise ValueError("Invalid relay message type")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Relay message text must not be empty")
+    sender = relay_sender(payload.get("sender_type"), payload.get("sender_display_name"))
+    return text, sender
 
 
 @dataclass
@@ -479,12 +506,18 @@ def _build_session_init_payload(
     server_instance_id: str,
     session_id: str,
     gesture_catalog: dict[str, str] | None = None,
+    session_kind: SessionKind | str = SessionKind.DIRECT,
+    local_human_display_name: str = "You",
+    local_assistant_display_name: str = "Astra",
 ) -> dict:
     return {
         "type": "session_init",
         "server_instance_id": server_instance_id,
         "session_id": session_id,
         "gesture_catalog": dict(gesture_catalog or {}),
+        "session_kind": SessionKind(session_kind).value,
+        "local_human_display_name": local_human_display_name,
+        "local_assistant_display_name": local_assistant_display_name,
     }
 
 
@@ -919,6 +952,7 @@ async def list_sessions():
     sessions = [
         {
             "session_id": row["session_id"],
+            "kind": row["kind"],
             "started_at": row["started_at"],
             "updated_at": row["updated_at"],
             "message_count": row["message_count"],
@@ -934,13 +968,14 @@ async def get_session(session_id: str):
     history_store = app.state.orchestrator.history
     rows = history_store.get_all(session_id)
 
-    if not rows:
+    if not rows and not history_store.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     summary = app.state.orchestrator.summary_store.get(session_id)
     summary_text = summary[0] if summary else None
     return {
         "session_id": session_id,
+        "kind": history_store.get_session_kind(session_id).value,
         "summary": summary_text,
         "messages": [
             {
@@ -948,6 +983,10 @@ async def get_session(session_id: str):
                 "content": row["content"],
                 "timestamp": row["timestamp"],
                 "attachments": [attachment.to_api_payload() for attachment in row.get("attachments", [])],
+                "sender_id": row["sender_id"],
+                "sender_display_name": row["sender_display_name"],
+                "sender_type": row["sender_type"],
+                "input_source": row["input_source"],
             }
             for row in rows
         ],
@@ -1025,6 +1064,11 @@ async def websocket_endpoint(ws: WebSocket):
     session_mode = ws.query_params.get("session_mode", "new")
     requested_session_id = ws.query_params.get("session_id")
     known_server_instance_id = ws.query_params.get("server_instance_id")
+    requested_session_kind_value = ws.query_params.get("session_kind", SessionKind.DIRECT.value)
+    try:
+        requested_session_kind = SessionKind(requested_session_kind_value)
+    except ValueError:
+        requested_session_kind = SessionKind.DIRECT
 
     session_id = resolve_session_id(
         session_mode=session_mode,
@@ -1032,6 +1076,13 @@ async def websocket_endpoint(ws: WebSocket):
         known_server_instance_id=known_server_instance_id,
         server_instance_id=server_instance_id,
     )
+
+    orchestrator = app.state.orchestrator
+    history_store = orchestrator.history
+    if requested_session_id and session_id == requested_session_id:
+        session_kind = history_store.get_session_kind(session_id)
+    else:
+        session_kind = history_store.ensure_session(session_id, requested_session_kind)
 
     await ws.accept()
     hub = app.state.connection_hub
@@ -1046,9 +1097,11 @@ async def websocket_endpoint(ws: WebSocket):
         server_instance_id=server_instance_id,
         session_id=session_id,
         gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+        session_kind=session_kind,
+        local_human_display_name=getattr(orchestrator, "local_human_name", "You"),
+        local_assistant_display_name=getattr(orchestrator, "local_assistant_name", "Astra"),
     ))
 
-    orchestrator = app.state.orchestrator
     watchdog = getattr(app.state, "vision_watchdog", None)
     event_loop = asyncio.get_running_loop()
     assistant_state_tracker = {"state": AssistantState.IDLE}
@@ -1203,6 +1256,7 @@ async def websocket_endpoint(ws: WebSocket):
                 break
 
             try:
+                turn_sender = None
                 # ── VOICE PATH ────────────────────────────────────────────
                 # Check `is not None` rather than truthiness — an empty bytes
                 # value (b"") is falsy, which would wrongly fall through to
@@ -1357,9 +1411,18 @@ async def websocket_endpoint(ws: WebSocket):
                                 raise ValueError("User config reasoning flag must be boolean or null")
                         continue
 
-                    user_text, reasoning_override, instant_mode, attachments = parse_user_message(
-                        text_payload
-                    )
+                    if (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "relay_message"
+                    ):
+                        user_text, turn_sender = parse_relay_message(parsed_payload, session_kind)
+                        reasoning_override = connection_reasoning_override
+                        instant_mode = connection_instant_mode
+                        attachments = []
+                    else:
+                        user_text, reasoning_override, instant_mode, attachments = parse_user_message(
+                            text_payload
+                        )
                     pending_voice_attachments = []
                     input_modality = InputModality.TEXT
 
@@ -1374,10 +1437,12 @@ async def websocket_endpoint(ws: WebSocket):
                     pending_voice_attachments = []
 
                 original_attachment_count = len(attachments)
-                vision_attachment_count = _append_recent_vision_attachments(
-                    orchestrator,
-                    attachments,
-                )
+                vision_attachment_count = 0
+                if turn_sender is None:
+                    vision_attachment_count = _append_recent_vision_attachments(
+                        orchestrator,
+                        attachments,
+                    )
                 if vision_attachment_count:
                     logger.debug(
                         "[%s] Added %d recent vision frame(s) to user turn context",
@@ -1405,6 +1470,8 @@ async def websocket_endpoint(ws: WebSocket):
                             instant_mode=instant_mode, attachments=attachments,
                             input_modality=input_modality,
                             tool_approval_callback=request_tool_approval,
+                            sender=turn_sender,
+                            session_kind=session_kind,
                         ),
                         connection_id, original_attachment_count, assistant_state_tracker,
                     )
@@ -1417,6 +1484,8 @@ async def websocket_endpoint(ws: WebSocket):
                                 instant_mode=instant_mode, attachments=attachments,
                                 input_modality=input_modality,
                                 tool_approval_callback=request_tool_approval,
+                                sender=turn_sender,
+                                session_kind=session_kind,
                             ),
                             connection_id, original_attachment_count, assistant_state_tracker,
                         )

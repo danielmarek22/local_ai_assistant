@@ -20,6 +20,10 @@ Persistent storage abstraction.
 - Chat attachments are stored as files on disk, while their metadata lives in SQLite.
 - Higher-level components (orchestrator, services, planners) should call these
   stores rather than executing SQL directly.
+- `chat_sessions` stores the authoritative `direct` or `manual_group` kind.
+- `chat_history` keeps model role separate from `sender_id`,
+  `sender_display_name`, `sender_type`, and `input_source`. Legacy nullable
+  sender fields are resolved deterministically when rows are read.
 
 ## Current Backends
 

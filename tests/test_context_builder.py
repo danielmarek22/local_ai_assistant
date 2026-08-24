@@ -5,6 +5,7 @@ from datetime import datetime
 from app.perception.attachments import AudioAttachment
 from app.perception.state import ImageAttachment
 from app.services.context_builder import ContextBuilder
+from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
 
 
 class FakeHistoryStore:
@@ -273,6 +274,50 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(len(user_messages), 1)
         self.assertEqual(user_messages[0]["content"], "Current question")
         self.assertEqual(user_messages[0]["images"], [image_b64])
+
+    def test_group_context_attributes_identical_text_from_different_senders(self):
+        history = FakeHistoryStore([
+            {
+                "role": "user", "content": "I agree", "attachments": [],
+                "sender_id": "relay:human:a", "sender_display_name": "Alice",
+                "sender_type": "human", "input_source": "manual_relay",
+            }
+        ])
+        builder = ContextBuilder("System prompt", history, summary_store=FakeSummaryStore(None))
+        bob = SenderAttribution(
+            "relay:human:b", "Bob", SenderType.HUMAN, InputSource.MANUAL_RELAY
+        )
+
+        messages = builder.build(
+            "group", "I agree", current_sender=bob, session_kind=SessionKind.MANUAL_GROUP
+        )
+
+        user_messages = [message for message in messages if message["role"] == "user"]
+        self.assertEqual(len(user_messages), 2)
+        self.assertIn('"sender_display_name":"Alice"', user_messages[0]["content"])
+        self.assertIn('"sender_display_name":"Bob"', user_messages[1]["content"])
+        self.assertIn("MANUAL GROUP CHAT ATTRIBUTION", messages[0]["content"])
+
+    def test_direct_context_format_remains_plain(self):
+        builder = ContextBuilder("System prompt", FakeHistoryStore([]), summary_store=FakeSummaryStore(None))
+        messages = builder.build("direct", "Hello", session_kind=SessionKind.DIRECT)
+        self.assertEqual(messages[-1], {"role": "user", "content": "Hello"})
+        self.assertNotIn("MANUAL GROUP CHAT ATTRIBUTION", messages[0]["content"])
+
+    def test_group_context_without_authoritative_sender_omits_synthetic_participant(self):
+        builder = ContextBuilder(
+            "System prompt",
+            FakeHistoryStore([]),
+            summary_store=FakeSummaryStore(None),
+        )
+        messages = builder.build(
+            "group",
+            "",
+            session_kind=SessionKind.MANUAL_GROUP,
+        )
+
+        self.assertEqual([message["role"] for message in messages], ["system"])
+        self.assertNotIn('"sender_display_name":"You"', messages[0]["content"])
 
 
 if __name__ == "__main__":

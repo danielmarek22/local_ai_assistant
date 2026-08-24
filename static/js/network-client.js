@@ -24,6 +24,9 @@ export class NetworkClient {
             if (this.connectionOptions.sessionMode) {
                 wsUrl.searchParams.set('session_mode', this.connectionOptions.sessionMode);
             }
+            if (this.connectionOptions.sessionKind) {
+                wsUrl.searchParams.set('session_kind', this.connectionOptions.sessionKind);
+            }
 
             console.log(`Connecting to ${wsUrl.toString()}...`);
             const socket = new WebSocket(wsUrl.toString());
@@ -60,6 +63,9 @@ export class NetworkClient {
                         serverInstanceId: data.server_instance_id,
                         sessionId: data.session_id,
                         gestureCatalog: data.gesture_catalog || {},
+                        sessionKind: data.session_kind || 'direct',
+                        localHumanDisplayName: data.local_human_display_name || 'You',
+                        localAssistantDisplayName: data.local_assistant_display_name || 'Astra',
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {
@@ -213,6 +219,20 @@ export class NetworkClient {
         } else {
             console.warn('Cannot send message: WebSocket is not open.');
         }
+    }
+
+    sendRelayMessage(senderDisplayName, senderType, text) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('Cannot relay message: WebSocket is not open.');
+            return false;
+        }
+        this.ws.send(JSON.stringify({
+            type: 'relay_message',
+            sender_display_name: senderDisplayName,
+            sender_type: senderType,
+            text,
+        }));
+        return true;
     }
 
     async listSessions() {

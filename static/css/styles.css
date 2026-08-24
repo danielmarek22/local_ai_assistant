@@ -886,6 +886,71 @@ body {
     border-bottom-right-radius: 15px;
 }
 
+.conversation-mode-control {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.conversation-mode-btn {
+    padding: 5px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 999px;
+    background: transparent;
+    color: #bbb;
+    cursor: pointer;
+}
+
+.conversation-mode-btn.active {
+    background: rgba(0, 195, 255, 0.18);
+    border-color: rgba(0, 195, 255, 0.6);
+    color: #fff;
+}
+
+.relay-composer {
+    padding: 10px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.22);
+}
+
+.relay-composer summary { cursor: pointer; color: #9ddfff; font-size: 13px; }
+.relay-composer-fields { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 10px; }
+.relay-composer-fields textarea { grid-column: 1 / -1; resize: vertical; }
+.relay-composer-fields input,
+.relay-composer-fields select,
+.relay-composer-fields textarea {
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.35);
+    color: #eee;
+}
+.relay-composer-fields button { grid-column: 2; padding: 7px 14px; }
+
+.message.group-message .message-sender-header {
+    margin-bottom: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.78;
+}
+
+.message.group-message.sender-external-agent {
+    align-self: flex-end;
+    background: rgba(170, 100, 255, 0.24);
+    border: 1px solid rgba(190, 140, 255, 0.35);
+    color: #f4ebff;
+}
+
+.message.group-message.sender-human.source-manual-relay {
+    background: rgba(255, 176, 64, 0.2);
+    border: 1px solid rgba(255, 176, 64, 0.35);
+    color: #fff4df;
+}
+
 #composer-field {
     flex: 1;
     min-width: 0;

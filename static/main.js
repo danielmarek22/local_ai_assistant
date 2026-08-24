@@ -9,6 +9,7 @@ const uiManager = new UIManager();
 const sessionStorageKey = CONFIG.UI.STORAGE_KEYS.CURRENT_SESSION;
 let currentServerInstanceId = null;
 let currentSessionId = null;
+let currentSessionKind = 'direct';
 let assistantState = 'idle';
 let assistantExpression = 'neutral';
 let reflectionInFlight = false;
@@ -45,6 +46,7 @@ function persistSessionContext() {
     sessionStorage.setItem(sessionStorageKey, JSON.stringify({
         serverInstanceId: currentServerInstanceId,
         sessionId: currentSessionId,
+        sessionKind: currentSessionKind,
     }));
 }
 
@@ -93,9 +95,14 @@ uiManager.onScreenCapturePolicyChange(() => {
 });
 
 const handlers = {
-    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog }) => {
+    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog, sessionKind, localHumanDisplayName, localAssistantDisplayName }) => {
         currentServerInstanceId = serverInstanceId;
         currentSessionId = sessionId;
+        currentSessionKind = sessionKind || 'direct';
+        uiManager.setConversationMode(currentSessionKind, {
+            localHumanDisplayName,
+            localAssistantDisplayName,
+        });
         uiManager.setSessionScope(serverInstanceId, sessionId);
         avatarManager.setGestureCatalog(gestureCatalog || {});
         persistSessionContext();
@@ -187,9 +194,10 @@ if (storedSessionContext?.sessionId && storedSessionContext?.serverInstanceId) {
         sessionId: storedSessionContext.sessionId,
         serverInstanceId: storedSessionContext.serverInstanceId,
         sessionMode: 'resume',
+        sessionKind: storedSessionContext.sessionKind || 'direct',
     });
 } else {
-    client.connect({ sessionMode: 'new' });
+    client.connect({ sessionMode: 'new', sessionKind: 'direct' });
 }
 
 function isStreamActive(stream) {
@@ -422,6 +430,23 @@ uiManager.onSend((text, options) => {
     client.sendMessage(text, options);
 });
 
+uiManager.onRelay(({ senderDisplayName, senderType, text }) => {
+    audioManager.init();
+    if (client.sendRelayMessage(senderDisplayName, senderType, text)) {
+        uiManager.appendRelayMessage(text, senderDisplayName, senderType);
+    }
+});
+
+uiManager.onConversationModeChange((nextMode) => {
+    currentSessionKind = nextMode;
+    clearSessionContext();
+    uiManager.setConversationMode(nextMode);
+    uiManager.resetChatToDefault();
+    client.switchSession({ sessionMode: 'new', sessionKind: nextMode });
+    uiManager.setActiveTab('chat-view');
+    refreshHistory();
+});
+
 // Wire mic button → binary WS frame.
 // The user bubble is rendered by onSttTranscript above, not here,
 // because we don't have the transcript text yet at send time.
@@ -509,6 +534,7 @@ uiManager.onHistoryOpen(async (sessionId) => {
     try {
         const sessionData = await client.getSession(sessionId);
         currentSessionId = sessionId;
+        currentSessionKind = sessionData.kind || 'direct';
         if (currentServerInstanceId) {
             uiManager.setSessionScope(currentServerInstanceId, currentSessionId);
         }
@@ -517,6 +543,7 @@ uiManager.onHistoryOpen(async (sessionId) => {
         client.switchSession({
             sessionId,
             sessionMode: 'open',
+            sessionKind: currentSessionKind,
         });
         uiManager.setActiveTab('chat-view');
         refreshHistory();
@@ -534,7 +561,7 @@ uiManager.onHistoryDelete(async (sessionId) => {
 
         if (sessionId === currentSessionId) {
             clearSessionContext();
-            client.switchSession({ sessionMode: 'new' });
+            client.switchSession({ sessionMode: 'new', sessionKind: currentSessionKind });
         }
 
         await refreshHistory();
@@ -548,7 +575,7 @@ uiManager.onHistoryNewChat(async () => {
     uiManager.setHistoryStatus('');
     clearSessionContext();
     uiManager.resetChatToDefault();
-    client.switchSession({ sessionMode: 'new' });
+    client.switchSession({ sessionMode: 'new', sessionKind: currentSessionKind });
     uiManager.setActiveTab('chat-view');
     refreshHistory();
 });

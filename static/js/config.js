@@ -61,7 +61,8 @@ export const CONFIG = {
             AGENT_MODE: 'astra-agent-mode',
             HIDE_THINKING: 'astra-hide-thinking',
             INSTANT_MODE: 'astra-instant-mode',
-            REASONING_ALWAYS_ON: 'astra-reasoning-always-on'
+            REASONING_ALWAYS_ON: 'astra-reasoning-always-on',
+            LAST_RELAY_SENDER: 'astra-last-relay-sender'
         },
         AGENT_MODE_DEFAULT: true,
         HIDE_THINKING_DEFAULT: false,

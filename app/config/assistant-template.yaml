@@ -21,8 +21,13 @@ llm:
       rep_pen: 1.1
       min_p: null
 
+local_human:
+  id: local-human
+  display_name: You
+
 assistant:
   id: default-agent
+  display_name: Astra
   system_prompt: |
     You are Astra, a local, user-aligned personal assistant.
 

@@ -17,6 +17,9 @@ Core orchestration logic of the assistant.
 
 - The orchestrator itself is stateless with respect to the active session.
 - Session identity is supplied by the caller on each `handle_user_input(...)` call.
+- Conversation sessions have a durable `direct` or `manual_group` kind. Manual relay
+  identities are derived from normalized sender type and display name; renaming a
+  participant creates a new identity in the v1 roster-free model.
 - `MemoryRetriever`, `MemoryActionHandler`, `TurnFinalizer`, and `StreamProcessor` keep the turn loop smaller and easier to change.
 - Agent-mode turns expose registered native capabilities; `instant_mode` streams a direct response without capability schemas.
 - User and integration-event turns share a coordinator, so a local model is never used by overlapping turns.

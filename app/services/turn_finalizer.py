@@ -1,6 +1,7 @@
 import logging
 
 from app.logging import trace_event
+from app.core.conversation import SessionKind, render_group_message
 
 logger = logging.getLogger("turn_finalizer")
 
@@ -72,7 +73,10 @@ class TurnFinalizer:
             )
 
         summary_input.extend(
-            {"role": row["role"], "content": row["content"]}
+            {
+                "role": row["role"],
+                "content": self._summary_content(session_id, row),
+            }
             for row in history[last_count:]
         )
         trace_event(
@@ -96,3 +100,12 @@ class TurnFinalizer:
             session_id=session_id,
             payload={"summary": summary, "last_turn_count": current_count},
         )
+
+    def _summary_content(self, session_id: str, row: dict) -> str:
+        get_session_kind = getattr(self.history, "get_session_kind", None)
+        if not callable(get_session_kind) or get_session_kind(session_id) == SessionKind.DIRECT:
+            return row["content"]
+        effective_sender = getattr(self.history, "effective_sender", None)
+        if not callable(effective_sender):
+            return row["content"]
+        return render_group_message(row["content"], effective_sender(row))

@@ -18,6 +18,12 @@ from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
 from app.core.turn_completion import CompletedUserTurn
+from app.core.conversation import (
+    InputSource,
+    SenderAttribution,
+    SenderType,
+    SessionKind,
+)
 from app.logging import trace_event
 from app.integrations import (
     CapabilityId,
@@ -58,6 +64,9 @@ class Orchestrator:
         agent_id: str = "default-agent",
         timezone_name: str = "UTC",
         belief_context_provider=None,
+        local_human_id: str = "local-human",
+        local_human_name: str = "You",
+        local_assistant_name: str = "Astra",
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -73,6 +82,9 @@ class Orchestrator:
         self.agent_id = agent_id
         self.timezone_name = timezone_name
         self.belief_context_provider = belief_context_provider
+        self.local_human_id = local_human_id
+        self.local_human_name = local_human_name
+        self.local_assistant_name = local_assistant_name
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -98,15 +110,29 @@ class Orchestrator:
         attachments: list[Attachment] | None = None,
         input_modality = InputModality.TEXT,
         tool_approval_callback: Callable[[dict], bool] | None = None,
+        sender: SenderAttribution | None = None,
+        session_kind: SessionKind | str | None = None,
     ):
         start_ts = time.perf_counter()
         observed_at = datetime.now(timezone.utc)
+        sender = sender or SenderAttribution(
+            sender_id=self.local_human_id,
+            sender_display_name=self.local_human_name,
+            sender_type=SenderType.HUMAN,
+            input_source=(
+                InputSource.LOCAL_VOICE
+                if input_modality == InputModality.VOICE
+                else InputSource.LOCAL_TEXT
+            ),
+        )
+        session_kind = self._resolve_session_kind(session_id, session_kind)
         turn_input = TurnInput(
             user_text=user_text,
             attachments=attachments or [],
             think_override=think_override,
             instant_mode=instant_mode,
             input_modality=input_modality,
+            sender=sender,
         )
         retrieval_text = turn_input.retrieval_text()
         history_text = turn_input.history_text()
@@ -132,6 +158,10 @@ class Orchestrator:
                     "think_override": turn_input.think_override,
                     "instant_mode": turn_input.instant_mode,
                     "attachments": [attachment.to_perception_payload() for attachment in turn_input.attachments],
+                    "sender_id": sender.sender_id,
+                    "sender_display_name": sender.sender_display_name,
+                    "sender_type": sender.sender_type.value,
+                    "input_source": sender.input_source.value,
                 },
             )
 
@@ -149,6 +179,10 @@ class Orchestrator:
                         attachment.to_perception_payload()
                         for attachment in turn_input.attachments
                     ],
+                    "sender_id": sender.sender_id,
+                    "sender_display_name": sender.sender_display_name,
+                    "sender_type": sender.sender_type.value,
+                    "input_source": sender.input_source.value,
                 },
             )
 
@@ -181,6 +215,8 @@ class Orchestrator:
                 "user",
                 history_text,
                 attachments=storable_attachments,
+                sender=sender,
+                session_kind=session_kind,
             )
 
             integration_context = self._collect_integration_context(
@@ -195,6 +231,8 @@ class Orchestrator:
                 memory_context=memory_context,
                 integration_context=integration_context,
                 attachments=turn_input.attachments,
+                current_sender=sender,
+                session_kind=session_kind,
             )
 
             # 5. LLM response: stream directly unless agent/native tool routing is active.
@@ -241,6 +279,10 @@ class Orchestrator:
                     user_text=turn_input.user_text,
                     observed_at=observed_at,
                     timezone_name=self.timezone_name,
+                    sender_id=sender.sender_id,
+                    sender_display_name=sender.sender_display_name,
+                    sender_type=sender.sender_type,
+                    input_source=sender.input_source,
                 ),
             )
 
@@ -311,6 +353,14 @@ class Orchestrator:
                     user_text=event_text,
                 ),
                 attachments=attachments,
+                current_sender=self._internal_group_sender(
+                    session_id,
+                    sender_id="system:proactive-vision",
+                    sender_display_name="Proactive vision system",
+                    sender_type=SenderType.SYSTEM,
+                    input_source=InputSource.SYSTEM_RUNTIME,
+                ),
+                session_kind=self._resolve_session_kind(session_id),
             )
             self._inject_hidden_system_message(
                 messages,
@@ -402,6 +452,14 @@ class Orchestrator:
                     for item in event.attachments
                     if item.mime_type.startswith("image/")
                 ],
+                current_sender=self._internal_group_sender(
+                    session_id,
+                    sender_id="integration-runtime",
+                    sender_display_name="Integration runtime",
+                    sender_type=SenderType.INTEGRATION_RUNTIME,
+                    input_source=InputSource.INTEGRATION_RUNTIME,
+                ),
+                session_kind=self._resolve_session_kind(session_id),
             )
             self._inject_hidden_system_message(
                 messages,
@@ -454,6 +512,36 @@ class Orchestrator:
     # Context & response
     # ============================================================
 
+    def _resolve_session_kind(
+        self,
+        session_id: str,
+        session_kind: SessionKind | str | None = None,
+    ) -> SessionKind:
+        if session_kind is not None:
+            return SessionKind(session_kind)
+        get_session_kind = getattr(self.history, "get_session_kind", None)
+        if callable(get_session_kind):
+            return SessionKind(get_session_kind(session_id))
+        return SessionKind.DIRECT
+
+    def _internal_group_sender(
+        self,
+        session_id: str,
+        *,
+        sender_id: str,
+        sender_display_name: str,
+        sender_type: SenderType,
+        input_source: InputSource,
+    ) -> SenderAttribution | None:
+        if self._resolve_session_kind(session_id) == SessionKind.DIRECT:
+            return None
+        return SenderAttribution(
+            sender_id=sender_id,
+            sender_display_name=sender_display_name,
+            sender_type=sender_type,
+            input_source=input_source,
+        )
+
     def _build_context(
         self,
         session_id: str,
@@ -461,6 +549,8 @@ class Orchestrator:
         memory_context: Optional[str],
         integration_context: Optional[str],
         attachments: list[Attachment] | None = None,
+        current_sender: SenderAttribution | None = None,
+        session_kind: SessionKind | str | None = None,
     ):
         logger.info("[%s] Building context", session_id)
 
@@ -471,6 +561,8 @@ class Orchestrator:
             integration_context=integration_context,
             belief_context=self._collect_belief_context(session_id),
             attachments=attachments or [],
+            current_sender=current_sender,
+            session_kind=session_kind,
         )
 
         logger.debug(
@@ -673,7 +765,13 @@ class Orchestrator:
                 self.history.add(
                     session_id,
                     "system",
-                    f"[Tool Execution Trace: {tool_name}]\n{safe_observation}"
+                    f"[Tool Execution Trace: {tool_name}]\n{safe_observation}",
+                    sender=SenderAttribution(
+                        sender_id=f"tool:{tool_name}",
+                        sender_display_name=tool_name,
+                        sender_type=SenderType.TOOL,
+                        input_source=InputSource.TOOL_RUNTIME,
+                    ),
                 )
 
             messages.append({

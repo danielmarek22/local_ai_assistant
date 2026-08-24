@@ -34,9 +34,26 @@
 
         <div id="tab-panels">
             <section id="chat-view" class="tab-panel active" role="tabpanel">
-                <div id="chat-history">
-                    <div class="message astra">System: Online. Ready.</div>
+                <div id="conversation-mode-control" class="conversation-mode-control" role="radiogroup" aria-label="Conversation mode">
+                    <button class="conversation-mode-btn active" type="button" role="radio" aria-checked="true" data-conversation-mode="direct">Direct</button>
+                    <button class="conversation-mode-btn" type="button" role="radio" aria-checked="false" data-conversation-mode="manual_group">Group</button>
                 </div>
+                <div id="chat-history">
+                    <div class="message astra" data-sender-display-name="System" data-sender-type="system" data-input-source="system_runtime">System: Online. Ready.</div>
+                </div>
+
+                <details id="relay-composer" class="relay-composer hidden">
+                    <summary>Relay message</summary>
+                    <div class="relay-composer-fields">
+                        <input id="relay-sender-name" type="text" maxlength="80" placeholder="Sender display name" autocomplete="off">
+                        <select id="relay-sender-type" aria-label="Relay sender type">
+                            <option value="human">Human</option>
+                            <option value="external_agent">External agent</option>
+                        </select>
+                        <textarea id="relay-text" rows="2" placeholder="Paste a message to relay..."></textarea>
+                        <button id="relay-btn" type="button">Relay</button>
+                    </div>
+                </details>
 
                 <div id="input-area">
                     <div id="composer-field">

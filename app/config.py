@@ -15,6 +15,7 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
+        self.local_human = self._load_local_human_config(self.raw.get("local_human"))
 
         # Planner
         self.planner = self.raw.get(
@@ -85,6 +86,15 @@ class Config:
                 "trace_backup_count": 5,
             },
         )
+
+    @staticmethod
+    def _load_local_human_config(raw_local_human: dict | None) -> dict:
+        config = {"id": "local-human", "display_name": "You"}
+        if isinstance(raw_local_human, dict):
+            config.update(raw_local_human)
+        config["id"] = str(config.get("id") or "local-human").strip() or "local-human"
+        config["display_name"] = str(config.get("display_name") or "You").strip() or "You"
+        return config
 
     @staticmethod
     def _default_tts_config() -> dict:

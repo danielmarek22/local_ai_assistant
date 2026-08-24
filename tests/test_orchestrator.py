@@ -12,6 +12,8 @@ from app.core.events import (
     AutonomyOutcomeEvent,
 )
 from app.core.orchestrator import Orchestrator
+from app.core.conversation import InputSource, SenderType, SessionKind
+from app.core.turn_input import InputModality
 from app.core.plan import Plan
 from app.integrations import (
     CapabilityId,
@@ -88,10 +90,23 @@ class FakeHistoryStore:
     def __init__(self):
         self.records = []
         self.recent_rows = []
+        self.senders = []
+        self.session_kinds = {}
+        self.added_session_kinds = []
 
-    def add(self, session_id: str, role: str, content: str, attachments=None):
+    def add(
+        self, session_id: str, role: str, content: str, attachments=None,
+        sender=None, session_kind=SessionKind.DIRECT,
+    ):
+        requested_kind = SessionKind(session_kind)
+        self.session_kinds.setdefault(session_id, requested_kind)
+        self.added_session_kinds.append(requested_kind)
         self.records.append((session_id, role, content, attachments or []))
+        self.senders.append(sender)
         return len(self.records)
+
+    def get_session_kind(self, session_id: str):
+        return self.session_kinds.get(session_id, SessionKind.DIRECT)
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
@@ -116,6 +131,8 @@ class FakeContextBuilder:
             "integration_context": integration_context,
             "belief_context": kwargs.get("belief_context"),
             "attachments": kwargs.get("attachments", []),
+            "current_sender": kwargs.get("current_sender"),
+            "session_kind": kwargs.get("session_kind"),
         })
         return [{"role": "user", "content": user_text}]
 
@@ -355,6 +372,7 @@ class OrchestratorTests(unittest.TestCase):
         )
         list(proactive[0].handle_proactive_event(self.SESSION_ID, event_text="changed"))
         self.assertEqual(proactive[-1].calls[0]["belief_context"], "snapshot-1")
+        self.assertIsNone(proactive[-1].calls[0]["current_sender"])
 
         integration = self._build_orchestrator(
             plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
@@ -370,6 +388,54 @@ class OrchestratorTests(unittest.TestCase):
         )
         list(integration[0].handle_integration_event(self.SESSION_ID, event, spec))
         self.assertEqual(integration[-1].calls[0]["belief_context"], "snapshot-2")
+        self.assertIsNone(integration[-1].calls[0]["current_sender"])
+
+    def test_group_internal_turns_never_use_local_human_attribution(self):
+        proactive = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+        )
+        proactive[2].session_kinds[self.SESSION_ID] = SessionKind.MANUAL_GROUP
+        list(proactive[0].handle_proactive_event(self.SESSION_ID, event_text="changed"))
+        proactive_sender = proactive[-1].calls[0]["current_sender"]
+        self.assertEqual(proactive[-1].calls[0]["session_kind"], SessionKind.MANUAL_GROUP)
+        self.assertEqual(proactive_sender.sender_type, SenderType.SYSTEM)
+        self.assertEqual(proactive_sender.input_source, InputSource.SYSTEM_RUNTIME)
+        self.assertNotEqual(proactive_sender.sender_id, proactive[0].local_human_id)
+
+        integration = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            chat_responses=[{"content": "done"}],
+        )
+        integration[2].session_kinds[self.SESSION_ID] = SessionKind.MANUAL_GROUP
+        event = IntegrationEvent(EventId("demo", "finished"), {}, self.SESSION_ID)
+        spec = EventSpec(
+            event=event.event,
+            description="finished",
+            payload_schema={"type": "object", "properties": {}},
+        )
+        list(integration[0].handle_integration_event(self.SESSION_ID, event, spec))
+        integration_sender = integration[-1].calls[0]["current_sender"]
+        self.assertEqual(integration[-1].calls[0]["session_kind"], SessionKind.MANUAL_GROUP)
+        self.assertEqual(integration_sender.sender_type, SenderType.INTEGRATION_RUNTIME)
+        self.assertEqual(integration_sender.input_source, InputSource.INTEGRATION_RUNTIME)
+        self.assertNotEqual(integration_sender.sender_id, integration[0].local_human_id)
+
+    def test_handle_user_input_persists_requested_group_kind_before_first_message(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+        )
+        list(built[0].handle_user_input(
+            "new-group",
+            "hello group",
+            instant_mode=True,
+            session_kind=SessionKind.MANUAL_GROUP,
+        ))
+
+        self.assertEqual(built[2].get_session_kind("new-group"), SessionKind.MANUAL_GROUP)
+        self.assertEqual(built[2].added_session_kinds[0], SessionKind.MANUAL_GROUP)
 
     def test_late_routing_loop_uses_one_frozen_belief_snapshot(self):
         provider = FakeBeliefContextProvider()
@@ -1210,6 +1276,22 @@ class OrchestratorTests(unittest.TestCase):
             perception_snapshot[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
+
+    def test_normal_text_and_voice_use_authoritative_local_identity(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        built = self._build_orchestrator(plan=plan, summary_trigger=999)
+        orch, history = built[0], built[2]
+        orch.local_human_id = "person-1"
+        orch.local_human_name = "Local Person"
+
+        list(orch.handle_user_input("text-session", "hello", input_modality=InputModality.TEXT))
+        list(orch.handle_user_input("voice-session", "spoken", input_modality=InputModality.VOICE))
+
+        text_sender = history.senders[0]
+        voice_sender = history.senders[2]
+        self.assertEqual((text_sender.sender_id, text_sender.sender_display_name), ("person-1", "Local Person"))
+        self.assertEqual(text_sender.input_source.value, "local_text")
+        self.assertEqual(voice_sender.input_source.value, "local_voice")
 
 
 if __name__ == "__main__":

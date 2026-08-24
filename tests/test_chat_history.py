@@ -1,10 +1,13 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from app.memory.chat_history import ChatHistoryStore
 from app.perception.state import ImageAttachment
 from app.storage.database import Database
+from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
+from app.services.turn_finalizer import TurnFinalizer
 
 
 class FakeCollection:
@@ -171,6 +174,106 @@ class ChatHistoryStoreTests(unittest.TestCase):
             [{"session_id": "session-1"}],
         )
         self.assertEqual(self.vector_store.episodic_collection.records, [])
+
+    def test_additive_migration_and_legacy_sender_defaults(self):
+        db_path = Path(self.temp_dir.name) / "legacy.db"
+        connection = sqlite3.connect(db_path)
+        connection.execute(
+            """CREATE TABLE chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO chat_history (session_id, role, content) VALUES ('legacy', 'user', 'hello')"
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = Database(str(db_path))
+        columns = {row["name"] for row in migrated.conn.execute("PRAGMA table_info(chat_history)")}
+        self.assertTrue({"sender_id", "sender_display_name", "sender_type", "input_source"} <= columns)
+        store = ChatHistoryStore(
+            migrated, self.vector_store, uploads_root=self.temp_dir.name,
+            local_human_id="person-1", local_human_name="Local Person",
+        )
+        row = store.get_all("legacy")[0]
+        self.assertEqual(
+            (row["sender_id"], row["sender_display_name"], row["sender_type"], row["input_source"]),
+            ("person-1", "Local Person", "human", "local_text"),
+        )
+        raw = migrated.conn.execute("SELECT sender_id FROM chat_history WHERE id = 1").fetchone()
+        self.assertIsNone(raw["sender_id"])
+
+    def test_group_session_and_vector_documents_preserve_sender(self):
+        self.store.ensure_session("group-1", SessionKind.MANUAL_GROUP)
+        sender = SenderAttribution(
+            "relay:external_agent:abc", "Claude", SenderType.EXTERNAL_AGENT,
+            InputSource.MANUAL_RELAY,
+        )
+        self.store.add("group-1", "user", "Same thought", sender=sender)
+
+        self.assertEqual(self.store.get_session_kind("group-1"), SessionKind.MANUAL_GROUP)
+        record = self.vector_store.episodic_collection.records[-1]
+        self.assertEqual(record["document"], "EXTERNAL_AGENT Claude: Same thought")
+        self.assertEqual(record["metadata"]["sender_id"], sender.sender_id)
+        self.assertEqual(record["metadata"]["input_source"], "manual_relay")
+
+        self.assertEqual(self.store.delete_session("group-1"), 1)
+        self.assertEqual(self.store.get_session_kind("group-1"), SessionKind.DIRECT)
+
+    def test_add_can_create_authoritative_group_session_on_first_message(self):
+        self.store.add(
+            "new-group",
+            "user",
+            "First group message",
+            sender=SenderAttribution(
+                "relay:human:alice", "Alice", SenderType.HUMAN,
+                InputSource.MANUAL_RELAY,
+            ),
+            session_kind=SessionKind.MANUAL_GROUP,
+        )
+
+        self.assertEqual(
+            self.store.get_session_kind("new-group"),
+            SessionKind.MANUAL_GROUP,
+        )
+        self.assertEqual(
+            self.vector_store.episodic_collection.records[-1]["document"],
+            "HUMAN Alice: First group message",
+        )
+
+    def test_group_summary_input_preserves_participant_attribution(self):
+        self.store.ensure_session("group-summary", SessionKind.MANUAL_GROUP)
+        self.store.add(
+            "group-summary", "user", "I am in Warsaw",
+            sender=SenderAttribution(
+                "relay:human:alice", "Alice", SenderType.HUMAN, InputSource.MANUAL_RELAY
+            ),
+        )
+
+        class SummaryStore:
+            def __init__(self): self.saved = None
+            def get(self, _session_id): return None
+            def set(self, session_id, summary, count): self.saved = (session_id, summary, count)
+
+        class Summarizer:
+            def __init__(self): self.messages = None
+            def summarize(self, messages):
+                self.messages = messages
+                return "Alice said she is in Warsaw."
+
+        summary_store = SummaryStore()
+        summarizer = Summarizer()
+        TurnFinalizer(self.store, summary_store, summarizer, summary_trigger=1).finalize("group-summary")
+
+        self.assertIn('"sender_display_name":"Alice"', summarizer.messages[0]["content"])
+        self.assertEqual(summary_store.saved, (
+            "group-summary", "Alice said she is in Warsaw.", 1
+        ))
 
 
 if __name__ == "__main__":
