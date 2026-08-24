@@ -10,6 +10,8 @@ from app.beliefs.models import (
     BeliefMutation,
     BeliefRecord,
     CandidateOperation,
+    EpistemicStatus,
+    SubjectKind,
     VisibilityPolicy,
 )
 from app.storage.database import initialize_belief_schema
@@ -22,7 +24,13 @@ class StaleBeliefObservation(ValueError):
 class BeliefRepository:
     """SQLite belief projection using an independent connection per operation."""
 
-    def __init__(self, db):
+    def __init__(
+        self,
+        db,
+        *,
+        legacy_local_human_id: str = "local-human",
+        legacy_local_human_name: str = "You",
+    ):
         configured_path = str(db.path)
         self._uri = configured_path == ":memory:"
         self._path = (
@@ -32,7 +40,11 @@ class BeliefRepository:
         )
         self._anchor = self._open_connection() if self._uri else None
         with self._connection() as conn:
-            initialize_belief_schema(conn)
+            initialize_belief_schema(
+                conn,
+                legacy_local_human_id=legacy_local_human_id,
+                legacy_local_human_name=legacy_local_human_name,
+            )
 
     def close(self) -> None:
         if self._anchor is not None:
@@ -73,7 +85,8 @@ class BeliefRepository:
                     visibility = 'AGENT_CURRENT'
                     OR (visibility = 'SESSION_CURRENT' AND scope_session_id = ?)
                   )
-                ORDER BY subject ASC, predicate ASC, visibility ASC, belief_id ASC
+                ORDER BY subject_id ASC, predicate ASC, epistemic_status ASC,
+                         source_sender_id ASC, visibility ASC, belief_id ASC
                 """,
                 (owner_agent_id, self._iso(now), session_id),
             ).fetchall()
@@ -128,23 +141,32 @@ class BeliefRepository:
                         cursor = conn.execute(
                             """
                             UPDATE beliefs
-                            SET status = 'invalidated', origin_session_id = ?,
+                            SET status = 'invalidated', source_session_id = ?,
                                 source_message_id = ?, source_observed_at = ?,
+                                source_sender_id = ?, source_sender_display_name = ?,
+                                source_sender_type = ?, source_input_source = ?,
                                 evidence_excerpt = ?, revision = revision + 1, updated_at = ?
                             WHERE belief_id = ? AND owner_agent_id = ? AND status = 'active'
+                              AND source_sender_id = ? AND epistemic_status = ?
                               AND (
                                 source_observed_at < ?
                                 OR (source_observed_at = ? AND source_message_id < ?)
                               )
                             """,
                             (
-                                mutation.origin_session_id,
+                                mutation.source_session_id,
                                 source_message_id,
                                 observed_at_iso,
+                                mutation.source_sender_id,
+                                mutation.source_sender_display_name,
+                                mutation.source_sender_type,
+                                mutation.source_input_source,
                                 mutation.evidence_excerpt,
                                 observed_at_iso,
                                 mutation.belief_id,
                                 owner_agent_id,
+                                mutation.source_sender_id,
+                                mutation.epistemic_status.value,
                                 observed_at_iso,
                                 observed_at_iso,
                                 source_message_id,
@@ -157,7 +179,7 @@ class BeliefRepository:
                         continue
 
                     scope_session_id = (
-                        mutation.origin_session_id
+                        mutation.source_session_id
                         if mutation.visibility == VisibilityPolicy.SESSION_CURRENT
                         else ""
                     )
@@ -173,28 +195,36 @@ class BeliefRepository:
                         cursor = conn.execute(
                             """
                             UPDATE beliefs
-                            SET origin_session_id = ?, value_json = ?, status = 'active',
+                            SET source_session_id = ?, value_json = ?, status = 'active',
                                 expires_at = ?, source_message_id = ?, source_observed_at = ?,
+                                source_sender_display_name = ?, source_sender_type = ?,
+                                source_input_source = ?,
                                 evidence_excerpt = ?, revision = revision + 1, updated_at = ?
                             WHERE belief_id = ? AND owner_agent_id = ? AND status = 'active'
                               AND visibility = ? AND scope_session_id = ?
+                              AND source_sender_id = ? AND epistemic_status = ?
                               AND (
                                 source_observed_at < ?
                                 OR (source_observed_at = ? AND source_message_id < ?)
                               )
                             """,
                             (
-                                mutation.origin_session_id,
+                                mutation.source_session_id,
                                 value_json,
                                 expires_at,
                                 source_message_id,
                                 observed_at_iso,
+                                mutation.source_sender_display_name,
+                                mutation.source_sender_type,
+                                mutation.source_input_source,
                                 mutation.evidence_excerpt,
                                 observed_at_iso,
                                 mutation.belief_id,
                                 owner_agent_id,
                                 mutation.visibility.value,
                                 scope_session_id,
+                                mutation.source_sender_id,
+                                mutation.epistemic_status.value,
                                 observed_at_iso,
                                 observed_at_iso,
                                 source_message_id,
@@ -206,24 +236,42 @@ class BeliefRepository:
                             )
                         continue
 
+                    if mutation.operation not in {
+                        CandidateOperation.ASSERT,
+                        CandidateOperation.CREATE,
+                    }:
+                        raise ValueError("Unsupported belief mutation operation")
+
                     cursor = conn.execute(
                         """
                         INSERT INTO beliefs (
                             belief_id, owner_agent_id, visibility, scope_session_id,
-                            origin_session_id, subject, predicate, value_json, confidence,
+                            source_session_id, subject_id, subject_kind, subject_display_name,
+                            predicate, value_json, confidence,
                             status, expires_at, source_message_id, source_observed_at,
+                            source_sender_id, source_sender_display_name, source_sender_type,
+                            source_input_source, epistemic_status,
                             evidence_excerpt, revision, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, 'active', ?, ?, ?, ?, 1, ?, ?)
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 'active', ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, 1, ?, ?
+                        )
                         ON CONFLICT (
-                            owner_agent_id, visibility, scope_session_id, subject, predicate
+                            owner_agent_id, visibility, scope_session_id, subject_id, predicate,
+                            epistemic_status, source_sender_id
                         ) DO UPDATE SET
-                            origin_session_id = excluded.origin_session_id,
+                            source_session_id = excluded.source_session_id,
+                            subject_kind = excluded.subject_kind,
+                            subject_display_name = excluded.subject_display_name,
                             value_json = excluded.value_json,
                             confidence = excluded.confidence,
                             status = 'active',
                             expires_at = excluded.expires_at,
                             source_message_id = excluded.source_message_id,
                             source_observed_at = excluded.source_observed_at,
+                            source_sender_display_name = excluded.source_sender_display_name,
+                            source_sender_type = excluded.source_sender_type,
+                            source_input_source = excluded.source_input_source,
                             evidence_excerpt = excluded.evidence_excerpt,
                             revision = beliefs.revision + 1,
                             updated_at = excluded.updated_at
@@ -238,13 +286,20 @@ class BeliefRepository:
                             owner_agent_id,
                             mutation.visibility.value,
                             scope_session_id,
-                            mutation.origin_session_id,
-                            mutation.subject,
+                            mutation.source_session_id,
+                            mutation.subject_id,
+                            mutation.subject_kind.value,
+                            mutation.subject_display_name,
                             mutation.predicate,
                             value_json,
                             expires_at,
                             source_message_id,
                             observed_at_iso,
+                            mutation.source_sender_id,
+                            mutation.source_sender_display_name,
+                            mutation.source_sender_type,
+                            mutation.source_input_source,
+                            mutation.epistemic_status.value,
                             mutation.evidence_excerpt,
                             observed_at_iso,
                             observed_at_iso,
@@ -270,19 +325,17 @@ class BeliefRepository:
                 raise
 
     def delete_session(self, owner_agent_id: str, session_id: str) -> int:
-        """Delete session beliefs and owner-wide beliefs whose latest source is this session."""
+        """Delete only beliefs whose visibility is scoped to the deleted session."""
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 """
                 DELETE FROM beliefs
                 WHERE owner_agent_id = ?
-                  AND (
-                    (visibility = 'SESSION_CURRENT' AND scope_session_id = ?)
-                    OR (visibility = 'AGENT_CURRENT' AND origin_session_id = ?)
-                  )
+                  AND visibility = 'SESSION_CURRENT'
+                  AND scope_session_id = ?
                 """,
-                (owner_agent_id, session_id, session_id),
+                (owner_agent_id, session_id),
             )
             conn.commit()
         return cursor.rowcount
@@ -335,8 +388,10 @@ class BeliefRepository:
             belief_id=row["belief_id"],
             owner_agent_id=row["owner_agent_id"],
             visibility=VisibilityPolicy(row["visibility"]),
-            origin_session_id=row["origin_session_id"],
-            subject=row["subject"],
+            source_session_id=row["source_session_id"],
+            subject_id=row["subject_id"],
+            subject_kind=SubjectKind(row["subject_kind"]),
+            subject_display_name=row["subject_display_name"],
             predicate=row["predicate"],
             value=json.loads(row["value_json"]),
             confidence=float(row["confidence"]),
@@ -344,6 +399,11 @@ class BeliefRepository:
             expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
             source_message_id=int(row["source_message_id"]),
             source_observed_at=datetime.fromisoformat(row["source_observed_at"]),
+            source_sender_id=row["source_sender_id"],
+            source_sender_display_name=row["source_sender_display_name"],
+            source_sender_type=row["source_sender_type"],
+            source_input_source=row["source_input_source"],
+            epistemic_status=EpistemicStatus(row["epistemic_status"]),
             evidence_excerpt=row["evidence_excerpt"],
             revision=int(row["revision"]),
             created_at=datetime.fromisoformat(row["created_at"]),

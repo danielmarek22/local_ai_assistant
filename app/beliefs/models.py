@@ -13,6 +13,20 @@ class VisibilityPolicy(str, Enum):
     SESSION_CURRENT = "SESSION_CURRENT"
 
 
+class SubjectKind(str, Enum):
+    PERSON = "PERSON"
+    AGENT = "AGENT"
+    WORLD = "WORLD"
+    ENVIRONMENT = "ENVIRONMENT"
+    PROJECT = "PROJECT"
+    OTHER = "OTHER"
+
+
+class EpistemicStatus(str, Enum):
+    SELF_REPORT = "SELF_REPORT"
+    ATTRIBUTED_CLAIM = "ATTRIBUTED_CLAIM"
+
+
 class ExpiryPolicy(str, Enum):
     END_OF_SESSION = "END_OF_SESSION"
     AFTER_ONE_HOUR = "AFTER_ONE_HOUR"
@@ -24,6 +38,7 @@ class ExpiryPolicy(str, Enum):
 
 
 class CandidateOperation(str, Enum):
+    ASSERT = "ASSERT"
     CREATE = "CREATE"
     UPDATE = "UPDATE"
     INVALIDATE = "INVALIDATE"
@@ -38,7 +53,6 @@ class IgnoreReason(str, Enum):
     NO_CHANGE = "NO_CHANGE"
     QUOTED_OR_EMBEDDED_CONTENT = "QUOTED_OR_EMBEDDED_CONTENT"
     META_INSTRUCTION = "META_INSTRUCTION"
-    ATTRIBUTED_TO_OTHER = "ATTRIBUTED_TO_OTHER"
 
 
 class _StrictCandidate(BaseModel):
@@ -47,7 +61,18 @@ class _StrictCandidate(BaseModel):
 
 class CreateCandidate(_StrictCandidate):
     operation: Literal[CandidateOperation.CREATE]
-    subject: str = Field(min_length=2, max_length=64)
+    subject_id: str = Field(min_length=1, max_length=128)
+    predicate: str = Field(min_length=2, max_length=64)
+    value: Any
+    visibility: VisibilityPolicy
+    expiry_policy: ExpiryPolicy
+    explicit_until: str | None = Field(default=None, max_length=64)
+    evidence_excerpt: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class AssertionCandidate(_StrictCandidate):
+    operation: Literal[CandidateOperation.ASSERT]
+    subject_id: str = Field(min_length=1, max_length=128)
     predicate: str = Field(min_length=2, max_length=64)
     value: Any
     visibility: VisibilityPolicy
@@ -78,7 +103,13 @@ class IgnoreCandidate(_StrictCandidate):
 
 
 BeliefCandidate = Annotated[
-    Union[CreateCandidate, UpdateCandidate, InvalidateCandidate, IgnoreCandidate],
+    Union[
+        AssertionCandidate,
+        CreateCandidate,
+        UpdateCandidate,
+        InvalidateCandidate,
+        IgnoreCandidate,
+    ],
     Field(discriminator="operation"),
 ]
 
@@ -93,8 +124,10 @@ class BeliefRecord:
     belief_id: str
     owner_agent_id: str
     visibility: VisibilityPolicy
-    origin_session_id: str
-    subject: str
+    source_session_id: str
+    subject_id: str
+    subject_kind: SubjectKind
+    subject_display_name: str
     predicate: str
     value: Any
     confidence: float
@@ -102,6 +135,11 @@ class BeliefRecord:
     expires_at: datetime | None
     source_message_id: int
     source_observed_at: datetime
+    source_sender_id: str
+    source_sender_display_name: str
+    source_sender_type: str
+    source_input_source: str
+    epistemic_status: EpistemicStatus
     evidence_excerpt: str | None
     revision: int
     created_at: datetime
@@ -113,9 +151,31 @@ class BeliefMutation:
     operation: CandidateOperation
     belief_id: str | None
     visibility: VisibilityPolicy | None
-    origin_session_id: str
-    subject: str | None
+    source_session_id: str
+    subject_id: str | None
+    subject_kind: SubjectKind | None
+    subject_display_name: str | None
     predicate: str | None
+    epistemic_status: EpistemicStatus | None
+    source_sender_id: str
+    source_sender_display_name: str
+    source_sender_type: str
+    source_input_source: str
     value: Any = None
     expires_at: datetime | None = None
     evidence_excerpt: str | None = None
+
+
+@dataclass(frozen=True)
+class AllowedSubject:
+    subject_id: str
+    subject_kind: SubjectKind
+    subject_display_name: str
+
+    def __post_init__(self):
+        if not isinstance(self.subject_id, str) or not 1 <= len(self.subject_id) <= 128:
+            raise ValueError("Allowed subject ID must contain 1-128 characters")
+        if not isinstance(self.subject_display_name, str) or not self.subject_display_name:
+            raise ValueError("Allowed subject display name must not be empty")
+        if len(self.subject_display_name) > 128 or not self.subject_display_name.isprintable():
+            raise ValueError("Allowed subject display name is invalid")

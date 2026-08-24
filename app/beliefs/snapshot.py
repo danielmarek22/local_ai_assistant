@@ -22,15 +22,22 @@ class BeliefSnapshotService:
         )
         effective = {}
         for belief in beliefs:
-            key = (belief.subject, belief.predicate)
+            key = (
+                belief.subject_id,
+                belief.predicate,
+                belief.epistemic_status,
+                belief.source_sender_id,
+            )
             current = effective.get(key)
             if current is None or belief.visibility.value == "SESSION_CURRENT":
                 effective[key] = belief
         return sorted(
             effective.values(),
             key=lambda belief: (
-                belief.subject,
+                belief.subject_id,
                 belief.predicate,
+                belief.epistemic_status.value,
+                belief.source_sender_id,
                 belief.visibility.value,
                 belief.belief_id,
             ),
@@ -66,11 +73,16 @@ class BeliefSnapshotService:
             beliefs,
             key=lambda belief: (
                 -sum(
-                    term in f"{belief.subject} {belief.predicate} {belief.value}".lower()
+                    term in (
+                        f"{belief.subject_id} {belief.subject_display_name} "
+                        f"{belief.source_sender_display_name} {belief.predicate} {belief.value}"
+                    ).lower()
                     for term in terms
                 ),
-                belief.subject,
+                belief.subject_id,
                 belief.predicate,
+                belief.epistemic_status.value,
+                belief.source_sender_id,
                 belief.belief_id,
             ),
         )
