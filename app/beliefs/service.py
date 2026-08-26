@@ -20,16 +20,22 @@ from app.beliefs.models import (
     UpdateCandidate,
     VisibilityPolicy,
 )
-from app.beliefs.vocabulary import normalize_predicate
+from app.beliefs.vocabulary import normalize_predicate, validate_predicate_value_semantics
+from app.beliefs.subjects import resolve_subject_reference
 from app.beliefs.version import CONVERSATIONAL_BELIEF_EXTRACTOR_VERSION
 
 
 APPLICATION_OWNED_EXPIRY_POLICIES = {
     "current_activity": ExpiryPolicy.END_OF_LOCAL_DAY,
 }
+# Applied only while processing new assertions; existing session-scoped rows are not migrated.
+APPLICATION_OWNED_STABLE_PREFERENCE_PREDICATES = frozenset({
+    "preferred_beverage",
+    "favorite_color",
+    "favorite_season",
+})
 
 logger = logging.getLogger("belief_update_service")
-
 
 class BeliefUpdateService:
     def __init__(
@@ -98,6 +104,8 @@ class BeliefUpdateService:
         assertions_by_key: dict[tuple, BeliefMutation] = {}
         assertions_by_property: dict[tuple, BeliefMutation] = {}
         invalidations_by_id: dict[str, BeliefMutation] = {}
+        seen_invalidation_ids: set[str] = set()
+        unauthorized_cross_source_invalidations: dict[str, object] = {}
 
         for candidate in candidates.operations:
             if candidate.operation == CandidateOperation.IGNORE:
@@ -117,12 +125,30 @@ class BeliefUpdateService:
                     if subject.subject_id == source_sender_id
                     else EpistemicStatus.ATTRIBUTED_CLAIM
                 )
+                if isinstance(candidate, AssertionCandidate):
+                    resolved_subject = resolve_subject_reference(
+                        candidate.subject_reference,
+                        user_text,
+                        list(allowed_by_id.values()),
+                        source_sender_id,
+                    )
+                    if resolved_subject.subject_id != subject.subject_id:
+                        raise ValueError(
+                            "Resolved subject_reference does not match internal subject_id"
+                        )
                 predicate = normalize_predicate(candidate.predicate)
+                validate_predicate_value_semantics(predicate, candidate.value)
+                visibility, expiry_policy = self._resolve_assertion_policy(
+                    predicate,
+                    candidate.visibility,
+                    candidate.expiry_policy,
+                    candidate.explicit_until,
+                )
                 scope_session = (
-                    session_id if candidate.visibility == VisibilityPolicy.SESSION_CURRENT else ""
+                    session_id if visibility == VisibilityPolicy.SESSION_CURRENT else ""
                 )
                 key = (
-                    candidate.visibility,
+                    visibility,
                     scope_session,
                     subject.subject_id,
                     predicate,
@@ -141,7 +167,7 @@ class BeliefUpdateService:
                         else CandidateOperation.CREATE
                     ),
                     belief_id=None,
-                    visibility=candidate.visibility,
+                    visibility=visibility,
                     source_session_id=session_id,
                     subject_id=subject.subject_id,
                     subject_kind=subject.subject_kind,
@@ -155,9 +181,9 @@ class BeliefUpdateService:
                     value=candidate.value,
                     expires_at=self._resolve_assertion_expiry(
                         predicate,
-                        candidate.expiry_policy,
+                        expiry_policy,
                         candidate.explicit_until,
-                        candidate.visibility,
+                        visibility,
                         observed_at,
                         timezone_name,
                     ),
@@ -204,11 +230,11 @@ class BeliefUpdateService:
             target = existing_by_id.get(candidate.target_belief_id)
             if target is None or target.owner_agent_id != owner_agent_id:
                 raise ValueError("Belief target was not supplied as an active belief")
-            if target.source_sender_id != source_sender_id:
-                raise ValueError("Belief target belongs to a different evidence source")
+            if getattr(target, "status", "active") != "active":
+                raise ValueError("Belief target was not supplied as an active belief")
             expected_status = (
                 EpistemicStatus.SELF_REPORT
-                if target.subject_id == source_sender_id
+                if target.subject_id == target.source_sender_id
                 else EpistemicStatus.ATTRIBUTED_CLAIM
             )
             if target.epistemic_status != expected_status:
@@ -220,7 +246,10 @@ class BeliefUpdateService:
                 raise ValueError("Session-scoped belief belongs to a different session")
 
             if isinstance(candidate, UpdateCandidate):
+                if target.source_sender_id != source_sender_id:
+                    raise ValueError("Belief target belongs to a different evidence source")
                 self._validate_value(candidate.value)
+                validate_predicate_value_semantics(target.predicate, candidate.value)
                 resolved_subject = allowed_by_id[target.subject_id]
                 mutations.append(BeliefMutation(
                     operation=CandidateOperation.UPDATE,
@@ -250,7 +279,7 @@ class BeliefUpdateService:
                 continue
 
             if isinstance(candidate, InvalidateCandidate):
-                if target.belief_id in invalidations_by_id:
+                if target.belief_id in seen_invalidation_ids:
                     logger.debug(
                         "Belief batch conflict category=DUPLICATE_INVALIDATION "
                         "track_fingerprint=%s",
@@ -259,6 +288,10 @@ class BeliefUpdateService:
                     raise ValueError(
                         "Batch contains conflicting operations for the same belief track"
                     )
+                seen_invalidation_ids.add(target.belief_id)
+                if target.source_sender_id != source_sender_id:
+                    unauthorized_cross_source_invalidations[target.belief_id] = target
+                    continue
                 mutation = BeliefMutation(
                     operation=CandidateOperation.INVALIDATE,
                     belief_id=target.belief_id,
@@ -277,6 +310,27 @@ class BeliefUpdateService:
                 )
                 invalidations_by_id[target.belief_id] = mutation
                 mutations.append(mutation)
+
+        for belief_id, target in unauthorized_cross_source_invalidations.items():
+            normalized_target_predicate = normalize_predicate(target.predicate)
+            matching_assertions = [
+                assertion
+                for assertion in assertions_by_key.values()
+                if assertion.subject_id == target.subject_id
+                and assertion.predicate == normalized_target_predicate
+                and assertion.source_sender_id == source_sender_id
+            ]
+            if len(matching_assertions) != 1:
+                raise ValueError("Belief target belongs to a different evidence source")
+            logger.debug(
+                "Belief batch normalization "
+                "category=UNAUTHORIZED_CROSS_SOURCE_INVALIDATION_DROPPED "
+                "assertion_track_fingerprint=%s target_track_fingerprint=%s",
+                self._logical_key_fingerprint(
+                    self._logical_key_for_mutation(matching_assertions[0])
+                ),
+                self._logical_key_fingerprint(self._logical_key_for_belief(target)),
+            )
 
         invalidated_keys = {
             belief_id: self._logical_key_for_belief(existing_by_id[belief_id])
@@ -350,6 +404,22 @@ class BeliefUpdateService:
         )
 
     @staticmethod
+    def _resolve_assertion_policy(
+        predicate: str,
+        requested_visibility: VisibilityPolicy,
+        requested_expiry: ExpiryPolicy,
+        explicit_until: str | None,
+    ) -> tuple[VisibilityPolicy, ExpiryPolicy]:
+        """Apply bounded application-owned policy for canonical stable preferences."""
+        if predicate not in APPLICATION_OWNED_STABLE_PREFERENCE_PREDICATES:
+            return requested_visibility, requested_expiry
+        if explicit_until is not None:
+            raise ValueError(
+                f"{predicate} uses application-owned NO_AUTOMATIC_EXPIRY"
+            )
+        return VisibilityPolicy.AGENT_CURRENT, ExpiryPolicy.NO_AUTOMATIC_EXPIRY
+
+    @staticmethod
     def _logical_key_for_belief(belief) -> tuple:
         return (
             belief.visibility,
@@ -362,6 +432,21 @@ class BeliefUpdateService:
             belief.predicate,
             belief.epistemic_status,
             belief.source_sender_id,
+        )
+
+    @staticmethod
+    def _logical_key_for_mutation(mutation: BeliefMutation) -> tuple:
+        return (
+            mutation.visibility,
+            (
+                mutation.source_session_id
+                if mutation.visibility == VisibilityPolicy.SESSION_CURRENT
+                else ""
+            ),
+            mutation.subject_id,
+            mutation.predicate,
+            mutation.epistemic_status,
+            mutation.source_sender_id,
         )
 
     @staticmethod

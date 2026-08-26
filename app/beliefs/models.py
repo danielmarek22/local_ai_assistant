@@ -79,6 +79,7 @@ class AssertionCandidate(_StrictCandidate):
     expiry_policy: ExpiryPolicy
     explicit_until: str | None = Field(default=None, max_length=64)
     evidence_excerpt: str | None = Field(default=None, min_length=1, max_length=500)
+    subject_reference: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class UpdateCandidate(_StrictCandidate):
@@ -171,6 +172,8 @@ class AllowedSubject:
     subject_id: str
     subject_kind: SubjectKind
     subject_display_name: str
+    subject_reference_labels: tuple[str, ...] = ()
+    subject_description: str = ""
 
     def __post_init__(self):
         if not isinstance(self.subject_id, str) or not 1 <= len(self.subject_id) <= 128:
@@ -179,3 +182,18 @@ class AllowedSubject:
             raise ValueError("Allowed subject display name must not be empty")
         if len(self.subject_display_name) > 128 or not self.subject_display_name.isprintable():
             raise ValueError("Allowed subject display name is invalid")
+        labels = self.subject_reference_labels or (self.subject_display_name,)
+        if len(labels) > 8 or any(
+            not isinstance(label, str)
+            or not label
+            or len(label) > 128
+            or not label.isprintable()
+            for label in labels
+        ):
+            raise ValueError("Allowed subject reference labels are invalid")
+        if (
+            not isinstance(self.subject_description, str)
+            or len(self.subject_description) > 256
+            or not self.subject_description.isprintable()
+        ):
+            raise ValueError("Allowed subject description is invalid")

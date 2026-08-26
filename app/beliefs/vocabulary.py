@@ -11,6 +11,7 @@ CANONICAL_PREDICATES: dict[str, str] = {
     "current_work_context": "The user's current work mode or work context.",
     "current_environment_status": "A revisable current state of the user's environment.",
     "current_conversation_context": "State explicitly limited to this conversation or session.",
+    "preferred_beverage": "The participant's stable preferred beverage.",
 }
 
 # These aliases are normalization guardrails, not an ontology or inference system.
@@ -26,6 +27,13 @@ PREDICATE_ALIASES: dict[str, str] = {
     "work_context": "current_work_context",
     "environment_status": "current_environment_status",
     "conversation_context": "current_conversation_context",
+    "beverage_preference": "preferred_beverage",
+    "drink_preference": "preferred_beverage",
+    "favorite_beverage": "preferred_beverage",
+    "favorite_drink": "preferred_beverage",
+    "preferred_drink": "preferred_beverage",
+    "preferred_tea": "preferred_beverage",
+    "preferred_coffee": "preferred_beverage",
 }
 
 _PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -39,3 +47,11 @@ def normalize_predicate(value: str) -> str:
             "Belief predicates must use 2-64 lowercase snake_case characters"
         )
     return normalized
+
+
+def validate_predicate_value_semantics(predicate: str, value) -> None:
+    """Reject bounded, known value-bearing preference predicate shapes."""
+    if isinstance(value, bool) and value and re.fullmatch(r"(?:prefers|likes)_[a-z0-9_]+", predicate):
+        raise ValueError(
+            "Preference assertions must use a stable property predicate and place the item in value"
+        )

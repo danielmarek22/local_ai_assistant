@@ -4,7 +4,13 @@ import logging
 import time
 
 from app.beliefs.models import AllowedSubject
-from app.beliefs.subjects import default_allowed_subjects, participant_subject, subject_from_belief
+from app.beliefs.subjects import (
+    DEFAULT_ENVIRONMENT_SUBJECT,
+    WORLD_SUBJECT,
+    default_allowed_subjects,
+    participant_subject,
+    subject_from_belief,
+)
 from app.core.conversation import InputSource, SenderType
 from app.logging import trace_event
 
@@ -21,12 +27,14 @@ class ConversationalBeliefObserver:
         snapshot_service,
         history_store,
         max_context_messages: int = 2,
+        max_allowed_subjects: int = 32,
     ):
         self.extractor = extractor
         self.update_service = update_service
         self.snapshot_service = snapshot_service
         self.history_store = history_store
         self.max_context_messages = max(0, int(max_context_messages))
+        self.max_allowed_subjects = max(4, int(max_allowed_subjects))
 
     def observe(self, completed_turn) -> None:
         if not completed_turn.user_text.strip():
@@ -65,7 +73,21 @@ class ConversationalBeliefObserver:
                 for row in context
                 if row["role"] in {"user", "assistant"}
             ]
-            allowed_subjects = self._allowed_subjects(completed_turn, context, existing)
+            participant_rows = (
+                self.history_store.get_participant_senders_before(
+                    completed_turn.session_id,
+                    completed_turn.user_message_id,
+                    limit=self.max_allowed_subjects,
+                )
+                if hasattr(self.history_store, "get_participant_senders_before")
+                else context
+            )
+            allowed_subjects = self._allowed_subjects(
+                completed_turn,
+                participant_rows,
+                existing,
+                max_subjects=self.max_allowed_subjects,
+            )
             extraction_started = time.perf_counter()
             extractor_called = True
             candidates = self.extractor.extract(
@@ -161,14 +183,20 @@ class ConversationalBeliefObserver:
         )
 
     @staticmethod
-    def _allowed_subjects(completed_turn, context, existing) -> list[AllowedSubject]:
-        ordered = default_allowed_subjects(
+    def _allowed_subjects(
+        completed_turn,
+        participant_rows,
+        existing,
+        *,
+        max_subjects=32,
+    ) -> list[AllowedSubject]:
+        defaults = default_allowed_subjects(
             completed_turn.sender_id,
             completed_turn.sender_display_name,
             completed_turn.sender_type.value,
         )
-        ordered.extend(subject_from_belief(belief) for belief in existing)
-        for item in context:
+        ordered = [defaults[0]]
+        for item in participant_rows:
             if item.get("sender_type") not in {
                 SenderType.HUMAN.value,
                 SenderType.EXTERNAL_AGENT.value,
@@ -182,6 +210,8 @@ class ConversationalBeliefObserver:
                     display_name,
                     item["sender_type"],
                 ))
+        ordered.extend(subject_from_belief(belief) for belief in existing)
+        ordered.extend(defaults[1:])
         resolved = {}
         for subject in ordered:
             previous = resolved.get(subject.subject_id)
@@ -189,4 +219,15 @@ class ConversationalBeliefObserver:
                 raise ValueError("Ambiguous authoritative subject metadata")
             if previous is None:
                 resolved[subject.subject_id] = subject
-        return list(resolved.values())
+        reserved_ids = {WORLD_SUBJECT.subject_id, DEFAULT_ENVIRONMENT_SUBJECT.subject_id}
+        non_reserved = [
+            subject for subject in resolved.values()
+            if subject.subject_id not in reserved_ids
+        ]
+        reserved = [
+            resolved[subject_id]
+            for subject_id in (WORLD_SUBJECT.subject_id, DEFAULT_ENVIRONMENT_SUBJECT.subject_id)
+            if subject_id in resolved
+        ]
+        participant_limit = max(0, int(max_subjects) - len(reserved))
+        return non_reserved[:participant_limit] + reserved

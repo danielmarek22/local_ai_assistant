@@ -516,6 +516,37 @@ class ChatHistoryStore:
             })
         return rows
 
+    def get_participant_senders_before(
+        self,
+        session_id: str,
+        message_id: int,
+        *,
+        limit: int = 32,
+    ) -> list[dict]:
+        """Return the latest authoritative row for each prior participant sender."""
+        if limit <= 0:
+            return []
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            WITH latest AS (
+                SELECT sender_id, MAX(id) AS latest_id
+                FROM chat_history
+                WHERE session_id = ? AND id < ?
+                  AND sender_type IN ('human', 'external_agent')
+                  AND sender_id IS NOT NULL AND sender_id != ''
+                GROUP BY sender_id
+            )
+            SELECT ch.sender_id, ch.sender_display_name, ch.sender_type, latest.latest_id
+            FROM latest
+            JOIN chat_history ch ON ch.id = latest.latest_id
+            ORDER BY latest.latest_id DESC, ch.sender_id ASC
+            LIMIT ?
+            """,
+            (session_id, message_id, int(limit)),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_all(self, session_id: str):
         cursor = self.db.conn.cursor()
         cursor.execute(

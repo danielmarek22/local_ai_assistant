@@ -275,6 +275,51 @@ class ChatHistoryStoreTests(unittest.TestCase):
             "group-summary", "Alice said she is in Warsaw.", 1
         ))
 
+    def test_group_participant_catalogue_uses_authoritative_history(self):
+        self.store.ensure_session("group-catalogue", SessionKind.MANUAL_GROUP)
+        alice = SenderAttribution(
+            "relay:human:alice", "Alice", SenderType.HUMAN,
+            InputSource.MANUAL_RELAY,
+        )
+        chatgpt = SenderAttribution(
+            "relay:external_agent:chatgpt", "ChatGPT", SenderType.EXTERNAL_AGENT,
+            InputSource.MANUAL_RELAY,
+        )
+        first_alice_id = self.store.add(
+            "group-catalogue", "user", "I prefere green tea", sender=alice,
+        )
+        self.store.add("group-catalogue", "assistant", "Acknowledged")
+        self.store.add(
+            "group-catalogue", "user", "I prefere espresso", sender=chatgpt,
+        )
+        latest_alice_id = self.store.add(
+            "group-catalogue", "user", "Still here", sender=SenderAttribution(
+                alice.sender_id, "Alice Cooper", SenderType.HUMAN,
+                InputSource.MANUAL_RELAY,
+            ),
+        )
+        current_id = self.store.add(
+            "group-catalogue", "user", "Alice prefers espresso", sender=chatgpt,
+        )
+
+        participants = self.store.get_participant_senders_before(
+            "group-catalogue", current_id,
+        )
+
+        self.assertEqual(
+            [item["sender_id"] for item in participants],
+            [alice.sender_id, chatgpt.sender_id],
+        )
+        self.assertEqual(participants[0]["sender_display_name"], "Alice Cooper")
+        self.assertEqual(participants[0]["latest_id"], latest_alice_id)
+        self.assertNotEqual(participants[0]["latest_id"], first_alice_id)
+        self.assertEqual(
+            len(self.store.get_participant_senders_before(
+                "group-catalogue", current_id, limit=1,
+            )),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
