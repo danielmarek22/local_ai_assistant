@@ -38,6 +38,12 @@ a general ontology.
 Conversational LLM extraction is separately opt-in through
 `beliefs.extraction_enabled`; it defaults to false.
 
+The read-only Knowledge inspector is independent of conversational extraction. When
+storage/context support is enabled, stored beliefs remain inspectable and injectable
+even if `beliefs.extraction_enabled` is false. Effective inspection calls the same
+snapshot provider used for turns; all-record inspection is a separate owner-scoped
+read projection that includes expired and invalidated rows.
+
 Deleting a session removes only its `SESSION_CURRENT` beliefs. `AGENT_CURRENT`
 beliefs remain available even when their latest source session or source message has
 been deleted. Removing durable global beliefs requires a separate explicit forgetting

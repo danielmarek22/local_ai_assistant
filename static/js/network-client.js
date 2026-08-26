@@ -1,5 +1,15 @@
 import { CONFIG } from './config.js';
 
+export function buildKnowledgeBeliefsUrl(filters = {}) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+        if (value === undefined || value === null || value === '') continue;
+        params.set(key, String(value));
+    }
+    const query = params.toString();
+    return `/api/knowledge/beliefs${query ? `?${query}` : ''}`;
+}
+
 export class NetworkClient {
     constructor(handlers) {
         this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onThinkingChunk, onChunk, onAudio, onEnd
@@ -261,6 +271,38 @@ export class NetworkClient {
             throw new Error(`Failed to delete session (${response.status})`);
         }
 
+        return response.json();
+    }
+
+    async getEffectiveBeliefs(sessionId) {
+        const params = new URLSearchParams({ session_id: sessionId });
+        return this._getJson(`/api/knowledge/beliefs/effective?${params.toString()}`);
+    }
+
+    async listBeliefs(filters = {}) {
+        return this._getJson(buildKnowledgeBeliefsUrl(filters));
+    }
+
+    async getBelief(beliefId) {
+        return this._getJson(`/api/knowledge/beliefs/${encodeURIComponent(beliefId)}`);
+    }
+
+    async getBeliefContext(sessionId) {
+        const params = new URLSearchParams({ session_id: sessionId });
+        return this._getJson(`/api/knowledge/belief-context?${params.toString()}`);
+    }
+
+    async getSavedMemories() {
+        return this._getJson('/api/knowledge/memories');
+    }
+
+    async _getJson(url) {
+        const response = await fetch(url);
+        if (!response.ok) {
+            const error = new Error(`Request failed (${response.status})`);
+            error.status = response.status;
+            throw error;
+        }
         return response.json();
     }
 

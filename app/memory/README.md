@@ -24,6 +24,8 @@ Memory should be treated as an *active system*, not just a database.
   - stores long-term fact-like memory in SQLite
   - stores embeddings in Chroma's `semantic_memory`
   - retrieves relevant facts semantically from Chroma
+  - exposes a separate SQLite-only, read-only inspection list for the Knowledge UI;
+    this path does not query Chroma or update access timestamps
 - `SummaryStore`
   - stores one summary per conversation session in SQLite
 - `SimpleMemoryPolicy`
@@ -57,3 +59,7 @@ Deleting a session removes:
 - attachment rows from SQLite
 - uploaded image files on disk
 - episodic vector entries for both text turns and image summaries
+
+Long-term structured records in the global `memory` table are not session-owned and
+therefore survive chat-session deletion. Their current schema has no source session or
+message provenance.

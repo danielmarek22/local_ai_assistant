@@ -125,6 +125,7 @@ class BeliefRecord:
     belief_id: str
     owner_agent_id: str
     visibility: VisibilityPolicy
+    scope_session_id: str
     source_session_id: str
     subject_id: str
     subject_kind: SubjectKind

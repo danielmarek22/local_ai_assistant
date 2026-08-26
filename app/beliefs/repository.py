@@ -112,6 +112,80 @@ class BeliefRepository:
             ).fetchone()
         return self._record(row) if row else None
 
+    def list_for_inspection(
+        self,
+        owner_agent_id: str,
+        *,
+        subject_id: str | None = None,
+        source_sender_id: str | None = None,
+        predicate: str | None = None,
+        epistemic_status: str | None = None,
+        visibility: str | None = None,
+        record_status: str | None = None,
+        scope_session_id: str | None = None,
+        source_session_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        now: datetime | None = None,
+    ) -> tuple[list[dict], int]:
+        """Return a bounded owner-scoped inspection page without mutating beliefs."""
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        now_iso = self._iso(now)
+        clauses = ["owner_agent_id = ?"]
+        params: list[object] = [owner_agent_id]
+        exact_filters = {
+            "subject_id": subject_id,
+            "source_sender_id": source_sender_id,
+            "predicate": predicate,
+            "epistemic_status": epistemic_status,
+            "visibility": visibility,
+            "scope_session_id": scope_session_id,
+            "source_session_id": source_session_id,
+        }
+        for column, value in exact_filters.items():
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+
+        status_expression = (
+            "CASE WHEN status = 'invalidated' THEN 'invalidated' "
+            "WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at <= ? "
+            "THEN 'expired' ELSE 'active' END"
+        )
+        if record_status is not None:
+            clauses.append(f"({status_expression}) = ?")
+            params.extend([now_iso, record_status])
+
+        where_sql = " AND ".join(clauses)
+        with self._connection() as conn:
+            total = int(conn.execute(
+                f"SELECT COUNT(*) FROM beliefs WHERE {where_sql}",
+                params,
+            ).fetchone()[0])
+            rows = conn.execute(
+                f"""
+                SELECT * FROM beliefs
+                WHERE {where_sql}
+                ORDER BY updated_at DESC, belief_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, int(limit), int(offset)],
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
+    def get_for_inspection(
+        self,
+        owner_agent_id: str,
+        belief_id: str,
+    ) -> dict | None:
+        """Return one owner-scoped raw row for safe DTO construction."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM beliefs WHERE owner_agent_id = ? AND belief_id = ?",
+                (owner_agent_id, belief_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def apply_mutations(
         self,
         *,
@@ -388,6 +462,7 @@ class BeliefRepository:
             belief_id=row["belief_id"],
             owner_agent_id=row["owner_agent_id"],
             visibility=VisibilityPolicy(row["visibility"]),
+            scope_session_id=row["scope_session_id"],
             source_session_id=row["source_session_id"],
             subject_id=row["subject_id"],
             subject_kind=SubjectKind(row["subject_kind"]),

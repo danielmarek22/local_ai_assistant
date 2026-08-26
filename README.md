@@ -47,6 +47,11 @@ In practice, this gives the project two views of memory:
 - a structured local database for browsing, summaries, and session management
 - a vector search layer for semantic retrieval during turns
 
+The browser also includes a read-only Knowledge tab for inspecting effective beliefs,
+all stored belief records, the exact belief section inserted into Astra's context, and
+global structured memories saved through the memory tool. Summary and vector-search
+inspection remain future work.
+
 ## Entry Points
 
 - `main.py` – application entry point

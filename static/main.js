@@ -2,6 +2,7 @@ import { AudioManager } from './js/audio-manager.js';
 import { AvatarManager } from './js/avatar-manager.js';
 import { UIManager } from './js/ui-manager.js';
 import { NetworkClient } from './js/network-client.js';
+import { KnowledgeInspector } from './js/knowledge-inspector.js';
 import { CONFIG } from './js/config.js';
 
 const audioManager = new AudioManager();
@@ -104,6 +105,7 @@ const handlers = {
             localAssistantDisplayName,
         });
         uiManager.setSessionScope(serverInstanceId, sessionId);
+        void knowledgeInspector.setActiveSession(sessionId);
         avatarManager.setGestureCatalog(gestureCatalog || {});
         persistSessionContext();
     },
@@ -160,6 +162,7 @@ const handlers = {
 };
 
 const client = new NetworkClient(handlers);
+const knowledgeInspector = new KnowledgeInspector(client);
 
 function renderAutonomyStatus(status) {
     const enabled = Boolean(status?.enabled);

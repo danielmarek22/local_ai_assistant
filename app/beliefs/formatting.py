@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BeliefContextPreview:
+    beliefs: tuple
+    formatted_body: str | None
 
 
 class BeliefSnapshotFormatter:
@@ -55,8 +62,14 @@ class BeliefContextProvider:
         self.formatter = formatter
 
     def context_for_turn(self, session_id: str) -> str | None:
+        return self.preview_for_turn(session_id).formatted_body
+
+    def preview_for_turn(self, session_id: str) -> BeliefContextPreview:
         beliefs = self.snapshot_service.active_for_turn(
             self.owner_agent_id,
             session_id,
         )
-        return self.formatter.format(beliefs)
+        return BeliefContextPreview(
+            beliefs=tuple(beliefs),
+            formatted_body=self.formatter.format(beliefs),
+        )
