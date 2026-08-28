@@ -31,8 +31,21 @@ class ToolExecutor:
     def get_native_tools(
         self,
         allowed_capabilities: set[CapabilityId] | None = None,
+        *,
+        session_id: str = "",
+        user_text: str = "",
+        authoritative_turn=None,
+        prepared_belief_turn=None,
     ) -> list[dict]:
-        return self.registry.get_native_tools(allowed_capabilities)
+        return self.registry.get_native_tools(
+            allowed_capabilities,
+            InvocationContext(
+                session_id=session_id,
+                user_text=user_text,
+                authoritative_turn=authoritative_turn,
+                prepared_belief_turn=prepared_belief_turn,
+            ),
+        )
 
     def collect_context(self, session_id: str, user_text: str, max_chars: int) -> str | None:
         return self.registry.collect_context(
@@ -53,6 +66,8 @@ class ToolExecutor:
         root_event_id: str | None = None,
         causation_id: str | None = None,
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
+        authoritative_turn=None,
+        prepared_belief_turn=None,
     ) -> Generator[AssistantStateEvent, None, ToolResult]:
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         capability = str(call.capability)
@@ -96,6 +111,8 @@ class ToolExecutor:
                 root_event_id=root_event_id,
                 causation_id=causation_id,
                 notification_callback=notification_callback,
+                authoritative_turn=authoritative_turn,
+                prepared_belief_turn=prepared_belief_turn,
             ),
         )
         if result.status == ToolResultStatus.PENDING and result.operation_id != invocation_id:

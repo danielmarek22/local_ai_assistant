@@ -16,6 +16,7 @@ from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
 from app.integrations import (
+    BeliefIntegration,
     IntegrationRegistry,
     MemoryIntegration,
     MindcraftClient,
@@ -43,6 +44,8 @@ from app.beliefs import (
     BeliefSnapshotService,
     BeliefUpdateService,
     ConversationalBeliefObserver,
+    BeliefTurnPreparer,
+    REACT_TOOL_BELIEF_VERSION,
 )
 
 logger = logging.getLogger("orchestrator_factory")
@@ -72,10 +75,19 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
     return options
 
 
-def _build_belief_components(*, config, llm, db, history_store, agent_id: str):
-    """Build storage/context independently from the opt-in extraction observer."""
+def _build_belief_components(
+    *, config, llm, db, history_store, agent_id: str,
+    native_late_routing_enabled: bool = True,
+):
+    """Build storage/context and exactly one configured conversational producer."""
     if not config.beliefs.get("enabled", True):
-        return None, None, []
+        return None, None, [], None, None
+
+    processing_mode = config.beliefs.get("processing_mode", "disabled")
+    if processing_mode == "react_tool" and not native_late_routing_enabled:
+        raise ValueError(
+            "beliefs.processing_mode=react_tool requires native late-routing/tool infrastructure"
+        )
 
     local_human = getattr(config, "local_human", None) or {
         "id": "local-human", "display_name": "You"
@@ -96,8 +108,13 @@ def _build_belief_components(*, config, llm, db, history_store, agent_id: str):
             max_chars=config.beliefs["max_snapshot_chars"],
         ),
     )
+    preparer = BeliefTurnPreparer(
+        snapshot_service=snapshot_service,
+        history_store=history_store,
+    )
     observers = []
-    if config.beliefs.get("extraction_enabled", False):
+    belief_integration = None
+    if processing_mode == "observer":
         extractor = BeliefCandidateExtractor(
             llm,
             max_candidates=config.beliefs["max_candidates"],
@@ -113,8 +130,20 @@ def _build_belief_components(*, config, llm, db, history_store, agent_id: str):
             ),
             snapshot_service=snapshot_service,
             history_store=history_store,
+            preparer=preparer,
         ))
-    return repository, context_provider, observers
+    elif processing_mode == "react_tool":
+        belief_integration = BeliefIntegration(
+            update_service=BeliefUpdateService(
+                repository,
+                extractor_version=REACT_TOOL_BELIEF_VERSION,
+                max_expiry_days=config.beliefs["max_expiry_days"],
+            ),
+            max_candidates=config.beliefs["max_candidates"],
+        )
+    elif processing_mode != "disabled":
+        raise ValueError(f"Unsupported belief processing mode: {processing_mode}")
+    return repository, context_provider, observers, belief_integration, preparer
 
 
 def build_orchestrator() -> Orchestrator:
@@ -229,13 +258,21 @@ def build_orchestrator() -> Orchestrator:
         memory_store=memory_store,
         memory_policy=memory_policy,
     )
-    belief_repository, belief_context_provider, completion_observers = (
+    native_late_routing_enabled = True
+    (
+        belief_repository,
+        belief_context_provider,
+        completion_observers,
+        belief_integration,
+        belief_turn_preparer,
+    ) = (
         _build_belief_components(
             config=config,
             llm=llm,
             db=db,
             history_store=history_store,
             agent_id=agent_id,
+            native_late_routing_enabled=native_late_routing_enabled,
         )
     )
     turn_finalizer = TurnFinalizer(
@@ -250,6 +287,9 @@ def build_orchestrator() -> Orchestrator:
     # Integrations
     # --------------------------------------------------
     integrations = [RuntimeIntegration(), VisionIntegration()]
+    if belief_integration is not None:
+        integrations.append(belief_integration)
+        logger.info("Belief ReAct integration registered")
     web_cfg = config.integrations.get("web", {})
 
     if web_cfg.get("enabled", False):
@@ -360,7 +400,7 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
-        late_routing_enabled=True,
+        late_routing_enabled=native_late_routing_enabled,
         integration_context_limit=config.context["integration_context_limit"],
         agent_id=agent_id,
         timezone_name=str(config.beliefs.get("timezone", "UTC")),
@@ -368,6 +408,12 @@ def build_orchestrator() -> Orchestrator:
         local_human_id=config.local_human["id"],
         local_human_name=config.local_human["display_name"],
         local_assistant_name=assistant_name,
+        belief_processing_mode=config.beliefs["processing_mode"],
+        belief_turn_preparer=(
+            belief_turn_preparer
+            if config.beliefs["processing_mode"] == "react_tool"
+            else None
+        ),
     )
     orchestrator.belief_repository = belief_repository
     orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))

@@ -2,7 +2,10 @@ import logging
 import time
 import os
 import json
+import inspect
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable, Optional
 
 from app.core.events import (
@@ -17,7 +20,7 @@ from app.core.assistant_state import AssistantState
 from app.core.stream_processor import StreamProcessor
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
-from app.core.turn_completion import CompletedUserTurn
+from app.core.turn_completion import AuthoritativeTurnContext
 from app.core.conversation import (
     InputSource,
     SenderAttribution,
@@ -25,6 +28,7 @@ from app.core.conversation import (
     SessionKind,
 )
 from app.logging import trace_event
+from app.llm.base import InferenceFailure
 from app.integrations import (
     CapabilityId,
     EventSpec,
@@ -44,6 +48,24 @@ from app.perception.keys import PerceptionKey
 logger = logging.getLogger("orchestrator")
 
 _DEFAULT_AVATAR_EXPRESSION = "neutral"
+_SAFE_EMPTY_RESPONSE_FALLBACK = "I'm sorry, I lost my train of thought. Could you repeat that?"
+_BELIEF_CAPABILITY = CapabilityId("beliefs", "update")
+
+
+@dataclass
+class _LateRoutingTurnState:
+    normal_think: object
+    phase: "_GenerationPhase"
+    belief_attempts: int = 0
+    belief_disabled: bool = False
+    tool_interactions: int = 0
+
+
+class _GenerationPhase(str, Enum):
+    INITIAL = "initial"
+    CONTINUATION = "continuation"
+    CORRECTION = "correction"
+    RECOVERY = "recovery"
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # FATAL errors only
 
@@ -67,6 +89,8 @@ class Orchestrator:
         local_human_id: str = "local-human",
         local_human_name: str = "You",
         local_assistant_name: str = "Astra",
+        belief_processing_mode: str = "disabled",
+        belief_turn_preparer=None,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -85,6 +109,8 @@ class Orchestrator:
         self.local_human_id = local_human_id
         self.local_human_name = local_human_name
         self.local_assistant_name = local_assistant_name
+        self.belief_processing_mode = belief_processing_mode
+        self.belief_turn_preparer = belief_turn_preparer
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -218,6 +244,19 @@ class Orchestrator:
                 sender=sender,
                 session_kind=session_kind,
             )
+            authoritative_turn = AuthoritativeTurnContext(
+                owner_agent_id=self.agent_id,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_text=turn_input.user_text,
+                observed_at=observed_at,
+                timezone_name=self.timezone_name,
+                sender_id=sender.sender_id,
+                sender_display_name=sender.sender_display_name,
+                sender_type=sender.sender_type,
+                input_source=sender.input_source,
+                session_kind=session_kind,
+            )
 
             integration_context = self._collect_integration_context(
                 session_id=session_id,
@@ -247,43 +286,55 @@ class Orchestrator:
                     think_override=turn_input.think_override,
                 )
             else:
+                prepared_belief_turn = None
+                if (
+                    self.belief_processing_mode == "react_tool"
+                    and self.belief_turn_preparer is not None
+                ):
+                    try:
+                        prepared_belief_turn = self.belief_turn_preparer.prepare(
+                            authoritative_turn
+                        )
+                    except ValueError:
+                        # Ineligible or ungroundable turns simply omit the capability.
+                        prepared_belief_turn = None
+                    except Exception:
+                        logger.exception(
+                            "[%s] Belief ReAct turn preparation failed; tool omitted",
+                            session_id,
+                        )
+                        prepared_belief_turn = None
                 response = yield from self._stream_late_routed_response(
                     session_id=session_id,
                     messages=messages,
                     user_text=turn_input.user_text,
                     tool_approval_callback=tool_approval_callback,
+                    authoritative_turn=authoritative_turn,
+                    prepared_belief_turn=prepared_belief_turn,
+                    initial_think_override=turn_input.think_override,
                 )
 
-            # Prevent History Poisoning by dropping empty responses
-            if response and response.strip():
-                self.history.add(session_id, "assistant", response)
-                trace_event(
-                    "orchestrator",
-                    "assistant_response",
-                    session_id=session_id,
-                    payload={"response": response},
+            # Never persist empty model output. A visible deterministic fallback is
+            # itself a valid assistant response and belongs in the conversation.
+            if not response or not response.strip():
+                logger.warning(
+                    "[%s] LLM returned empty response; using deterministic fallback.",
+                    session_id,
                 )
-                yield AssistantSpeechEvent(text=response, is_final=True)
-            else:
-                logger.warning("[%s] LLM returned empty response. Dropping to prevent history poisoning.", session_id)
-                fallback = "I'm sorry, I lost my train of thought. Could you repeat that?"
-                yield AssistantSpeechEvent(text=fallback, is_final=True)
+                response = _SAFE_EMPTY_RESPONSE_FALLBACK
+            self.history.add(session_id, "assistant", response)
+            trace_event(
+                "orchestrator",
+                "assistant_response",
+                session_id=session_id,
+                payload={"response": response},
+            )
+            yield AssistantSpeechEvent(text=response, is_final=True)
 
             # 6. Post-processing (summarization)
             self.turn_finalizer.finalize(
                 session_id,
-                completed_turn=CompletedUserTurn(
-                    owner_agent_id=self.agent_id,
-                    session_id=session_id,
-                    user_message_id=user_message_id,
-                    user_text=turn_input.user_text,
-                    observed_at=observed_at,
-                    timezone_name=self.timezone_name,
-                    sender_id=sender.sender_id,
-                    sender_display_name=sender.sender_display_name,
-                    sender_type=sender.sender_type,
-                    input_source=sender.input_source,
-                ),
+                completed_turn=authoritative_turn,
             )
 
             logger.info(
@@ -603,11 +654,24 @@ class Orchestrator:
             messages,
             (
                 "Internal late-routing protocol. Evaluate the user's request and the available context. "
-                "If you need external information, a command, or a structured memory write, you MUST immediately use the "
-                "available tools provided in the native system schema. "
+                "If a tool action is warranted, use the available native tool schema immediately. "
                 "CRITICAL: Do NOT acknowledge the user, explain what you are going to do, or use conversational "
                 "filler (e.g., 'Let me check', 'One moment'). Output ONLY the native tool call. "
-                "If no tools are needed, answer the user directly."
+                "Issue at most one native tool call per inference step. If no tools are needed, "
+                "answer the user directly. Before producing the final response, consider whether "
+                "the current participant message warrants a tool action:\n"
+                "1. Use beliefs__update, when available, for current, revisable claims about what is true.\n"
+                "2. Use memory__write, when available, for events, decisions, instructions, or narrative "
+                "context worth recalling in a later conversation.\n"
+                "3. Normally do not store the same proposition through both tools.\n"
+                "4. Use neither for incidental chat, hypotheticals, generated conclusions, Astra's "
+                "opinions, or transient details without future value.\n"
+                "5. The user need not explicitly say 'remember this' when durable recall value is clear.\n"
+                "Examples: a stable beverage preference or revised current claim uses beliefs__update; "
+                "a temporary current activity usually uses beliefs__update only; a meaningful completed "
+                "shared event or durable project decision uses memory__write; incidental chat and Astra's "
+                "stylistic reactions use neither. Rarely, both are justified when a current revisable fact "
+                "and a distinct durable event narrative each have independent value."
             ),
         )
 
@@ -621,7 +685,14 @@ class Orchestrator:
         else:
             messages.insert(0, payload)
 
-    def _stream_response(self, session_id: str, messages, think_override=None):
+    def _stream_response(
+        self,
+        session_id: str,
+        messages,
+        think_override=None,
+        options_override: dict | None = None,
+        generation_deadline_s: float | None = None,
+    ):
         logger.info("[%s] Calling LLM (streaming)", session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
@@ -632,7 +703,21 @@ class Orchestrator:
         processor = StreamProcessor(allowed_animations=self.allowed_animations)
         thinking_splitter = ThinkingBlockSplitter()
 
-        for chunk in self.llm.stream_chat(messages, think_override=think_override):
+        stream_kwargs = {"think_override": think_override}
+        stream_parameters = inspect.signature(self.llm.stream_chat).parameters
+        accepts_stream_kwargs = any(
+            item.kind == inspect.Parameter.VAR_KEYWORD
+            for item in stream_parameters.values()
+        )
+        if options_override is not None and (
+            accepts_stream_kwargs or "options_override" in stream_parameters
+        ):
+            stream_kwargs["options_override"] = options_override
+        if generation_deadline_s is not None and (
+            accepts_stream_kwargs or "generation_deadline_s" in stream_parameters
+        ):
+            stream_kwargs["generation_deadline_s"] = generation_deadline_s
+        for chunk in self.llm.stream_chat(messages, **stream_kwargs):
             text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
             if not text_chunk:
                 continue
@@ -708,11 +793,36 @@ class Orchestrator:
         event: IntegrationEvent | None = None,
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         persist_tool_traces: bool = True,
+        authoritative_turn=None,
+        prepared_belief_turn=None,
+        initial_think_override=None,
     ):
         logger.info("[%s] Calling LLM with native late routing", session_id)
         
         # THE MISSING LINK: Inject the high-level instruction before the loop
         self._inject_late_routing_system_message(messages)
+        if prepared_belief_turn is not None:
+            try:
+                catalog_message = prepared_belief_turn.tool_catalog_message()
+            except Exception:
+                logger.exception(
+                    "[%s] Belief mutation catalog rendering failed; tool omitted",
+                    session_id,
+                )
+                prepared_belief_turn = None
+            else:
+                self._inject_hidden_system_message(messages, catalog_message)
+
+        resolver = getattr(self.llm, "resolve_think_value", None)
+        normal_think = (
+            resolver(initial_think_override)
+            if callable(resolver)
+            else (True if initial_think_override is None else initial_think_override)
+        )
+        turn_state = _LateRoutingTurnState(
+            normal_think=normal_think,
+            phase=_GenerationPhase.INITIAL,
+        )
 
         for step in range(1, self.max_late_routing_steps + 1):
             logger.info(
@@ -722,19 +832,62 @@ class Orchestrator:
                 self.max_late_routing_steps,
             )
 
-            result = yield from self._stream_late_routing_step(
-                session_id=session_id,
-                messages=messages,
-                user_text=user_text,
-                allowed_capabilities=allowed_capabilities,
-            )
+            inference_phase = turn_state.phase
+            try:
+                result = yield from self._stream_late_routing_step(
+                    session_id=session_id,
+                    messages=messages,
+                    user_text=user_text,
+                    allowed_capabilities=allowed_capabilities,
+                    authoritative_turn=authoritative_turn,
+                    prepared_belief_turn=prepared_belief_turn,
+                    excluded_capabilities=(
+                        frozenset({_BELIEF_CAPABILITY})
+                        if turn_state.belief_disabled
+                        else frozenset()
+                    ),
+                    inference_phase=inference_phase,
+                    normal_think=turn_state.normal_think,
+                    react_iteration=step,
+                )
+            except (InferenceFailure, TimeoutError, ValueError) as exc:
+                category = getattr(exc, "category", type(exc).__name__)
+                logger.warning(
+                    "[%s] Late-routing inference failed phase=%s category=%s; recovering tool-free",
+                    session_id, inference_phase.value, category,
+                )
+                trace_event(
+                    "orchestrator", "late_routing_inference_failure",
+                    session_id=session_id,
+                    payload={"phase": inference_phase.value, "category": category},
+                )
+                return (yield from self._force_tool_free_response(
+                    session_id=session_id,
+                    messages=messages,
+                    reason=f"{inference_phase.value}_failure",
+                    react_iteration=step,
+                ))
 
             if result["tool_call"] is None and result["tool_error"] is None:
-                return result["response"]
+                if result["response"] and result["response"].strip():
+                    return result["response"]
+                reason = (
+                    "empty_after_tool_interaction"
+                    if turn_state.tool_interactions
+                    else "initial_empty_no_tool_generation"
+                )
+                return (yield from self._force_tool_free_response(
+                    session_id=session_id,
+                    messages=messages,
+                    reason=reason,
+                ))
 
             tool_call = result["tool_call"]
             tool_name = result["tool_name"]
             tool_arguments = result["tool_arguments"]
+            is_belief_call = tool_name == str(_BELIEF_CAPABILITY)
+            if is_belief_call:
+                turn_state.belief_attempts += 1
             
             messages.append({
                 "role": "assistant",
@@ -747,7 +900,17 @@ class Orchestrator:
                 }]
             })
 
-            if result["tool_error"] is not None:
+            if is_belief_call and turn_state.belief_disabled:
+                tool_result = ToolResult.error(
+                    "Belief update was not applied. Do not call beliefs__update again for "
+                    "this participant message. Continue with a normal response.",
+                    diagnostics={
+                        "category": "attempt_limit",
+                        "error_code": "BELIEF_ATTEMPT_LIMIT",
+                        "repository_accessed": False,
+                    },
+                )
+            elif result["tool_error"] is not None:
                 tool_result = ToolResult.error(result["tool_error"])
             else:
                 tool_result = yield from self._execute_late_tool_call(
@@ -757,8 +920,56 @@ class Orchestrator:
                     tool_approval_callback=tool_approval_callback,
                     event=event,
                     notification_callback=notification_callback,
+                    authoritative_turn=authoritative_turn,
+                    prepared_belief_turn=prepared_belief_turn,
                 )
+            turn_state.tool_interactions += 1
             observation = f"[{tool_result.status.value}] {tool_result.content}"
+
+            if is_belief_call and tool_result.status.value == "error":
+                diagnostics = dict(tool_result.diagnostics or {})
+                trace_event(
+                    "orchestrator",
+                    "belief_update_rejected",
+                    session_id=session_id,
+                    payload={
+                        "capability": tool_name,
+                        "error_code": diagnostics.get("error_code", "UNCLASSIFIED_REJECTION"),
+                        "category": diagnostics.get("category", "unclassified_rejection"),
+                        "reason": tool_result.content[:700],
+                        "argument_summary": self._bounded_belief_argument_summary(tool_arguments),
+                        "repository_accessed": diagnostics.get("repository_accessed"),
+                        "react_attempt": turn_state.belief_attempts,
+                    },
+                )
+                logger.warning(
+                    "[%s] beliefs__update rejected attempt=%d code=%s category=%s "
+                    "repository_accessed=%s reason=%s arguments=%s",
+                    session_id,
+                    turn_state.belief_attempts,
+                    diagnostics.get("error_code", "UNCLASSIFIED_REJECTION"),
+                    diagnostics.get("category", "unclassified_rejection"),
+                    diagnostics.get("repository_accessed"),
+                    tool_result.content[:700],
+                    json.dumps(
+                        self._bounded_belief_argument_summary(tool_arguments),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                )
+                if turn_state.belief_attempts >= 2:
+                    turn_state.belief_disabled = True
+                    observation += (
+                        "\n\nBelief update was not applied. Do not call beliefs__update "
+                        "again for this participant message. Continue with a normal response."
+                    )
+                else:
+                    turn_state.phase = _GenerationPhase.CORRECTION
+            elif is_belief_call:
+                turn_state.belief_disabled = True
+                turn_state.phase = _GenerationPhase.CONTINUATION
+            else:
+                turn_state.phase = _GenerationPhase.CONTINUATION
 
             safe_observation = observation[:1024] + ("..." if len(observation) > 1024 else "")
             if persist_tool_traces:
@@ -780,13 +991,25 @@ class Orchestrator:
                 "content": (
                     f"{observation}\n\n"
                     "[SYSTEM INTERRUPT: EVALUATION PROTOCOL]\n"
-                    "1. ERROR RECOVERY: If the observation contains an error, DO NOT apologize. Emit a NEW tool call with corrected parameters, or try a different approach.\n"
+                    "1. ERROR RECOVERY: If the observation contains an error, correct the precise rejected field. A rejected beliefs__update may be corrected only once.\n"
                     "2. CONTINUATION: If the data is incomplete, emit another tool call to gather more information.\n"
                     "3. CLARIFICATION: If you are stuck or need user guidance, stop calling tools and ask the user directly.\n"
                     "4. COMPLETION: If you have what you need, answer the user directly.\n"
                     "CRITICAL: Keep your internal reasoning brief and decisive. Do not output conversational filler."
                 ),
             })
+
+            if (
+                is_belief_call
+                and tool_result.status.value == "error"
+                and turn_state.belief_attempts >= 2
+            ):
+                return (yield from self._force_tool_free_response(
+                    session_id=session_id,
+                    messages=messages,
+                    reason="belief_attempt_limit_reached",
+                    react_iteration=step + 1,
+                ))
 
         # --- LOOP EXHAUSTION FALLBACK ---
         logger.warning("[%s] Late routing hit max steps; forcing final answer", session_id)
@@ -800,12 +1023,13 @@ class Orchestrator:
             ),
         })
         
-        response = yield from self._stream_response(
-            session_id,
-            messages,
-            think_override=True,
-        )
-        return response
+        return (yield from self._force_tool_free_response(
+            session_id=session_id,
+            messages=messages,
+            reason="late_routing_step_limit",
+            append_instruction=False,
+            react_iteration=self.max_late_routing_steps + 1,
+        ))
 
     def _stream_late_routing_step(
         self,
@@ -813,6 +1037,12 @@ class Orchestrator:
         messages,
         user_text: str,
         allowed_capabilities: set[CapabilityId] | None = None,
+        authoritative_turn=None,
+        prepared_belief_turn=None,
+        excluded_capabilities: frozenset[CapabilityId] = frozenset(),
+        inference_phase: _GenerationPhase = _GenerationPhase.INITIAL,
+        normal_think=True,
+        react_iteration: int = 1,
     ):
         yield AssistantStateEvent(state=AssistantState.THINKING)
         start_ts = time.perf_counter()
@@ -821,16 +1051,66 @@ class Orchestrator:
         # Keep this backward-compatible with older test doubles and wrappers.
         tools = getattr(self.tool_executor, "get_native_tools", None)
         if callable(tools):
-            native_tools = tools() if allowed_capabilities is None else tools(allowed_capabilities)
+            kwargs = {
+                "session_id": session_id,
+                "user_text": user_text,
+                "authoritative_turn": authoritative_turn,
+                "prepared_belief_turn": prepared_belief_turn,
+            }
+            try:
+                native_tools = (
+                    tools(**kwargs)
+                    if allowed_capabilities is None
+                    else tools(allowed_capabilities, **kwargs)
+                )
+            except TypeError:
+                # Backward compatibility for existing executor test doubles/wrappers.
+                native_tools = tools() if allowed_capabilities is None else tools(allowed_capabilities)
         else:
             native_tools = []
+        if excluded_capabilities:
+            excluded_names = {str(item) for item in excluded_capabilities}
+            native_tools = [
+                item for item in native_tools
+                if item.get("function", {}).get("name") not in excluded_names
+            ]
 
-        # Perform a BLOCKING call to guarantee the tool_calls object is returned safely
-        message = self.llm.chat(
-            messages=messages, 
-            think_override=True, 
-            tools=native_tools,
-            timeout_override=120.0,  # Ensure the LLM call doesn't hang indefinitely
+        is_correction = inference_phase is _GenerationPhase.CORRECTION
+        think_value = False if is_correction else normal_think
+        options_override = {"num_predict": 512} if is_correction else None
+        buffered_chat = getattr(self.llm, "chat_buffered", None)
+        if callable(buffered_chat):
+            message = buffered_chat(
+                messages=messages,
+                think_override=think_value,
+                options_override=options_override,
+                tools=native_tools,
+                timeout_override=120.0,
+                generation_deadline_s=120.0,
+                generation_phase=inference_phase.value,
+                react_iteration=react_iteration,
+            )
+        else:
+            message = self.llm.chat(
+                messages=messages,
+                think_override=think_value,
+                options_override=options_override,
+                tools=native_tools,
+                timeout_override=120.0,
+            )
+        inference_duration_ms = (time.perf_counter() - start_ts) * 1000
+        trace_event(
+            "orchestrator",
+            "late_routing_inference_timing",
+            session_id=session_id,
+            payload={
+                "phase": inference_phase.value,
+                "effective_think": think_value,
+                "effective_num_predict": 512 if is_correction else None,
+                "react_iteration": react_iteration,
+                "duration_ms": round(inference_duration_ms, 2),
+                "tools_exposed": len(native_tools),
+            },
         )
 
         tool_call: ToolCall | None = None
@@ -919,6 +1199,112 @@ class Orchestrator:
             "tool_arguments": {},
         }
 
+    def _force_tool_free_response(
+        self,
+        *,
+        session_id: str,
+        messages,
+        reason: str,
+        append_instruction: bool = True,
+        react_iteration: int | None = None,
+    ):
+        if append_instruction:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[SYSTEM INTERRUPT: TOOL-FREE RESPONSE RECOVERY]\n"
+                    "Do not call tools. Respond normally to the original participant message "
+                    "using only the bounded conversation and tool results above. Do not claim "
+                    "that a rejected operation succeeded."
+                ),
+            })
+        start_ts = time.perf_counter()
+        failure_category = None
+        try:
+            buffered_chat = getattr(self.llm, "chat_buffered", None)
+            if callable(buffered_chat):
+                message = buffered_chat(
+                    messages=messages,
+                    think_override=False,
+                    options_override={"num_predict": 192},
+                    tools=None,
+                    timeout_override=45.0,
+                    generation_deadline_s=45.0,
+                    generation_phase=_GenerationPhase.RECOVERY.value,
+                    react_iteration=react_iteration,
+                )
+                visible_content = message.get("content", "")
+                response = ""
+                if visible_content:
+                    yield AssistantStateEvent(state=AssistantState.RESPONDING)
+                    processor = StreamProcessor(allowed_animations=self.allowed_animations)
+                    expression_initialized = False
+                    response, expression_initialized = yield from self._emit_processor_events(
+                        session_id, processor.push(visible_content), "", expression_initialized
+                    )
+                    response, expression_initialized = yield from self._emit_processor_events(
+                        session_id, processor.flush(), response, expression_initialized
+                    )
+                    if not expression_initialized:
+                        yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+            else:
+                response = yield from self._stream_response(
+                    session_id,
+                    messages,
+                    think_override=False,
+                    options_override={"num_predict": 192},
+                    generation_deadline_s=45.0,
+                )
+        except Exception as exc:
+            failure_category = getattr(exc, "category", type(exc).__name__)
+            logger.warning(
+                "[%s] Tool-free recovery failed category=%s; using deterministic fallback",
+                session_id, failure_category,
+            )
+            response = ""
+        used_fallback = not response or not response.strip()
+        if used_fallback:
+            response = _SAFE_EMPTY_RESPONSE_FALLBACK
+        trace_event(
+            "orchestrator",
+            "forced_recovery",
+            session_id=session_id,
+            payload={
+                "reason": reason,
+                "duration_ms": round((time.perf_counter() - start_ts) * 1000, 2),
+                "used_deterministic_fallback": used_fallback,
+                "tools_exposed": 0,
+                "failure_category": failure_category,
+            },
+        )
+        return response
+
+    @staticmethod
+    def _bounded_belief_argument_summary(arguments: object) -> dict:
+        if not isinstance(arguments, dict):
+            return {"argument_type": type(arguments).__name__}
+        assertions = arguments.get("assertions")
+        invalidations = arguments.get("invalidations")
+        summary = {
+            "top_level_fields": sorted(str(key)[:64] for key in arguments)[:12],
+            "assertion_count": len(assertions) if isinstance(assertions, list) else None,
+            "invalidation_count": len(invalidations) if isinstance(invalidations, list) else None,
+        }
+        if isinstance(assertions, list):
+            summary["assertions"] = [
+                {
+                    "fields": sorted(str(key)[:64] for key in item)[:12],
+                    "subject_reference": str(item.get("subject_reference", ""))[:128],
+                    "predicate": str(item.get("predicate", ""))[:64],
+                    "visibility": str(item.get("visibility", ""))[:32],
+                    "expiry_policy": str(item.get("expiry_policy", ""))[:32],
+                    "evidence_chars": len(str(item.get("evidence_excerpt", ""))),
+                }
+                for item in assertions[:4]
+                if isinstance(item, dict)
+            ]
+        return summary
+
     def _execute_late_tool_call(
         self,
         session_id: str,
@@ -927,6 +1313,8 @@ class Orchestrator:
         tool_approval_callback: Callable[[dict], bool] | None = None,
         event: IntegrationEvent | None = None,
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
+        authoritative_turn=None,
+        prepared_belief_turn=None,
     ):
         capability = str(call.capability)
         yield AssistantThinkingEvent(text=f"\n[Using {capability}]\n")
@@ -936,6 +1324,8 @@ class Orchestrator:
                 "session_id": session_id,
                 "user_text": user_text,
                 "approval_callback": tool_approval_callback,
+                "authoritative_turn": authoritative_turn,
+                "prepared_belief_turn": prepared_belief_turn,
             }
             if event is not None:
                 execute_kwargs.update({

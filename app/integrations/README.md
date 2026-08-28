@@ -7,6 +7,17 @@ Each integration registers one or more `integration__action` capabilities throug
 handler that returns a typed `ToolResult`. The registry validates registrations at
 startup and model arguments before execution.
 
+Registered tools may additionally restrict schema exposure using immutable invocation
+context. `beliefs__update` uses this to appear only for an eligible authoritative
+participant turn with a matching frozen mutation scope. Its handler repeats eligibility,
+evidence, target, and source authorization checks before the existing atomic belief
+service writes a `react-tool-v1` application.
+
+Tool selection distinguishes revisable belief state from durable memory: use
+`beliefs__update` for explicit current/revisable truth and `memory__write` for an event,
+decision, instruction, experience, or narrative detail worth recalling in a future
+conversation. The same proposition is normally not written through both tools.
+
 Integrations may also return bounded observed state through `context(...)`. Passive
 context is available in direct and agent modes; executable capability schemas are
 sent to the model only in agent mode.

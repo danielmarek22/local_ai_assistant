@@ -20,6 +20,7 @@ from app.integrations.contracts import (
     ReplayPolicy,
 )
 from app.integrations.registry import IntegrationRegistry
+from app.integrations.beliefs import BeliefIntegration
 from app.integrations.builtins import MemoryIntegration, ShellIntegration, WebIntegration
 from app.integrations.mindcraft import MindcraftClient, MindcraftIntegration
 from app.integrations.runtime import RuntimeIntegration
@@ -37,6 +38,7 @@ __all__ = [
     "Integration",
     "IntegrationEvent",
     "IntegrationRegistry",
+    "BeliefIntegration",
     "InvocationContext",
     "NotificationPolicy",
     "NotificationDelivery",

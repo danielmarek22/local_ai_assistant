@@ -2,6 +2,15 @@ from abc import ABC, abstractmethod
 from typing import Iterator, List, Dict
 
 
+class InferenceFailure(RuntimeError):
+    """Typed model inference failure safe for orchestrator recovery decisions."""
+
+    def __init__(self, category: str, message: str, *, cancelled: bool = False):
+        super().__init__(message)
+        self.category = category
+        self.cancelled = cancelled
+
+
 class LLMClient(ABC):
     @abstractmethod
     def chat(

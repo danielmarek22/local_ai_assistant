@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import requests
 
+from app.llm.base import InferenceFailure
 from app.llm.ollama_stream import OllamaClient
 from app.tools.web_search import SearXNGClient
 
@@ -42,15 +43,65 @@ def _ndjson_line(payload: str) -> bytes:
 
 
 class HttpRetryTests(unittest.TestCase):
+    @patch("app.llm.ollama_stream.trace_event")
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_buffered_chat_waits_for_complete_tool_call_and_tool_wins_content(
+        self, post_mock, trace_mock
+    ):
+        post_mock.return_value = _FakeStreamResponse(lines=[
+            b'{"message":{"thinking":"brief"},"done":false}',
+            b'{"message":{"content":"discard me","tool_calls":[{"function":{"name":"beliefs__update","arguments":{"assertions":[],"invalidations":[]}}}]},"done":false}',
+            b'{"message":{},"done":true,"done_reason":"stop","prompt_eval_count":42,"prompt_eval_duration":2000000,"eval_count":8,"eval_duration":3000000}',
+        ])
+        client = OllamaClient(model="test-model", host="http://localhost:11434")
+        message = client.chat_buffered(
+            [{"role": "user", "content": "hello"}],
+            think_override=False,
+            options_override={"num_predict": 512},
+            tools=[{"type": "function", "function": {"name": "beliefs__update"}}],
+            generation_phase="correction",
+            react_iteration=2,
+        )
+        self.assertEqual(message["content"], "discard me")
+        self.assertEqual(message["thinking"], "brief")
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "beliefs__update")
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["options"]["num_predict"], 512)
+        request_trace = trace_mock.call_args_list[0]
+        response_trace = trace_mock.call_args_list[1]
+        self.assertEqual(request_trace.args[:2], ("llm", "chat_request"))
+        self.assertEqual(response_trace.args[:2], ("llm", "chat_response"))
+        request_meta = request_trace.kwargs["payload"]
+        response_meta = response_trace.kwargs["payload"]
+        self.assertEqual(request_meta["generation_phase"], "correction")
+        self.assertEqual(request_meta["react_iteration"], 2)
+        self.assertFalse(request_meta["effective_think"])
+        self.assertEqual(request_meta["effective_num_predict"], 512)
+        self.assertTrue(request_meta["tools_exposed"])
+        self.assertNotIn("messages", request_meta)
+        self.assertEqual(response_meta["thinking_chars_received"], 5)
+        self.assertEqual(response_meta["prompt_eval_count"], 42)
+        self.assertEqual(response_meta["generation_token_count"], 8)
+        self.assertEqual(response_meta["done_reason"], "stop")
+        self.assertNotIn("thinking", response_meta)
+        self.assertNotIn("content", response_meta)
+
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_buffered_chat_interrupted_stream_returns_no_partial_tool_call(self, post_mock):
+        post_mock.return_value = _FakeStreamResponse(lines=[
+            b'{"message":{"tool_calls":[{"function":{"name":"beliefs__update","arguments":{}}}]},"done":false}',
+        ])
+        client = OllamaClient(model="test-model", host="http://localhost:11434")
+        with self.assertRaises(InferenceFailure) as raised:
+            client.chat_buffered([{"role": "user", "content": "hello"}])
+        self.assertEqual(raised.exception.category, "malformed_response")
+        self.assertEqual(post_mock.call_count, 1)
+
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.Session.post")
-    def test_ollama_chat_retries_on_timeout_then_succeeds(self, post_mock, _sleep_mock):
-        post_mock.side_effect = [
-            requests.Timeout("timeout"),
-            _FakeResponse(
-                data={"message": {"content": "ok"}, "done_reason": "stop"},
-            ),
-        ]
+    def test_ollama_chat_does_not_retry_read_timeout(self, post_mock, _sleep_mock):
+        post_mock.side_effect = requests.ReadTimeout("timeout")
 
         client = OllamaClient(
             model="test-model",
@@ -60,11 +111,27 @@ class HttpRetryTests(unittest.TestCase):
             retry_backoff_s=0.0,
         )
 
-        result = client.chat([{"role": "user", "content": "hello"}])
+        with self.assertRaises(InferenceFailure) as raised:
+            client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(raised.exception.category, "read_timeout")
+        self.assertEqual(post_mock.call_count, 1)
 
-        self.assertEqual(result, {"content": "ok"})
+    @patch("app.llm.ollama_stream.time.sleep", return_value=None)
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_ollama_chat_retries_connect_timeout_then_succeeds(self, post_mock, _sleep_mock):
+        post_mock.side_effect = [
+            requests.ConnectTimeout("connect"),
+            _FakeResponse(data={"message": {"content": "ok"}, "done_reason": "stop"}),
+        ]
+        client = OllamaClient(
+            model="test-model", host="http://localhost:11434",
+            max_retries=2, retry_backoff_s=0.0,
+        )
+        self.assertEqual(
+            client.chat([{"role": "user", "content": "hello"}]),
+            {"content": "ok"},
+        )
         self.assertEqual(post_mock.call_count, 2)
-        self.assertEqual(post_mock.call_args.kwargs["json"]["think"], False)
 
     @patch("app.llm.ollama_stream.time.sleep", return_value=None)
     @patch("app.llm.ollama_stream.requests.Session.post")
@@ -84,13 +151,14 @@ class HttpRetryTests(unittest.TestCase):
             retry_backoff_s=0.0,
         )
 
-        with self.assertRaises(requests.HTTPError):
+        with self.assertRaises(InferenceFailure) as raised:
             client.chat([{"role": "user", "content": "hello"}])
 
+        self.assertEqual(raised.exception.category, "http_error")
         self.assertEqual(post_mock.call_count, 1)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
-    def test_ollama_chat_retries_without_images_on_http_500(self, post_mock):
+    def test_ollama_chat_does_not_retry_images_on_http_500(self, post_mock):
         error_response = requests.Response()
         error_response.status_code = 500
         error_response._content = b'{"error":"internal server error"}'
@@ -112,17 +180,13 @@ class HttpRetryTests(unittest.TestCase):
             retry_backoff_s=0.0,
         )
 
-        result = client.chat(
-            [{"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}],
-            think_override=False,
-        )
-
-        self.assertEqual(result, {"content": "text fallback"})
-        self.assertEqual(post_mock.call_count, 2)
-        payload = post_mock.call_args.kwargs["json"]
-        self.assertNotIn("images", payload["messages"][0])
-        self.assertTrue(client.last_chat_dropped_current_images)
-        self.assertEqual(client.last_chat_dropped_current_images_count, 1)
+        with self.assertRaises(InferenceFailure) as raised:
+            client.chat(
+                [{"role": "user", "content": "what is this?", "images": ["aGVsbG8="]}],
+                think_override=False,
+            )
+        self.assertEqual(raised.exception.category, "server_error")
+        self.assertEqual(post_mock.call_count, 1)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_chat_uses_native_endpoint_for_images(self, post_mock):
@@ -358,7 +422,7 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(client.last_stream_dropped_current_images_count, 1)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
-    def test_ollama_stream_retries_without_images_on_http_500(self, post_mock):
+    def test_ollama_stream_does_not_retry_images_on_http_500(self, post_mock):
         error_response = requests.Response()
         error_response.status_code = 500
         error_response._content = b'{"error":"internal server error"}'
@@ -381,16 +445,12 @@ class HttpRetryTests(unittest.TestCase):
             host="http://localhost:11434",
         )
 
-        chunks = list(
-            client.stream_chat(
+        with self.assertRaises(InferenceFailure) as raised:
+            list(client.stream_chat(
                 [{"role": "user", "content": "hello", "images": ["aGVsbG8="]}]
-            )
-        )
-
-        self.assertEqual(chunks, ["ok"])
-        self.assertEqual(post_mock.call_count, 2)
-        self.assertEqual(post_mock.call_args.kwargs["json"]["messages"][0]["content"], "hello")
-        self.assertTrue(client.last_stream_dropped_current_images)
+            ))
+        self.assertEqual(raised.exception.category, "server_error")
+        self.assertEqual(post_mock.call_count, 1)
 
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_ollama_stream_keeps_images_enabled_after_single_bad_image(self, post_mock):

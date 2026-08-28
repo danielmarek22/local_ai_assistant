@@ -67,7 +67,13 @@ class MemoryIntegration:
         return [RegisteredTool(
             spec=ToolSpec(
                 capability=CapabilityId(self.name, "write"),
-                description="Persist an enduring fact or preference into long-term semantic memory.",
+                description=(
+                    "Use only for durable events, decisions, instructions, experiences, or narrative "
+                    "context worth recalling in a future conversation. Never use for current "
+                    "activities, temporary states, ordinary factual claims, preferences, or "
+                    "propositions that belong in beliefs__update. Do not duplicate the same "
+                    "proposition through both tools."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {

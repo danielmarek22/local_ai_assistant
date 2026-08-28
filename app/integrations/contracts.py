@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -125,14 +125,19 @@ class ToolResult:
     status: ToolResultStatus
     content: str
     operation_id: str | None = None
+    diagnostics: Mapping[str, Any] | None = None
 
     @classmethod
     def success(cls, content: str) -> "ToolResult":
         return cls(ToolResultStatus.SUCCESS, content)
 
     @classmethod
-    def error(cls, content: str) -> "ToolResult":
-        return cls(ToolResultStatus.ERROR, content)
+    def error(
+        cls,
+        content: str,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "ToolResult":
+        return cls(ToolResultStatus.ERROR, content, diagnostics=diagnostics)
 
     @classmethod
     def denied(cls, content: str) -> "ToolResult":
@@ -197,6 +202,8 @@ class InvocationContext:
     root_event_id: str | None = None
     causation_id: str | None = None
     notification_callback: NotificationCallback | None = None
+    authoritative_turn: object | None = None
+    prepared_belief_turn: object | None = None
 
 
 @dataclass(frozen=True)
@@ -214,9 +221,15 @@ class RegisteredTool:
     spec: ToolSpec
     handler: ToolHandler
     available: AvailabilityCheck = True
+    exposure_check: bool | Callable[[InvocationContext], bool] = True
 
     def is_available(self) -> bool:
         return bool(self.available() if callable(self.available) else self.available)
+
+    def is_exposed(self, context: InvocationContext | None) -> bool:
+        if callable(self.exposure_check):
+            return bool(self.exposure_check(context))
+        return bool(self.exposure_check)
 
 
 class Integration(Protocol):

@@ -84,12 +84,19 @@ class IntegrationRegistry:
     def get_native_tools(
         self,
         allowed_capabilities: set[CapabilityId] | None = None,
+        invocation_context: InvocationContext | None = None,
     ) -> list[dict]:
         native_tools = []
         for capability, registered in sorted(self._tools.items()):
             if allowed_capabilities is not None and capability not in allowed_capabilities:
                 continue
             if not self._is_available(registered):
+                continue
+            try:
+                if not registered.is_exposed(invocation_context):
+                    continue
+            except Exception:
+                logger.exception("Exposure check failed for %s", capability)
                 continue
             native_tools.append({
                 "type": "function",
@@ -182,19 +189,48 @@ class IntegrationRegistry:
             path = ".".join(str(part) for part in exc.absolute_path)
             location = f" at {path}" if path else ""
             return ToolResult.error(
-                f"Invalid arguments for {call.capability}{location}: {exc.message}"
+                f"Invalid arguments for {call.capability}{location}: "
+                f"{self._native_validation_reason(exc)}",
+                diagnostics={
+                    "category": "native_schema_validation",
+                    "error_code": "NATIVE_SCHEMA_VALIDATION",
+                    "repository_accessed": False,
+                },
             )
 
         try:
             result = registered.handler(dict(call.arguments), context)
         except Exception:
             logger.exception("Capability %s failed", call.capability)
-            return ToolResult.error(f"Capability execution failed: {call.capability}")
+            return ToolResult.error(
+                f"Capability execution failed: {call.capability}",
+                diagnostics={
+                    "category": "unexpected_handler_exception",
+                    "error_code": "UNEXPECTED_HANDLER_EXCEPTION",
+                    "repository_accessed": None,
+                },
+            )
 
         if not isinstance(result, ToolResult):
             logger.error("Capability %s returned an invalid result", call.capability)
             return ToolResult.error(f"Capability returned an invalid result: {call.capability}")
         return result
+
+    @staticmethod
+    def _native_validation_reason(error: ValidationError) -> str:
+        if error.validator == "maxLength":
+            return (
+                f"must contain at most {error.validator_value} characters; "
+                f"received {len(error.instance)} characters"
+            )
+        if error.validator == "minLength":
+            return f"must contain at least {error.validator_value} characters"
+        if error.validator == "required":
+            return f"{error.message[:500]}. Add the required field and retry"
+        if error.validator == "enum":
+            allowed = list(error.validator_value)[:12]
+            return f"must be one of {allowed!r}; received {str(error.instance)[:80]!r}"
+        return error.message[:700]
 
     def collect_context(self, invocation: InvocationContext, max_chars: int) -> str | None:
         remaining = max(0, int(max_chars))

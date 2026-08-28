@@ -2450,7 +2450,7 @@ class BeliefSnapshotAndWiringTests(unittest.TestCase):
     def test_feature_flags_separate_storage_context_from_extraction(self):
         base = {
             "enabled": True,
-            "extraction_enabled": False,
+            "processing_mode": "disabled",
             "max_existing_beliefs": 4,
             "max_snapshot_chars": 500,
             "max_candidates": 2,
@@ -2468,11 +2468,11 @@ class BeliefSnapshotAndWiringTests(unittest.TestCase):
                 history_store=FakeHistory(),
                 agent_id="agent-a",
             ),
-            (None, None, []),
+            (None, None, [], None, None),
         )
 
         storage_only = SimpleNamespace(beliefs=base)
-        repository, provider, observers = _build_belief_components(
+        repository, provider, observers, integration, _preparer = _build_belief_components(
             config=storage_only,
             llm=FakeStructuredLLM(wire_batch(ignore_reason="NO_CHANGE")),
             db=self.db,
@@ -2482,12 +2482,13 @@ class BeliefSnapshotAndWiringTests(unittest.TestCase):
         self.assertIsNotNone(repository)
         self.assertIsNotNone(provider)
         self.assertEqual(observers, [])
+        self.assertIsNone(integration)
         repository.close()
 
         opted_in = SimpleNamespace(
-            beliefs={**base, "extraction_enabled": True}
+            beliefs={**base, "processing_mode": "observer"}
         )
-        repository, provider, observers = _build_belief_components(
+        repository, provider, observers, integration, _preparer = _build_belief_components(
             config=opted_in,
             llm=FakeStructuredLLM(wire_batch(ignore_reason="NO_CHANGE")),
             db=self.db,
@@ -2496,6 +2497,7 @@ class BeliefSnapshotAndWiringTests(unittest.TestCase):
         )
         self.assertIsNotNone(provider)
         self.assertEqual(len(observers), 1)
+        self.assertIsNone(integration)
         repository.close()
 
 
@@ -2747,14 +2749,14 @@ class BeliefTurnIntegrationTests(unittest.TestCase):
         config = SimpleNamespace(
             local_human={"id": "person-1", "display_name": "Local Person"},
             beliefs={
-                "enabled": True, "extraction_enabled": True,
+                "enabled": True, "processing_mode": "observer",
                 "max_existing_beliefs": 24, "max_snapshot_chars": 2000,
                 "max_candidates": 4, "max_disambiguating_context_chars": 1000,
                 "max_generation_tokens": 128, "timeout_s": 1.0,
                 "max_expiry_days": 90,
             },
         )
-        repository, provider, observers = _build_belief_components(
+        repository, provider, observers, _integration, _preparer = _build_belief_components(
             config=config, llm=llm, db=self.db, history_store=self.history,
             agent_id="astra",
         )

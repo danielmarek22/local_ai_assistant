@@ -219,7 +219,7 @@ class Config:
     def _load_beliefs_config(raw_beliefs: dict | None) -> dict:
         config = {
             "enabled": True,
-            "extraction_enabled": False,
+            "processing_mode": "disabled",
             "timezone": "UTC",
             "max_candidates": 4,
             "max_existing_beliefs": 24,
@@ -230,7 +230,22 @@ class Config:
             "max_expiry_days": 90,
         }
         if isinstance(raw_beliefs, dict):
+            if "extraction_enabled" in raw_beliefs:
+                raise ValueError(
+                    "beliefs.extraction_enabled was replaced by beliefs.processing_mode; "
+                    "valid values are: disabled, observer, react_tool"
+                )
             config.update(raw_beliefs)
+        valid_modes = {"disabled", "observer", "react_tool"}
+        mode = config.get("processing_mode")
+        if mode not in valid_modes:
+            raise ValueError(
+                "beliefs.processing_mode must be one of: disabled, observer, react_tool"
+            )
+        if not bool(config.get("enabled", True)) and mode != "disabled":
+            raise ValueError(
+                "beliefs.enabled=false requires beliefs.processing_mode=disabled"
+            )
         return config
 
     @staticmethod
