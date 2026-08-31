@@ -96,7 +96,7 @@ uiManager.onScreenCapturePolicyChange(() => {
 });
 
 const handlers = {
-    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog, sessionKind, localHumanDisplayName, localAssistantDisplayName }) => {
+    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog, outfitCatalog, currentOutfit, sessionKind, localHumanDisplayName, localAssistantDisplayName }) => {
         currentServerInstanceId = serverInstanceId;
         currentSessionId = sessionId;
         currentSessionKind = sessionKind || 'direct';
@@ -107,9 +107,11 @@ const handlers = {
         uiManager.setSessionScope(serverInstanceId, sessionId);
         void knowledgeInspector.setActiveSession(sessionId);
         avatarManager.setGestureCatalog(gestureCatalog || {});
+        avatarManager.setOutfitCatalog(outfitCatalog || {}, currentOutfit);
         persistSessionContext();
     },
-    onState: (state) => {
+    onState: (state, turnId = null) => {
+        avatarManager.setActiveTurn(turnId);
         assistantState = state;
         syncAssistantPresentation();
     },
@@ -117,8 +119,11 @@ const handlers = {
         assistantExpression = expression;
         syncAssistantPresentation();
     },
-    onAnimation: (animation) => {
-        avatarManager.queueGesture(animation);
+    onAnimation: (animation, turnId = null) => {
+        avatarManager.queueGesture(animation, turnId);
+    },
+    onOutfit: ({ outfit, url }) => {
+        avatarManager.setOutfit(outfit, url);
     },
     onThinkingChunk: (content) => {
         uiManager.appendToThinkingMessage(content);

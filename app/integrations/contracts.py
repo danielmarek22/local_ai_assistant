@@ -112,6 +112,12 @@ class ToolCall:
     arguments: Mapping[str, object]
 
 
+@dataclass(frozen=True)
+class AvatarOutfitEffect:
+    outfit: str
+    url: str
+
+
 class ToolResultStatus(str, Enum):
     SUCCESS = "success"
     ERROR = "error"
@@ -126,10 +132,16 @@ class ToolResult:
     content: str
     operation_id: str | None = None
     diagnostics: Mapping[str, Any] | None = None
+    effects: tuple[AvatarOutfitEffect, ...] = ()
 
     @classmethod
-    def success(cls, content: str) -> "ToolResult":
-        return cls(ToolResultStatus.SUCCESS, content)
+    def success(
+        cls,
+        content: str,
+        *,
+        effects: tuple[AvatarOutfitEffect, ...] = (),
+    ) -> "ToolResult":
+        return cls(ToolResultStatus.SUCCESS, content, effects=effects)
 
     @classmethod
     def error(

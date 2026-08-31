@@ -36,6 +36,7 @@ assistant:
   personality:
     default_emotion: neutral
   avatar_controls:
+    default_outfit: default
     expressions:
       - happy
       - angry

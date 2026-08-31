@@ -491,6 +491,14 @@ class ChatHistoryStore:
         )
         return hydrated
 
+    def count_messages(self, session_id: str) -> int:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS message_count FROM chat_history WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(cursor.fetchone()["message_count"])
+
     def get_before(self, session_id: str, message_id: int, limit: int = 2):
         if limit <= 0:
             return []

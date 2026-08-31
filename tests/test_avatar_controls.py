@@ -5,8 +5,10 @@ from pathlib import Path
 from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
+    discover_outfit_catalog,
     normalize_expressions,
     normalize_gesture_name,
+    normalize_outfit_name,
 )
 
 
@@ -31,6 +33,32 @@ class GestureCatalogTests(unittest.TestCase):
                 "happy_pose": "/static/animations/Gestures/Happy Pose.fbx",
             },
         )
+
+    def test_discover_outfit_catalog_from_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            avatars_dir = Path(temp_dir)
+            (avatars_dir / "Tech Wear.vrm").write_text("fake", encoding="utf-8")
+            (avatars_dir / "casual.VRM").write_text("ignored", encoding="utf-8")
+            (avatars_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+
+            catalog = discover_outfit_catalog(avatars_dir=avatars_dir)
+
+        self.assertEqual(
+            catalog,
+            {"tech_wear": "/static/avatars/Tech Wear.vrm"},
+        )
+
+    def test_normalize_outfit_name(self):
+        self.assertEqual(normalize_outfit_name(" Pajamas (Blue) "), "pajamas_blue")
+
+    def test_duplicate_normalized_outfit_names_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            avatars_dir = Path(temp_dir)
+            (avatars_dir / "Tech Wear.vrm").write_text("fake", encoding="utf-8")
+            (avatars_dir / "tech-wear.vrm").write_text("fake", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Duplicate normalized outfit"):
+                discover_outfit_catalog(avatars_dir=avatars_dir)
 
     def test_normalize_expressions_defaults_when_empty(self):
         self.assertEqual(

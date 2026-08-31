@@ -12,7 +12,7 @@ export function buildKnowledgeBeliefsUrl(filters = {}) {
 
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onThinkingChunk, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onOutfit, onThinkingChunk, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -73,19 +73,24 @@ export class NetworkClient {
                         serverInstanceId: data.server_instance_id,
                         sessionId: data.session_id,
                         gestureCatalog: data.gesture_catalog || {},
+                        outfitCatalog: data.outfit_catalog || {},
+                        currentOutfit: data.current_outfit || null,
                         sessionKind: data.session_kind || 'direct',
                         localHumanDisplayName: data.local_human_display_name || 'You',
                         localAssistantDisplayName: data.local_assistant_display_name || 'Astra',
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {
-                    this.handlers.onState(data.state);
+                    this.handlers.onState(data.state, data.turn_id || null);
                 }
                 else if (data.type === 'assistant_expression' && this.handlers.onExpression) {
                     this.handlers.onExpression(data.expression);
                 }
                 else if (data.type === 'assistant_animation' && this.handlers.onAnimation) {
-                    this.handlers.onAnimation(data.animation);
+                    this.handlers.onAnimation(data.animation, data.turn_id || null);
+                }
+                else if (data.type === 'assistant_outfit' && this.handlers.onOutfit) {
+                    this.handlers.onOutfit({ outfit: data.outfit, url: data.url });
                 }
                 else if (data.type === 'assistant_thinking_chunk' && this.handlers.onThinkingChunk) {
                     this.handlers.onThinkingChunk(data.content);

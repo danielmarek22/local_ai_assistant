@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { CONFIG } from './config.js';
+import { TurnGestureQueue } from './turn-gesture-queue.js';
 
 // Import the Mixamo loader helper 
 import { loadMixamoAnimation } from './loadMixamoAnimation.js'; 
@@ -13,6 +14,9 @@ export class AvatarManager {
         this.getAudioLevel = getAudioLevelCallback; 
         
         this.currentVrm = null;
+        this.currentOutfit = null;
+        this.outfitCatalog = {};
+        this.avatarLoadToken = 0;
         this.currentState = "idle";
         this.currentExpression = "neutral";
         
@@ -23,7 +27,8 @@ export class AvatarManager {
         this.stateAnimations = {}; 
         this.gestureCatalog = {};
         this.gestureAnimations = {};
-        this.gestureQueue = [];
+        this.gestureQueue = new TurnGestureQueue(3);
+        this.isPageVisible = document.visibilityState !== 'hidden';
         this.isGesturePlaying = false;
         this.activeGestureName = null;
         this.dreamingPhase = null; // intro | holding | outro
@@ -49,6 +54,9 @@ export class AvatarManager {
         
         this.initScene();
         this.initLoader();
+
+        this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
+        document.addEventListener('visibilitychange', this.handleVisibilityChange);
         
         this.animate = this.animate.bind(this);
         this.animate();
@@ -86,18 +94,27 @@ export class AvatarManager {
         this.scene.add(ambientLight);
     }
 
-    initLoader() {
+    initLoader(modelPath = CONFIG.AVATAR.MODEL_PATH, outfit = null) {
+        const requestToken = ++this.avatarLoadToken;
         const loader = new GLTFLoader();
         loader.register((parser) => new VRMLoaderPlugin(parser));
 
         loader.load(
-            CONFIG.AVATAR.MODEL_PATH, 
+            modelPath,
             (gltf) => {
+                if (requestToken !== this.avatarLoadToken) {
+                    this.disposeScene(gltf.scene);
+                    return;
+                }
                 const vrm = gltf.userData.vrm;
                 VRMUtils.removeUnnecessaryVertices(gltf.scene);
                 VRMUtils.removeUnnecessaryJoints(gltf.scene);
-                
+
+                const previousVrm = this.currentVrm;
+                const previousMixer = this.mixer;
+                this.resetAvatarRuntime();
                 this.currentVrm = vrm;
+                this.currentOutfit = outfit;
                 this.scene.add(vrm.scene);
                 
                 // --- NEW: Assign the lookAt target to the VRM ---
@@ -107,6 +124,16 @@ export class AvatarManager {
                 
                 // Initialize the Animation Mixer tied to the VRM scene
                 this.mixer = new THREE.AnimationMixer(vrm.scene);
+
+                // The new avatar is live before cleanup begins. A cleanup problem must
+                // never leave the browser stuck on the previous outfit.
+                if (previousVrm) {
+                    try {
+                        this.disposeAvatar(previousVrm, previousMixer);
+                    } catch (error) {
+                        console.warn('Failed to fully dispose previous avatar:', error);
+                    }
+                }
 
                 // Listen for animation loops to trigger variety
                 this.mixer.addEventListener('loop', (e) => {
@@ -187,23 +214,114 @@ export class AvatarManager {
                         const animKey = `${state}_${index}`; 
                         this.stateAnimations[state].push(animKey);
                         
-                        const playImmediately = (state === 'idle' && index === 0);
+                        const playImmediately = (state === this.currentState && index === 0);
                         this.loadAnimation(path, animKey, playImmediately);
                     });
                 });
                 this.loadGestureAnimations();
             },
             (progress) => {},
-            (error) => console.error("Error loading VRM:", error)
+            (error) => {
+                if (requestToken === this.avatarLoadToken) {
+                    console.error(`Error loading VRM "${modelPath}":`, error);
+                }
+            }
         );
+    }
+
+    setOutfitCatalog(outfitCatalog = {}, currentOutfit = null) {
+        this.outfitCatalog = {};
+        for (const [name, url] of Object.entries(outfitCatalog)) {
+            if (!name || !url) continue;
+            this.outfitCatalog[String(name)] = String(url);
+        }
+
+        if (currentOutfit && this.outfitCatalog[currentOutfit]) {
+            this.setOutfit(currentOutfit, this.outfitCatalog[currentOutfit]);
+        }
+    }
+
+    setOutfit(outfit, url = null) {
+        const trustedUrl = this.outfitCatalog[outfit];
+        if (!trustedUrl || (url && url !== trustedUrl)) {
+            console.warn(`Ignoring unavailable outfit "${outfit}"`);
+            return false;
+        }
+        if (this.currentOutfit === outfit && this.currentVrm) {
+            return true;
+        }
+        this.initLoader(trustedUrl, outfit);
+        return true;
+    }
+
+    resetAvatarRuntime() {
+        if (this.dreamingOutroTimeoutId) {
+            clearTimeout(this.dreamingOutroTimeoutId);
+            this.dreamingOutroTimeoutId = null;
+        }
+        if (this.dreamingOutroResolver) {
+            this.dreamingOutroResolver(false);
+        }
+        this.mixer = null;
+        this.animations = {};
+        this.currentAction = null;
+        this.stateAnimations = {};
+        this.gestureAnimations = {};
+        this.gestureQueue.clear();
+        this.isGesturePlaying = false;
+        this.activeGestureName = null;
+        this.dreamingPhase = null;
+        this.pendingDreamingOutroStart = false;
+        this.dreamingOutroPromise = null;
+        this.dreamingOutroResolver = null;
+        this.forceEyesClosed = false;
+        this.blinkState = 'open';
+        this.blinkTimer = 0;
+        this.nextBlinkTime = Math.random() * 3 + 2;
+    }
+
+    disposeCurrentAvatar() {
+        if (!this.currentVrm) return;
+        const vrm = this.currentVrm;
+        const mixer = this.mixer;
+        this.currentVrm = null;
+        this.mixer = null;
+        this.disposeAvatar(vrm, mixer);
+    }
+
+    disposeAvatar(vrm, mixer = null) {
+        if (!vrm) return;
+        mixer?.stopAllAction?.();
+        mixer?.uncacheRoot?.(vrm.scene);
+        this.scene.remove(vrm.scene);
+        this.disposeScene(vrm.scene);
+    }
+
+    disposeScene(scene) {
+        scene?.traverse?.((object) => {
+            object.geometry?.dispose?.();
+            const materials = Array.isArray(object.material)
+                ? object.material
+                : object.material ? [object.material] : [];
+            for (const material of materials) {
+                for (const value of Object.values(material)) {
+                    if (value?.isTexture) value.dispose();
+                }
+                material.dispose?.();
+            }
+        });
     }
 
     // --- Mixamo FBX Loader Method ---
     loadAnimation(url, name, playImmediately = false, onLoaded = null) {
-        loadMixamoAnimation(url, this.currentVrm)
+        const requestToken = this.avatarLoadToken;
+        const vrm = this.currentVrm;
+        const mixer = this.mixer;
+        loadMixamoAnimation(url, vrm)
             .then((clip) => {
-                if (clip) {
-                    const action = this.mixer.clipAction(clip);
+                if (requestToken !== this.avatarLoadToken || vrm !== this.currentVrm) return;
+                if (clip && mixer) {
+                    const action = mixer.clipAction(clip);
                     this.animations[name] = action;
                     if (onLoaded) {
                         onLoaded(action);
@@ -220,7 +338,7 @@ export class AvatarManager {
     setGestureCatalog(gestureCatalog = {}) {
         this.gestureCatalog = {};
         this.gestureAnimations = {};
-        this.gestureQueue = [];
+        this.gestureQueue.clear();
         this.isGesturePlaying = false;
         this.activeGestureName = null;
 
@@ -252,7 +370,18 @@ export class AvatarManager {
         }
     }
 
-    queueGesture(animationName) {
+    setActiveTurn(turnId) {
+        this.gestureQueue.setTurn(turnId);
+    }
+
+    handleVisibilityChange() {
+        this.isPageVisible = document.visibilityState !== 'hidden';
+        if (this.isPageVisible) {
+            this.processGestureQueue();
+        }
+    }
+
+    queueGesture(animationName, turnId = null) {
         const normalized = String(animationName || '').trim().toLowerCase();
         if (!normalized) {
             return;
@@ -263,16 +392,16 @@ export class AvatarManager {
             return;
         }
 
-        this.gestureQueue.push(normalized);
+        this.gestureQueue.push(normalized, turnId);
         this.processGestureQueue();
     }
 
     processGestureQueue() {
-        if (this.isGesturePlaying) {
+        if (!this.isPageVisible || this.isGesturePlaying) {
             return;
         }
 
-        const nextGestureName = this.gestureQueue[0];
+        const nextGestureName = this.gestureQueue.peek();
         if (!nextGestureName) {
             return;
         }

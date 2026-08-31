@@ -21,6 +21,8 @@ from app.integrations import (
     MemoryIntegration,
     MindcraftClient,
     MindcraftIntegration,
+    AvatarWardrobe,
+    OutfitIntegration,
     ShellIntegration,
     WebIntegration,
     RuntimeIntegration,
@@ -35,6 +37,7 @@ from app.services.turn_finalizer import TurnFinalizer
 from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
+    discover_outfit_catalog,
 )
 from app.beliefs import (
     BeliefCandidateExtractor,
@@ -286,7 +289,20 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     # Integrations
     # --------------------------------------------------
-    integrations = [RuntimeIntegration(), VisionIntegration()]
+    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
+    avatar_controls_cfg = avatar_controls_cfg if isinstance(avatar_controls_cfg, dict) else {}
+    outfit_catalog = discover_outfit_catalog()
+    configured_outfit = str(avatar_controls_cfg.get("default_outfit", "")).strip()
+    initial_outfit = (
+        configured_outfit
+        if configured_outfit in outfit_catalog
+        else "default"
+        if "default" in outfit_catalog
+        else next(iter(sorted(outfit_catalog)), "")
+    )
+    wardrobe = AvatarWardrobe(outfit_catalog, initial_outfit)
+
+    integrations = [RuntimeIntegration(), VisionIntegration(), OutfitIntegration(wardrobe)]
     if belief_integration is not None:
         integrations.append(belief_integration)
         logger.info("Belief ReAct integration registered")
@@ -363,8 +379,7 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
     gesture_catalog = discover_gesture_catalog()
-    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
-    allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
+    allowed_expressions = avatar_controls_cfg.get("expressions")
 
     # Executable capabilities are supplied only through native schemas in agent mode.
     base_system_prompt = config.assistant["system_prompt"]
@@ -416,6 +431,7 @@ def build_orchestrator() -> Orchestrator:
         ),
     )
     orchestrator.belief_repository = belief_repository
+    orchestrator.avatar_wardrobe = wardrobe
     orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
     orchestrator.autonomy_runtime = AutonomyRuntime(
         orchestrator=orchestrator,

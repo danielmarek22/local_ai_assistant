@@ -27,6 +27,7 @@ from app.core.events import (
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AvatarOutfitEvent,
 )
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, AudioAttachment, ImageAttachment, attachment_from_payload
@@ -235,6 +236,7 @@ def resolve_session_id(
     requested_session_id: str | None,
     known_server_instance_id: str | None,
     server_instance_id: str,
+    requested_session_exists: bool = False,
 ) -> str:
     if session_mode == "open" and requested_session_id:
         return requested_session_id
@@ -242,7 +244,10 @@ def resolve_session_id(
     if (
         session_mode == "resume"
         and requested_session_id
-        and known_server_instance_id == server_instance_id
+        and (
+            known_server_instance_id == server_instance_id
+            or requested_session_exists
+        )
     ):
         return requested_session_id
 
@@ -517,6 +522,8 @@ def _build_session_init_payload(
     server_instance_id: str,
     session_id: str,
     gesture_catalog: dict[str, str] | None = None,
+    outfit_catalog: dict[str, str] | None = None,
+    current_outfit: str | None = None,
     session_kind: SessionKind | str = SessionKind.DIRECT,
     local_human_display_name: str = "You",
     local_assistant_display_name: str = "Astra",
@@ -526,6 +533,8 @@ def _build_session_init_payload(
         "server_instance_id": server_instance_id,
         "session_id": session_id,
         "gesture_catalog": dict(gesture_catalog or {}),
+        "outfit_catalog": dict(outfit_catalog or {}),
+        "current_outfit": current_outfit,
         "session_kind": SessionKind(session_kind).value,
         "local_human_display_name": local_human_display_name,
         "local_assistant_display_name": local_assistant_display_name,
@@ -706,6 +715,15 @@ async def _stream_orchestrator_events(
             await _send_ws_payload(ws, {
                 "type": "assistant_animation",
                 "animation": event.animation,
+            })
+            continue
+
+        if isinstance(event, AvatarOutfitEvent):
+            logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
+            await _send_ws_payload(ws, {
+                "type": "assistant_outfit",
+                "outfit": event.outfit,
+                "url": event.url,
             })
             continue
 
@@ -1193,15 +1211,19 @@ async def websocket_endpoint(ws: WebSocket):
     except ValueError:
         requested_session_kind = SessionKind.DIRECT
 
+    orchestrator = app.state.orchestrator
+    history_store = orchestrator.history
     session_id = resolve_session_id(
         session_mode=session_mode,
         requested_session_id=requested_session_id,
         known_server_instance_id=known_server_instance_id,
         server_instance_id=server_instance_id,
+        requested_session_exists=bool(
+            requested_session_id
+            and history_store.session_exists(requested_session_id)
+        ),
     )
 
-    orchestrator = app.state.orchestrator
-    history_store = orchestrator.history
     if requested_session_id and session_id == requested_session_id:
         session_kind = history_store.get_session_kind(session_id)
     else:
@@ -1220,6 +1242,12 @@ async def websocket_endpoint(ws: WebSocket):
         server_instance_id=server_instance_id,
         session_id=session_id,
         gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+        outfit_catalog=getattr(
+            getattr(orchestrator, "avatar_wardrobe", None), "catalog", {}
+        ),
+        current_outfit=getattr(
+            getattr(orchestrator, "avatar_wardrobe", None), "current_outfit", None
+        ),
         session_kind=session_kind,
         local_human_display_name=getattr(orchestrator, "local_human_name", "You"),
         local_assistant_display_name=getattr(orchestrator, "local_assistant_name", "Astra"),

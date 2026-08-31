@@ -341,6 +341,17 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertNotEqual(session_id, "session-a")
 
+    def test_resolve_session_id_restores_saved_session_after_server_restart(self):
+        session_id = server_module.resolve_session_id(
+            session_mode="resume",
+            requested_session_id="session-a",
+            known_server_instance_id="stale-server",
+            server_instance_id="server-1",
+            requested_session_exists=True,
+        )
+
+        self.assertEqual(session_id, "session-a")
+
     def test_parse_user_message_supports_structured_reasoning_override(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
@@ -569,6 +580,8 @@ class ServerSessionTests(unittest.TestCase):
             server_instance_id="server-1",
             session_id="session-a",
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            outfit_catalog={"default": "/static/avatar.vrm"},
+            current_outfit="default",
         )
 
         self.assertEqual(
@@ -578,6 +591,8 @@ class ServerSessionTests(unittest.TestCase):
                 "server_instance_id": "server-1",
                 "session_id": "session-a",
                 "gesture_catalog": {"greeting": "/static/animations/Gestures/Greeting.fbx"},
+                "outfit_catalog": {"default": "/static/avatar.vrm"},
+                "current_outfit": "default",
                 "session_kind": "direct",
                 "local_human_display_name": "You",
                 "local_assistant_display_name": "Astra",

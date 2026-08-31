@@ -1,5 +1,6 @@
 from app.integrations.contracts import (
     ApprovalRequest,
+    AvatarOutfitEffect,
     CapabilityId,
     ContextContribution,
     EventAttachmentRef,
@@ -25,10 +26,13 @@ from app.integrations.builtins import MemoryIntegration, ShellIntegration, WebIn
 from app.integrations.mindcraft import MindcraftClient, MindcraftIntegration
 from app.integrations.runtime import RuntimeIntegration
 from app.integrations.vision import VisionIntegration
+from app.integrations.outfit import AvatarWardrobe, OutfitIntegration
 
 
 __all__ = [
     "ApprovalRequest",
+    "AvatarOutfitEffect",
+    "AvatarWardrobe",
     "CapabilityId",
     "ContextContribution",
     "EventAttachmentRef",
@@ -56,4 +60,5 @@ __all__ = [
     "ShellIntegration",
     "WebIntegration",
     "VisionIntegration",
+    "OutfitIntegration",
 ]

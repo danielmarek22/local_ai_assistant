@@ -4,9 +4,10 @@ import uuid
 from collections.abc import Callable, Generator
 
 from app.core.assistant_state import AssistantState
-from app.core.events import AssistantStateEvent
+from app.core.events import AssistantStateEvent, AvatarOutfitEvent
 from app.integrations import (
     ApprovalRequest,
+    AvatarOutfitEffect,
     CapabilityId,
     IntegrationRegistry,
     InvocationContext,
@@ -143,4 +144,7 @@ class ToolExecutor:
                 "content": result.content,
             },
         )
+        for effect in result.effects:
+            if isinstance(effect, AvatarOutfitEffect):
+                yield AvatarOutfitEvent(outfit=effect.outfit, url=effect.url)
         return result

@@ -80,9 +80,10 @@ class ContextBuilder:
 
         summary_record = self.summary_store.get(session_id) if self.summary_store else None
         if isinstance(summary_record, tuple):
-            summary = summary_record[0]
+            summary, last_summarized_count = summary_record
         else:
             summary = summary_record
+            last_summarized_count = None
 
         messages.append({
             "role": "system",
@@ -105,7 +106,11 @@ class ContextBuilder:
                 bool(belief_context),
             )
 
-        history_limit = 2 if summary else self.history_limit
+        history_limit = self._history_limit_for_summary(
+            session_id,
+            summary=summary,
+            last_summarized_count=last_summarized_count,
+        )
         history = self.history_store.get_recent(
             session_id=session_id,
             limit=history_limit,
@@ -140,16 +145,15 @@ class ContextBuilder:
 
             seen.add(key)
 
+            history_content = self._with_attachment_context(content, row_attachments)
             message = {
                 "role": role,
                 "content": (
-                    render_group_message(content, row_sender)
+                    render_group_message(history_content, row_sender)
                     if session_kind == SessionKind.MANUAL_GROUP
-                    else content
+                    else history_content
                 ),
             }
-            if role == "user" and row_attachments:
-                self._attach_multimodal_payloads(message, row_attachments)
 
             messages.append(message)
 
@@ -188,6 +192,48 @@ class ContextBuilder:
             },
         )
         return messages
+
+    def _history_limit_for_summary(
+        self,
+        session_id: str,
+        *,
+        summary: str | None,
+        last_summarized_count: int | None,
+    ) -> int:
+        if not summary:
+            return self.history_limit
+
+        # A summary is only authoritative through its saved checkpoint. Keep
+        # all newer messages (within the configured safety bound) so reopening
+        # a chat reconstructs the same state that existed before a restart.
+        count_messages = getattr(self.history_store, "count_messages", None)
+        if not callable(count_messages) or last_summarized_count is None:
+            return min(2, self.history_limit)
+
+        unsummarized_count = max(
+            0,
+            count_messages(session_id) - int(last_summarized_count),
+        )
+        return min(self.history_limit, max(2, unsummarized_count))
+
+    def _with_attachment_context(
+        self,
+        content: str,
+        attachments: list[Attachment],
+    ) -> str:
+        """Keep historical attachments useful without replaying their binary payloads."""
+        descriptions = []
+        for attachment in attachments:
+            if not isinstance(attachment, ImageAttachment):
+                continue
+            description = f"Earlier attached image: {attachment.name}"
+            if attachment.summary_text:
+                description += f". Image summary: {attachment.summary_text.strip()}"
+            descriptions.append(f"[{description}]")
+
+        if not descriptions:
+            return content
+        return "\n".join([content, *descriptions])
 
     def _build_system_message(
         self,

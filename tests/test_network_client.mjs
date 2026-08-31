@@ -54,3 +54,61 @@ test('relay payload contains only the accepted v1 fields', () => {
         text: 'Hello',
     });
 });
+
+
+test('outfit catalog and change events are dispatched', () => {
+    let initialized = null;
+    let changed = null;
+    const client = new NetworkClient({
+        onSessionInit: (payload) => { initialized = payload; },
+        onOutfit: (payload) => { changed = payload; },
+    });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'session_init',
+        server_instance_id: 'server-1',
+        session_id: 'session-1',
+        outfit_catalog: { pajamas: '/static/avatars/pajamas.vrm' },
+        current_outfit: 'pajamas',
+    }) });
+    assert.deepEqual(initialized.outfitCatalog, {
+        pajamas: '/static/avatars/pajamas.vrm',
+    });
+    assert.equal(initialized.currentOutfit, 'pajamas');
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'assistant_outfit',
+        outfit: 'pajamas',
+        url: '/static/avatars/pajamas.vrm',
+    }) });
+    assert.deepEqual(changed, {
+        outfit: 'pajamas',
+        url: '/static/avatars/pajamas.vrm',
+    });
+});
+
+
+test('state and animation handlers receive turn IDs', () => {
+    let stateEvent = null;
+    let animationEvent = null;
+    const client = new NetworkClient({
+        onState: (state, turnId) => { stateEvent = { state, turnId }; },
+        onAnimation: (animation, turnId) => { animationEvent = { animation, turnId }; },
+    });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'assistant_state',
+        state: 'thinking',
+        turn_id: 'turn-7',
+    }) });
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'assistant_animation',
+        animation: 'wave',
+        turn_id: 'turn-7',
+    }) });
+
+    assert.deepEqual(stateEvent, { state: 'thinking', turnId: 'turn-7' });
+    assert.deepEqual(animationEvent, { animation: 'wave', turnId: 'turn-7' });
+});

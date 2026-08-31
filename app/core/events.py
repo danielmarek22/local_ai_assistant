@@ -33,6 +33,12 @@ class AvatarAnimationEvent(BaseEvent):
     animation: str
 
 
+class AvatarOutfitEvent(BaseEvent):
+    type: Literal["outfit"] = "outfit"
+    outfit: str
+    url: str
+
+
 class AutonomyOutcomeEvent(BaseEvent):
     type: Literal["autonomy_outcome"] = "autonomy_outcome"
     summary: str
@@ -46,5 +52,6 @@ TurnEvent = Union[
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AvatarOutfitEvent,
     AutonomyOutcomeEvent,
 ]
