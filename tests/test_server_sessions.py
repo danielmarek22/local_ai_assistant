@@ -266,6 +266,20 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0]["mime_type"], "image/png")
         self.assertTrue(attachments[0]["url"].startswith("/static/"))
 
+    def test_get_session_exposes_retry_state_on_original_user_message(self):
+        message_id = self.history.add("retry-session", "user", "Please try")
+        self.history.mark_turn_failed(
+            "retry-session", message_id, "Astra couldn't finish this response."
+        )
+
+        payload = server_module.asyncio.run(server_module.get_session("retry-session"))
+
+        self.assertEqual(payload["messages"][0]["id"], message_id)
+        self.assertEqual(payload["messages"][0]["retryable_failure"], {
+            "message": "Astra couldn't finish this response.",
+            "attempts": 1,
+        })
+
     def test_delete_session_removes_rows(self):
         message_id = self.history.add(
             "session-b",
@@ -371,6 +385,22 @@ class ServerSessionTests(unittest.TestCase):
         self.assertIsNone(reasoning)
         self.assertIs(instant_mode, True)
         self.assertEqual(attachments, [])
+
+    def test_parse_retry_message_accepts_only_a_stored_message_reference(self):
+        message_id, reasoning, instant_mode = server_module.parse_retry_message({
+            "type": "retry_message",
+            "message_id": 42,
+            "reasoning": False,
+            "instant_mode": True,
+        })
+
+        self.assertEqual(message_id, 42)
+        self.assertIs(reasoning, False)
+        self.assertTrue(instant_mode)
+        with self.assertRaises(ValueError):
+            server_module.parse_retry_message({
+                "type": "retry_message", "message_id": "42"
+            })
 
     def test_parse_user_message_parses_base64_image_attachments(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(

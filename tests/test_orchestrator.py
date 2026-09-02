@@ -5,6 +5,8 @@ from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
+    UserMessageAcceptedEvent,
+    AssistantTurnFailureEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
@@ -839,11 +841,12 @@ class OrchestratorTests(unittest.TestCase):
             for event in events
         ))
 
-    def test_two_belief_rejections_then_buffered_recovery_timeout_persists_fallback(self):
+    def test_two_belief_rejections_then_instant_recovery_timeout_persists_fallback(self):
         class BufferedTimeoutLLM:
             def __init__(self, responses):
                 self.responses = list(responses)
                 self.calls = []
+                self.stream_calls = []
 
             def chat_buffered(self, **kwargs):
                 self.calls.append(kwargs)
@@ -854,8 +857,9 @@ class OrchestratorTests(unittest.TestCase):
             def chat(self, **_kwargs):
                 raise AssertionError("buffered ReAct path expected")
 
-            def stream_chat(self, *_args, **_kwargs):
-                raise AssertionError("partial recovery must not be exposed")
+            def stream_chat(self, messages, **kwargs):
+                self.stream_calls.append((messages, kwargs))
+                raise TimeoutError("instant recovery timed out before first chunk")
 
         built = self._build_orchestrator(
             plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
@@ -884,25 +888,50 @@ class OrchestratorTests(unittest.TestCase):
         ))
         final = [event.text for event in events
                  if isinstance(event, AssistantSpeechEvent) and event.is_final]
-        self.assertEqual(final, ["I'm sorry, I lost my train of thought. Could you repeat that?"])
+        self.assertEqual(final, [])
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.message, "Astra couldn't finish this response.")
+        self.assertEqual(failure.user_message_id, 1)
         assistant_rows = [row for row in built[2].records if row[1] == "assistant"]
-        self.assertEqual([row[2] for row in assistant_rows], final)
+        self.assertEqual(assistant_rows, [])
         self.assertEqual(len(built[7].calls), 2)
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.stream_calls), 1)
         self.assertTrue(client.calls[0]["think_override"])
         self.assertIsNone(client.calls[0]["options_override"])
         self.assertFalse(client.calls[1]["think_override"])
         self.assertEqual(client.calls[1]["options_override"], {"num_predict": 512})
-        self.assertFalse(client.calls[2]["think_override"])
-        self.assertEqual(client.calls[2]["options_override"], {"num_predict": 192})
-        self.assertIsNone(client.calls[2]["tools"])
         self.assertEqual(
             [call["generation_phase"] for call in client.calls],
-            ["initial", "correction", "recovery"],
+            ["initial", "correction"],
         )
-        self.assertEqual([call["react_iteration"] for call in client.calls], [1, 2, 3])
+        self.assertEqual([call["react_iteration"] for call in client.calls], [1, 2])
+        recovery_messages, recovery_kwargs = client.stream_calls[0]
+        self.assertEqual(len(recovery_messages), 2)
+        self.assertEqual(recovery_messages[-1], {
+            "role": "user", "content": "my current activity is testing"
+        })
+        self.assertIn("Latest tool observation", recovery_messages[0]["content"])
+        self.assertFalse(recovery_kwargs["think_override"])
+        self.assertEqual(recovery_kwargs["options_override"], {"num_predict": 192})
+        self.assertEqual(recovery_kwargs["generation_deadline_s"], 180.0)
+        self.assertEqual(recovery_kwargs["timeout_override"], 180.0)
 
-    def test_forced_recovery_empty_uses_and_persists_deterministic_fallback(self):
+    def test_late_routing_uses_extended_generation_budget(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+        )
+        client = BufferedPhaseLLM([{"content": "Eventually answered."}])
+        built[0].llm = client
+
+        list(built[0].handle_user_input("slow-model", "take your time"))
+
+        self.assertEqual(client.calls[0]["timeout_override"], 600.0)
+        self.assertEqual(client.calls[0]["generation_deadline_s"], 600.0)
+
+    def test_forced_recovery_empty_emits_retryable_failure_without_assistant_history(self):
         built = self._build_orchestrator(
             plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
@@ -911,18 +940,40 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
         events = list(built[0].handle_user_input("double-empty", "hello"))
-        final = next(
-            event.text for event in events
-            if isinstance(event, AssistantSpeechEvent) and event.is_final
-        )
-        self.assertEqual(
-            final, "I'm sorry, I lost my train of thought. Could you repeat that?"
-        )
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.message, "Astra couldn't finish this response.")
+        self.assertEqual(failure.user_message_id, 1)
         assistant_rows = [
             record for record in built[2].records if record[1] == "assistant"
         ]
-        self.assertEqual(len(assistant_rows), 1)
-        self.assertEqual(assistant_rows[0][2], final)
+        self.assertEqual(assistant_rows, [])
+
+    def test_retry_reuses_existing_user_message_without_duplicate_history(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            llm_chunks=["Recovered answer"],
+            summary_trigger=999,
+        )
+        built[2].add("retry-session", "user", "Original question")
+
+        events = list(built[0].handle_user_input(
+            "retry-session",
+            "Original question",
+            instant_mode=True,
+            existing_user_message_id=1,
+        ))
+
+        user_rows = [row for row in built[2].records if row[1] == "user"]
+        self.assertEqual(len(user_rows), 1)
+        accepted = next(event for event in events if isinstance(event, UserMessageAcceptedEvent))
+        self.assertEqual(accepted.message_id, 1)
+        self.assertTrue(accepted.is_retry)
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Recovered answer"
+            for event in events
+        ))
 
     def test_successful_corrected_belief_call_continues_to_final_response(self):
         built = self._build_orchestrator(
@@ -1638,15 +1689,14 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = []
-        with self.assertRaises(RuntimeError):
-            for event in orch.handle_user_input(self.SESSION_ID, "hello"):
-                events.append(event)
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         state_values = [
             event.state for event in events if isinstance(event, AssistantStateEvent)
         ]
         self.assertEqual(state_values[-1], AssistantState.IDLE)
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.user_message_id, 1)
 
     def test_user_input_generator_close_does_not_yield_during_generatorexit(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])

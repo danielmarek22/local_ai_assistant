@@ -438,6 +438,7 @@ class OllamaClient(LLMClient):
         tools: list[dict] | None = None,
         options_override: dict | None = None,
         generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
     ) -> Iterator[str | dict]:
         """
         Streaming call. Yields text chunks for user-facing responses.
@@ -479,6 +480,7 @@ class OllamaClient(LLMClient):
                 collected_content,
                 collected_thinking,
                 generation_deadline_s=generation_deadline_s,
+                timeout_override=timeout_override,
             )
         except requests.HTTPError as exc:
             if not self._should_retry_without_images(exc, request_messages):
@@ -514,6 +516,7 @@ class OllamaClient(LLMClient):
                     yield from self._stream_payload(
                         payload, collected_content, collected_thinking,
                         generation_deadline_s=generation_deadline_s,
+                        timeout_override=timeout_override,
                     )
                     self.last_stream_image_fallback_strategy = strategy
                     if dropped_current_images_count > 0:
@@ -555,6 +558,7 @@ class OllamaClient(LLMClient):
         collected_content: list[str],
         collected_thinking: list[str],
         generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
     ) -> Iterator[str | dict]: # Update return type
         """
         Consume a streaming response from /api/chat (native NDJSON format).
@@ -562,7 +566,7 @@ class OllamaClient(LLMClient):
         in_thinking_block = False
 
         started = time.perf_counter()
-        with self._post_stream(payload) as r:
+        with self._post_stream(payload, timeout_override=timeout_override) as r:
             for line in r.iter_lines():
                 if generation_deadline_s is not None and time.perf_counter() - started > generation_deadline_s:
                     raise InferenceFailure(

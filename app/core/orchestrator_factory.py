@@ -424,6 +424,15 @@ def build_orchestrator() -> Orchestrator:
         local_human_name=config.local_human["display_name"],
         local_assistant_name=assistant_name,
         belief_processing_mode=config.beliefs["processing_mode"],
+        generation_deadline_s=float(
+            config.orchestrator.get("generation_deadline_s", 600.0)
+        ),
+        recovery_deadline_s=float(
+            config.orchestrator.get("recovery_deadline_s", 180.0)
+        ),
+        recovery_num_predict=int(
+            config.orchestrator.get("recovery_num_predict", 192)
+        ),
         belief_turn_preparer=(
             belief_turn_preparer
             if config.beliefs["processing_mode"] == "react_tool"

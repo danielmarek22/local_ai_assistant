@@ -139,6 +139,14 @@ const handlers = {
             uiManager.addNoticeToLastUserMessage(payload.message, payload?.tone || 'warning');
         }
     },
+    onUserMessageAccepted: ({ messageId, isRetry }) => {
+        uiManager.acknowledgeUserMessage(messageId, isRetry);
+    },
+    onRetryableError: ({ userMessageId, message, attempts }) => {
+        uiManager.showRetryableError(userMessageId, message, attempts);
+        assistantState = 'idle';
+        syncAssistantPresentation();
+    },
     onToolApprovalRequest: (payload) => {
         uiManager.showToolApprovalRequest(payload, (approvalId, approved) => {
             client.sendToolApproval(approvalId, approved);
@@ -436,6 +444,18 @@ uiManager.onSend((text, options) => {
 
     uiManager.appendUserMessage(text, options.attachments || []);
     client.sendMessage(text, options);
+});
+
+uiManager.onRetry(({ messageId }) => {
+    audioManager.init();
+    uiManager.beginRetry(messageId);
+    const sent = client.sendRetry(messageId, {
+        reasoning: uiManager.isAgentModeEnabled(),
+        instantMode: !uiManager.isAgentModeEnabled(),
+    });
+    if (!sent) {
+        uiManager.showRetryableError(messageId, 'Astra is offline. Reconnect and try again.', 0);
+    }
 });
 
 uiManager.onRelay(({ senderDisplayName, senderType, text }) => {

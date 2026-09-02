@@ -208,6 +208,49 @@ class ChatHistoryStoreTests(unittest.TestCase):
         raw = migrated.conn.execute("SELECT sender_id FROM chat_history WHERE id = 1").fetchone()
         self.assertIsNone(raw["sender_id"])
 
+    def test_failed_turn_is_retryable_and_resolves_without_duplicate_user_message(self):
+        message_id = self.store.add("retry", "user", "Please answer this")
+
+        attempts = self.store.mark_turn_failed(
+            "retry", message_id, "Astra couldn't finish this response."
+        )
+
+        self.assertEqual(attempts, 1)
+        retry_row = self.store.get_retryable_user_message("retry", message_id)
+        self.assertEqual(retry_row["content"], "Please answer this")
+        self.assertEqual(retry_row["retry_attempts"], 1)
+        self.store.resolve_turn_failure("retry", message_id)
+        self.assertIsNone(self.store.get_retryable_user_message("retry", message_id))
+        self.assertEqual(self.store.count_messages("retry"), 1)
+
+    def test_legacy_fallback_is_hidden_and_migrated_to_user_failure(self):
+        db_path = Path(self.temp_dir.name) / "legacy-fallback.db"
+        legacy = Database(str(db_path))
+        legacy.conn.execute(
+            """INSERT INTO chat_history (session_id, role, content)
+               VALUES ('legacy-fallback', 'user', 'Try this')"""
+        )
+        legacy.conn.execute(
+            """INSERT INTO chat_history (session_id, role, content)
+               VALUES ('legacy-fallback', 'assistant', ?)""",
+            ("I'm sorry, I lost my train of thought. Could you repeat that?",),
+        )
+        legacy.conn.commit()
+        legacy.conn.close()
+
+        migrated = Database(str(db_path))
+        store = ChatHistoryStore(
+            migrated, self.vector_store, uploads_root=self.temp_dir.name
+        )
+
+        rows = store.get_all("legacy-fallback")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["role"], "user")
+        self.assertEqual(rows[0]["retry_attempts"], 1)
+        self.assertIsNotNone(
+            store.get_retryable_user_message("legacy-fallback", rows[0]["id"])
+        )
+
     def test_group_session_and_vector_documents_preserve_sender(self):
         self.store.ensure_session("group-1", SessionKind.MANUAL_GROUP)
         sender = SenderAttribution(

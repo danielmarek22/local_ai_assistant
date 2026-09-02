@@ -22,6 +22,7 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "memory_retrieval",
         "plan_result",
         "assistant_response",
+        "assistant_response_failed",
         "planner_input",
         "llm_stream_complete",
         "late_routing_directive",

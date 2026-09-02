@@ -22,3 +22,6 @@ static/uploads/
 VO_Escoffier_Hello.wav
 app/tts/escoffier.safetensors
 astra_minecraft*
+
+# Generated documentation output
+site/

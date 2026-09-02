@@ -209,6 +209,51 @@ class Database:
         ):
             if column_name not in history_columns:
                 cursor.execute(f"ALTER TABLE chat_history ADD COLUMN {column_name} TEXT")
+        if "retry_error" not in history_columns:
+            cursor.execute("ALTER TABLE chat_history ADD COLUMN retry_error TEXT")
+        if "retry_attempts" not in history_columns:
+            cursor.execute(
+                "ALTER TABLE chat_history ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        if "excluded_from_context" not in history_columns:
+            cursor.execute(
+                "ALTER TABLE chat_history ADD COLUMN excluded_from_context INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Preserve old deterministic fallbacks as diagnostics, but attach their
+        # failure state to the preceding user turn and keep the fallback prose
+        # out of both the UI and future model context.
+        legacy_fallback = "I'm sorry, I lost my train of thought. Could you repeat that?"
+        legacy_rows = cursor.execute(
+            """
+            SELECT id, session_id FROM chat_history
+            WHERE role = 'assistant' AND content = ? AND excluded_from_context = 0
+            """,
+            (legacy_fallback,),
+        ).fetchall()
+        for fallback_row in legacy_rows:
+            user_row = cursor.execute(
+                """
+                SELECT id FROM chat_history
+                WHERE session_id = ? AND role = 'user' AND id < ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (fallback_row["session_id"], fallback_row["id"]),
+            ).fetchone()
+            if user_row is not None:
+                cursor.execute(
+                    """
+                    UPDATE chat_history
+                    SET retry_error = COALESCE(retry_error, ?),
+                        retry_attempts = MAX(retry_attempts, 1)
+                    WHERE id = ?
+                    """,
+                    ("Astra couldn't finish this response.", user_row["id"]),
+                )
+            cursor.execute(
+                "UPDATE chat_history SET excluded_from_context = 1 WHERE id = ?",
+                (fallback_row["id"],),
+            )
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS chat_sessions (

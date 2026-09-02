@@ -19,7 +19,7 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Injected background context behavior
   - Summary inclusion behavior
   - Deduplication and filtering of recent history
-  - Replaying recent stored image attachments into multimodal context
+  - Keeping current image payloads while replacing historical images with bounded text summaries
 
 - `test_memory_store.py`
   - SQLite + vector-store dual writes

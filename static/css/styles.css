@@ -1065,6 +1065,57 @@ body {
     text-transform: uppercase;
 }
 
+.turn-retry-card {
+    align-self: flex-end;
+    width: min(85%, 420px);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: -4px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 180, 66, 0.42);
+    border-radius: 10px;
+    background: rgba(255, 180, 66, 0.1);
+    color: #f5d6a0;
+    font-size: 12px;
+}
+
+.turn-retry-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.turn-retry-copy span {
+    color: rgba(245, 214, 160, 0.7);
+    font-size: 11px;
+}
+
+.turn-retry-button {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid rgba(255, 180, 66, 0.55);
+    border-radius: 8px;
+    background: rgba(255, 180, 66, 0.16);
+    color: #ffe4b5;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+}
+
+.turn-retry-button:hover:not(:disabled) {
+    background: rgba(255, 180, 66, 0.25);
+}
+
+.turn-retry-button:disabled {
+    cursor: default;
+    opacity: 0.65;
+}
+
 /* Markdown content in assistant bubbles */
 .message.astra p,
 .message.thinking p {

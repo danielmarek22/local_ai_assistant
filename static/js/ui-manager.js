@@ -82,6 +82,8 @@ export class UIManager {
         this.defaultMessages = this.serializeChatHistory();
         this.pendingToolApprovals = [];
         this.activeToolApproval = null;
+        this.onRetryHandler = null;
+        this.activeRetryMessageId = null;
 
         // STT recording state
         this._mediaRecorder = null;
@@ -529,6 +531,7 @@ export class UIManager {
             inputSource: 'local_voice',
         });
         msgDiv.classList.add('from-stt');
+        msgDiv.dataset.awaitingMessageId = 'true';
     }
 
     // ============================================================
@@ -1182,11 +1185,12 @@ export class UIManager {
     appendUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        this.createMessageDiv('user', text, attachments, {
+        const msgDiv = this.createMessageDiv('user', text, attachments, {
             senderDisplayName: this.localHumanDisplayName,
             senderType: 'human',
             inputSource: 'local_text',
         });
+        msgDiv.dataset.awaitingMessageId = 'true';
     }
 
     appendRelayMessage(text, senderDisplayName, senderType) {
@@ -1225,6 +1229,105 @@ export class UIManager {
         const messages = this.chatHistory.querySelectorAll('.message.user');
         if (!messages.length) return null;
         return messages[messages.length - 1];
+    }
+
+    findUserMessageById(messageId) {
+        const target = String(messageId);
+        return Array.from(this.chatHistory.querySelectorAll('.message.user'))
+            .find((message) => message.dataset.messageId === target) || null;
+    }
+
+    acknowledgeUserMessage(messageId, isRetry = false) {
+        if (isRetry) {
+            this.activeRetryMessageId = String(messageId);
+            return;
+        }
+        const message = this.chatHistory.querySelector('.message.user[data-awaiting-message-id="true"]');
+        if (!message) return;
+        message.dataset.messageId = String(messageId);
+        delete message.dataset.awaitingMessageId;
+        this.persistChatHistory();
+    }
+
+    showRetryableError(messageId, message, attempts = 1) {
+        const userMessage = this.findUserMessageById(messageId);
+        if (!userMessage) return;
+
+        this.currentAiMessageDiv?.remove();
+        this.currentThinkingMessageDiv?.remove();
+        this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
+
+        userMessage.dataset.retryError = message;
+        userMessage.dataset.retryAttempts = String(Math.max(1, Number(attempts) || 1));
+        this.renderRetryCard(userMessage, message, attempts);
+        this.persistChatHistory();
+        this.scrollToBottom();
+    }
+
+    renderRetryCard(userMessage, message, attempts = 1) {
+        const messageId = userMessage.dataset.messageId;
+        if (!messageId) return;
+        this.chatHistory.querySelector(`.turn-retry-card[data-user-message-id="${messageId}"]`)?.remove();
+
+        const card = document.createElement('div');
+        card.className = 'turn-retry-card';
+        card.dataset.userMessageId = messageId;
+
+        const copy = document.createElement('div');
+        copy.className = 'turn-retry-copy';
+        const title = document.createElement('strong');
+        title.textContent = message || "Astra couldn't finish this response.";
+        copy.appendChild(title);
+        if (Number(attempts) > 1) {
+            const attemptText = document.createElement('span');
+            attemptText.textContent = `${attempts} attempts so far`;
+            copy.appendChild(attemptText);
+        }
+
+        const retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.className = 'turn-retry-button';
+        retryButton.textContent = 'Retry message';
+        retryButton.addEventListener('click', () => {
+            if (this.onRetryHandler) this.onRetryHandler({ messageId: Number(messageId) });
+        });
+
+        card.append(copy, retryButton);
+        userMessage.insertAdjacentElement('afterend', card);
+    }
+
+    beginRetry(messageId) {
+        const target = String(messageId);
+        this.activeRetryMessageId = target;
+        const card = this.chatHistory.querySelector(
+            `.turn-retry-card[data-user-message-id="${target}"]`
+        );
+        if (!card) return;
+        card.classList.add('retrying');
+        const button = card.querySelector('.turn-retry-button');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Retrying…';
+        }
+    }
+
+    clearRetryableError(messageId) {
+        const target = String(messageId);
+        const userMessage = this.findUserMessageById(target);
+        if (userMessage) {
+            delete userMessage.dataset.retryError;
+            delete userMessage.dataset.retryAttempts;
+        }
+        this.chatHistory.querySelector(
+            `.turn-retry-card[data-user-message-id="${target}"]`
+        )?.remove();
+        this.persistChatHistory();
+    }
+
+    onRetry(callback) {
+        this.onRetryHandler = callback;
     }
 
     startAiMessage() {
@@ -1275,6 +1378,10 @@ export class UIManager {
             this.setMessageContent(this.currentAiMessageDiv, text);
             this.persistChatHistory();
             this.currentAiMessageDiv = null;
+        }
+        if (this.activeRetryMessageId) {
+            this.clearRetryableError(this.activeRetryMessageId);
+            this.activeRetryMessageId = null;
         }
     }
 
@@ -1354,6 +1461,11 @@ export class UIManager {
         msgDiv.dataset.senderDisplayName = metadata.senderDisplayName || '';
         msgDiv.dataset.senderType = senderType;
         msgDiv.dataset.inputSource = inputSource;
+        if (metadata.messageId) msgDiv.dataset.messageId = String(metadata.messageId);
+        if (metadata.retryableFailure?.message) {
+            msgDiv.dataset.retryError = metadata.retryableFailure.message;
+            msgDiv.dataset.retryAttempts = String(metadata.retryableFailure.attempts || 1);
+        }
         const controlledTypes = ['human', 'external_agent', 'local_assistant', 'system', 'tool', 'integration_runtime'];
         const controlledSources = ['local_text', 'local_voice', 'manual_relay', 'assistant_generation', 'system_runtime', 'tool_runtime', 'integration_runtime'];
         if (controlledTypes.includes(senderType)) msgDiv.classList.add(`sender-${senderType.replaceAll('_', '-')}`);
@@ -1477,6 +1589,7 @@ export class UIManager {
         this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
         this.restoreChatHistory();
     }
 
@@ -1527,6 +1640,11 @@ export class UIManager {
                 senderDisplayName: message.dataset.senderDisplayName || '',
                 senderType: message.dataset.senderType || '',
                 inputSource: message.dataset.inputSource || '',
+                messageId: Number(message.dataset.messageId) || null,
+                retryableFailure: message.dataset.retryError ? {
+                    message: message.dataset.retryError,
+                    attempts: Number(message.dataset.retryAttempts) || 1,
+                } : null,
             };
         });
     }
@@ -1564,6 +1682,13 @@ export class UIManager {
             this.setMessageMetadata(msgDiv, message);
             this.setMessageContent(msgDiv, message.text, message.attachments || []);
             this.chatHistory.appendChild(msgDiv);
+            if (message.retryableFailure?.message && message.messageId) {
+                this.renderRetryCard(
+                    msgDiv,
+                    message.retryableFailure.message,
+                    message.retryableFailure.attempts,
+                );
+            }
         }
 
         this.scrollToBottom();
@@ -1579,6 +1704,8 @@ export class UIManager {
             senderDisplayName: message.sender_display_name,
             senderType: message.sender_type,
             inputSource: message.input_source,
+            messageId: message.id,
+            retryableFailure: message.retryable_failure,
         }));
 
         this.currentAiMessageDiv = null;
@@ -1590,6 +1717,7 @@ export class UIManager {
     resetChatToDefault() {
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
         this.clearPendingAttachments();
         this.renderMessages(this.defaultMessages);
         this.persistChatHistory();

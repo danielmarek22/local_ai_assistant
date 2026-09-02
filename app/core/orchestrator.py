@@ -10,6 +10,8 @@ from typing import Callable, Optional
 
 from app.core.events import (
     AssistantSpeechEvent,
+    UserMessageAcceptedEvent,
+    AssistantTurnFailureEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
@@ -50,6 +52,10 @@ logger = logging.getLogger("orchestrator")
 _DEFAULT_AVATAR_EXPRESSION = "neutral"
 _SAFE_EMPTY_RESPONSE_FALLBACK = "I'm sorry, I lost my train of thought. Could you repeat that?"
 _BELIEF_CAPABILITY = CapabilityId("beliefs", "update")
+_DEFAULT_GENERATION_DEADLINE_S = 600.0
+_DEFAULT_RECOVERY_DEADLINE_S = 180.0
+_DEFAULT_RECOVERY_NUM_PREDICT = 192
+_MAX_RECOVERY_OBSERVATION_CHARS = 1200
 
 
 @dataclass
@@ -91,6 +97,9 @@ class Orchestrator:
         local_assistant_name: str = "Astra",
         belief_processing_mode: str = "disabled",
         belief_turn_preparer=None,
+        generation_deadline_s: float = _DEFAULT_GENERATION_DEADLINE_S,
+        recovery_deadline_s: float = _DEFAULT_RECOVERY_DEADLINE_S,
+        recovery_num_predict: int = _DEFAULT_RECOVERY_NUM_PREDICT,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -111,6 +120,9 @@ class Orchestrator:
         self.local_assistant_name = local_assistant_name
         self.belief_processing_mode = belief_processing_mode
         self.belief_turn_preparer = belief_turn_preparer
+        self.generation_deadline_s = max(1.0, float(generation_deadline_s))
+        self.recovery_deadline_s = max(1.0, float(recovery_deadline_s))
+        self.recovery_num_predict = max(1, int(recovery_num_predict))
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -138,6 +150,7 @@ class Orchestrator:
         tool_approval_callback: Callable[[dict], bool] | None = None,
         sender: SenderAttribution | None = None,
         session_kind: SessionKind | str | None = None,
+        existing_user_message_id: int | None = None,
     ):
         start_ts = time.perf_counter()
         observed_at = datetime.now(timezone.utc)
@@ -164,6 +177,7 @@ class Orchestrator:
         history_text = turn_input.history_text()
         idle_emitted = False
         is_closing = False
+        user_message_id: int | None = None
 
         try:
             logger.info(
@@ -236,13 +250,20 @@ class Orchestrator:
                 for attachment in turn_input.attachments
                 if isinstance(attachment, ImageAttachment)
             ]
-            user_message_id = self.history.add(
-                session_id,
-                "user",
-                history_text,
-                attachments=storable_attachments,
-                sender=sender,
-                session_kind=session_kind,
+            if existing_user_message_id is None:
+                user_message_id = self.history.add(
+                    session_id,
+                    "user",
+                    history_text,
+                    attachments=storable_attachments,
+                    sender=sender,
+                    session_kind=session_kind,
+                )
+            else:
+                user_message_id = int(existing_user_message_id)
+            yield UserMessageAcceptedEvent(
+                message_id=user_message_id,
+                is_retry=existing_user_message_id is not None,
             )
             authoritative_turn = AuthoritativeTurnContext(
                 owner_agent_id=self.agent_id,
@@ -314,14 +335,41 @@ class Orchestrator:
                     initial_think_override=turn_input.think_override,
                 )
 
-            # Never persist empty model output. A visible deterministic fallback is
-            # itself a valid assistant response and belongs in the conversation.
             if not response or not response.strip():
                 logger.warning(
                     "[%s] LLM returned empty response; using deterministic fallback.",
                     session_id,
                 )
                 response = _SAFE_EMPTY_RESPONSE_FALLBACK
+            if response == _SAFE_EMPTY_RESPONSE_FALLBACK:
+                failure_message = "Astra couldn't finish this response."
+                mark_failed = getattr(self.history, "mark_turn_failed", None)
+                attempts = (
+                    mark_failed(session_id, user_message_id, failure_message)
+                    if callable(mark_failed)
+                    else 1
+                )
+                trace_event(
+                    "orchestrator",
+                    "assistant_response_failed",
+                    session_id=session_id,
+                    payload={
+                        "user_message_id": user_message_id,
+                        "attempts": attempts,
+                    },
+                )
+                yield AssistantTurnFailureEvent(
+                    user_message_id=user_message_id,
+                    message=failure_message,
+                    attempts=attempts,
+                )
+                idle_emitted = True
+                yield AssistantStateEvent(state=AssistantState.IDLE)
+                return
+
+            resolve_failure = getattr(self.history, "resolve_turn_failure", None)
+            if existing_user_message_id is not None and callable(resolve_failure):
+                resolve_failure(session_id, user_message_id)
             self.history.add(session_id, "assistant", response)
             trace_event(
                 "orchestrator",
@@ -332,10 +380,15 @@ class Orchestrator:
             yield AssistantSpeechEvent(text=response, is_final=True)
 
             # 6. Post-processing (summarization)
-            self.turn_finalizer.finalize(
-                session_id,
-                completed_turn=authoritative_turn,
-            )
+            try:
+                self.turn_finalizer.finalize(
+                    session_id,
+                    completed_turn=authoritative_turn,
+                )
+            except Exception:
+                # The answer is already durable and visible. A secondary
+                # summary/belief failure must not turn it into a retryable turn.
+                logger.exception("[%s] Turn post-processing failed", session_id)
 
             logger.info(
                 "[%s] Turn completed (duration=%.2f ms)",
@@ -348,6 +401,34 @@ class Orchestrator:
         except GeneratorExit:
             is_closing = True
             raise
+        except Exception as exc:
+            if user_message_id is None:
+                raise
+            logger.exception("[%s] Turn generation failed; exposing retry action", session_id)
+            failure_message = "Astra couldn't finish this response."
+            mark_failed = getattr(self.history, "mark_turn_failed", None)
+            attempts = (
+                mark_failed(session_id, user_message_id, failure_message)
+                if callable(mark_failed)
+                else 1
+            )
+            trace_event(
+                "orchestrator",
+                "assistant_response_failed",
+                session_id=session_id,
+                payload={
+                    "user_message_id": user_message_id,
+                    "attempts": attempts,
+                    "category": getattr(exc, "category", type(exc).__name__),
+                },
+            )
+            yield AssistantTurnFailureEvent(
+                user_message_id=user_message_id,
+                message=failure_message,
+                attempts=attempts,
+            )
+            idle_emitted = True
+            yield AssistantStateEvent(state=AssistantState.IDLE)
         finally:
             if not idle_emitted and not is_closing:
                 idle_emitted = True
@@ -692,6 +773,7 @@ class Orchestrator:
         think_override=None,
         options_override: dict | None = None,
         generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
     ):
         logger.info("[%s] Calling LLM (streaming)", session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
@@ -717,6 +799,10 @@ class Orchestrator:
             accepts_stream_kwargs or "generation_deadline_s" in stream_parameters
         ):
             stream_kwargs["generation_deadline_s"] = generation_deadline_s
+        if timeout_override is not None and (
+            accepts_stream_kwargs or "timeout_override" in stream_parameters
+        ):
+            stream_kwargs["timeout_override"] = timeout_override
         for chunk in self.llm.stream_chat(messages, **stream_kwargs):
             text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
             if not text_chunk:
@@ -864,6 +950,7 @@ class Orchestrator:
                 return (yield from self._force_tool_free_response(
                     session_id=session_id,
                     messages=messages,
+                    user_text=user_text,
                     reason=f"{inference_phase.value}_failure",
                     react_iteration=step,
                 ))
@@ -879,6 +966,7 @@ class Orchestrator:
                 return (yield from self._force_tool_free_response(
                     session_id=session_id,
                     messages=messages,
+                    user_text=user_text,
                     reason=reason,
                 ))
 
@@ -1007,6 +1095,7 @@ class Orchestrator:
                 return (yield from self._force_tool_free_response(
                     session_id=session_id,
                     messages=messages,
+                    user_text=user_text,
                     reason="belief_attempt_limit_reached",
                     react_iteration=step + 1,
                 ))
@@ -1026,8 +1115,8 @@ class Orchestrator:
         return (yield from self._force_tool_free_response(
             session_id=session_id,
             messages=messages,
+            user_text=user_text,
             reason="late_routing_step_limit",
-            append_instruction=False,
             react_iteration=self.max_late_routing_steps + 1,
         ))
 
@@ -1085,8 +1174,8 @@ class Orchestrator:
                 think_override=think_value,
                 options_override=options_override,
                 tools=native_tools,
-                timeout_override=120.0,
-                generation_deadline_s=120.0,
+                timeout_override=self.generation_deadline_s,
+                generation_deadline_s=self.generation_deadline_s,
                 generation_phase=inference_phase.value,
                 react_iteration=react_iteration,
             )
@@ -1096,7 +1185,7 @@ class Orchestrator:
                 think_override=think_value,
                 options_override=options_override,
                 tools=native_tools,
-                timeout_override=120.0,
+                timeout_override=self.generation_deadline_s,
             )
         inference_duration_ms = (time.perf_counter() - start_ts) * 1000
         trace_event(
@@ -1204,57 +1293,25 @@ class Orchestrator:
         *,
         session_id: str,
         messages,
+        user_text: str,
         reason: str,
-        append_instruction: bool = True,
         react_iteration: int | None = None,
     ):
-        if append_instruction:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "[SYSTEM INTERRUPT: TOOL-FREE RESPONSE RECOVERY]\n"
-                    "Do not call tools. Respond normally to the original participant message "
-                    "using only the bounded conversation and tool results above. Do not claim "
-                    "that a rejected operation succeeded."
-                ),
-            })
+        recovery_messages = self._build_instant_recovery_messages(
+            messages=messages,
+            user_text=user_text,
+        )
         start_ts = time.perf_counter()
         failure_category = None
         try:
-            buffered_chat = getattr(self.llm, "chat_buffered", None)
-            if callable(buffered_chat):
-                message = buffered_chat(
-                    messages=messages,
-                    think_override=False,
-                    options_override={"num_predict": 192},
-                    tools=None,
-                    timeout_override=45.0,
-                    generation_deadline_s=45.0,
-                    generation_phase=_GenerationPhase.RECOVERY.value,
-                    react_iteration=react_iteration,
-                )
-                visible_content = message.get("content", "")
-                response = ""
-                if visible_content:
-                    yield AssistantStateEvent(state=AssistantState.RESPONDING)
-                    processor = StreamProcessor(allowed_animations=self.allowed_animations)
-                    expression_initialized = False
-                    response, expression_initialized = yield from self._emit_processor_events(
-                        session_id, processor.push(visible_content), "", expression_initialized
-                    )
-                    response, expression_initialized = yield from self._emit_processor_events(
-                        session_id, processor.flush(), response, expression_initialized
-                    )
-                    if not expression_initialized:
-                        yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
-            else:
-                response = yield from self._stream_response(
-                    session_id,
-                    messages,
-                    think_override=False,
-                    options_override={"num_predict": 192},
-                    generation_deadline_s=45.0,
-                )
+            response = yield from self._stream_response(
+                session_id,
+                recovery_messages,
+                think_override=False,
+                options_override={"num_predict": self.recovery_num_predict},
+                generation_deadline_s=self.recovery_deadline_s,
+                timeout_override=self.recovery_deadline_s,
+            )
         except Exception as exc:
             failure_category = getattr(exc, "category", type(exc).__name__)
             logger.warning(
@@ -1275,9 +1332,42 @@ class Orchestrator:
                 "used_deterministic_fallback": used_fallback,
                 "tools_exposed": 0,
                 "failure_category": failure_category,
+                "message_count": len(recovery_messages),
+                "effective_think": False,
+                "effective_num_predict": self.recovery_num_predict,
+                "react_iteration": react_iteration,
             },
         )
         return response
+
+    @staticmethod
+    def _build_instant_recovery_messages(
+        *,
+        messages: list[dict],
+        user_text: str,
+    ) -> list[dict]:
+        """Build a small prompt for a direct, no-thinking recovery stream."""
+        latest_observation = ""
+        for message in reversed(messages):
+            if message.get("role") == "tool":
+                latest_observation = str(message.get("content", ""))
+                break
+        if latest_observation:
+            latest_observation = latest_observation[:_MAX_RECOVERY_OBSERVATION_CHARS]
+
+        instruction = (
+            "You are recovering an assistant response that did not finish in time. "
+            "Answer the participant's request immediately and concisely. Do not think aloud, "
+            "call tools, or mention this recovery instruction. Do not claim that an operation "
+            "succeeded unless the tool observation below confirms it. If essential context is "
+            "missing, say exactly what you need."
+        )
+        if latest_observation:
+            instruction += f"\n\nLatest tool observation:\n{latest_observation}"
+        return [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": user_text},
+        ]
 
     @staticmethod
     def _bounded_belief_argument_summary(arguments: object) -> dict:

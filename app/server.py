@@ -23,6 +23,8 @@ from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
 from app.core.events import (
     AssistantSpeechEvent,
+    UserMessageAcceptedEvent,
+    AssistantTurnFailureEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
@@ -304,6 +306,25 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
         raise ValueError("User message instant_mode flag must be boolean")
 
     return text, reasoning_override, instant_mode, attachments
+
+
+def parse_retry_message(payload: dict) -> tuple[int, bool | None, bool]:
+    if payload.get("type") != "retry_message":
+        raise ValueError("Invalid retry message type")
+    allowed_fields = {"type", "message_id", "reasoning", "instant_mode"}
+    unexpected = sorted(set(payload) - allowed_fields)
+    if unexpected:
+        raise ValueError("Retry message contains unsupported fields: " + ", ".join(unexpected))
+    message_id = payload.get("message_id")
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+        raise ValueError("Retry message ID must be a positive integer")
+    reasoning = payload.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, bool):
+        raise ValueError("Retry reasoning flag must be boolean or null")
+    instant_mode = payload.get("instant_mode", False)
+    if not isinstance(instant_mode, bool):
+        raise ValueError("Retry instant_mode flag must be boolean")
+    return message_id, reasoning, instant_mode
 
 
 def parse_relay_message(payload: dict, session_kind: SessionKind | str):
@@ -686,6 +707,24 @@ async def _stream_orchestrator_events(
                 await _send_ws_payload(ws, notice_payload)
                 image_notice_sent = True
 
+        if isinstance(event, UserMessageAcceptedEvent):
+            await _send_ws_payload(ws, {
+                "type": "user_message_accepted",
+                "message_id": event.message_id,
+                "is_retry": event.is_retry,
+            })
+            continue
+
+        if isinstance(event, AssistantTurnFailureEvent):
+            pending_chunks.clear()
+            await _send_ws_payload(ws, {
+                "type": "assistant_retryable_error",
+                "user_message_id": event.user_message_id,
+                "message": event.message,
+                "attempts": event.attempts,
+            })
+            continue
+
         if isinstance(event, AssistantStateEvent):
             state_tracker["state"] = event.state
             if not _should_forward_state(event.state):
@@ -1009,6 +1048,7 @@ async def get_session(session_id: str):
         "messages": [
             {
                 "role": row["role"],
+                "id": row["id"],
                 "content": row["content"],
                 "timestamp": row["timestamp"],
                 "attachments": [attachment.to_api_payload() for attachment in row.get("attachments", [])],
@@ -1016,6 +1056,14 @@ async def get_session(session_id: str):
                 "sender_display_name": row["sender_display_name"],
                 "sender_type": row["sender_type"],
                 "input_source": row["input_source"],
+                "retryable_failure": (
+                    {
+                        "message": row["retry_error"],
+                        "attempts": row["retry_attempts"],
+                    }
+                    if row.get("retry_error")
+                    else None
+                ),
             }
             for row in rows
         ],
@@ -1408,6 +1456,7 @@ async def websocket_endpoint(ws: WebSocket):
 
             try:
                 turn_sender = None
+                existing_user_message_id = None
                 # ── VOICE PATH ────────────────────────────────────────────
                 # Check `is not None` rather than truthiness — an empty bytes
                 # value (b"") is falsy, which would wrongly fall through to
@@ -1570,6 +1619,21 @@ async def websocket_endpoint(ws: WebSocket):
                         reasoning_override = connection_reasoning_override
                         instant_mode = connection_instant_mode
                         attachments = []
+                    elif (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "retry_message"
+                    ):
+                        existing_user_message_id, reasoning_override, instant_mode = (
+                            parse_retry_message(parsed_payload)
+                        )
+                        retry_row = orchestrator.history.get_retryable_user_message(
+                            session_id, existing_user_message_id
+                        )
+                        if retry_row is None:
+                            raise ValueError("That message is no longer available for retry")
+                        user_text = retry_row["content"]
+                        attachments = list(retry_row.get("attachments", []))
+                        turn_sender = orchestrator.history.effective_sender(retry_row)
                     else:
                         user_text, reasoning_override, instant_mode, attachments = parse_user_message(
                             text_payload
@@ -1589,7 +1653,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 original_attachment_count = len(attachments)
                 vision_attachment_count = 0
-                if turn_sender is None:
+                if turn_sender is None and existing_user_message_id is None:
                     vision_attachment_count = _append_recent_vision_attachments(
                         orchestrator,
                         attachments,
@@ -1623,6 +1687,7 @@ async def websocket_endpoint(ws: WebSocket):
                             tool_approval_callback=request_tool_approval,
                             sender=turn_sender,
                             session_kind=session_kind,
+                            existing_user_message_id=existing_user_message_id,
                         ),
                         connection_id, original_attachment_count, assistant_state_tracker,
                     )
@@ -1637,6 +1702,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 tool_approval_callback=request_tool_approval,
                                 sender=turn_sender,
                                 session_kind=session_kind,
+                                existing_user_message_id=existing_user_message_id,
                             ),
                             connection_id, original_attachment_count, assistant_state_tracker,
                         )

@@ -104,6 +104,19 @@ export class NetworkClient {
                 else if (data.type === 'assistant_end' && this.handlers.onEnd) {
                     this.handlers.onEnd(data.content);
                 }
+                else if (data.type === 'user_message_accepted' && this.handlers.onUserMessageAccepted) {
+                    this.handlers.onUserMessageAccepted({
+                        messageId: data.message_id,
+                        isRetry: Boolean(data.is_retry),
+                    });
+                }
+                else if (data.type === 'assistant_retryable_error' && this.handlers.onRetryableError) {
+                    this.handlers.onRetryableError({
+                        userMessageId: data.user_message_id,
+                        message: data.message,
+                        attempts: data.attempts,
+                    });
+                }
                 else if (data.type === 'user_notice' && this.handlers.onUserNotice) {
                     this.handlers.onUserNotice(data);
                 }
@@ -234,6 +247,20 @@ export class NetworkClient {
         } else {
             console.warn('Cannot send message: WebSocket is not open.');
         }
+    }
+
+    sendRetry(messageId, options = {}) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('Cannot retry message: WebSocket is not open.');
+            return false;
+        }
+        this.ws.send(JSON.stringify({
+            type: 'retry_message',
+            message_id: Number(messageId),
+            reasoning: Boolean(options.reasoning),
+            instant_mode: Boolean(options.instantMode),
+        }));
+        return true;
     }
 
     sendRelayMessage(senderDisplayName, senderType, text) {

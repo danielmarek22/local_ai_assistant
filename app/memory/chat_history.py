@@ -455,7 +455,10 @@ class ChatHistoryStore:
         filtered_docs = []
 
         # STRICT FILTERING: Drop episodic memories that are too far away
+        legacy_fallback = "I'm sorry, I lost my train of thought. Could you repeat that?"
         for doc, distance in zip(documents, distances):
+            if legacy_fallback in doc:
+                continue
             if distance <= max_distance:
                 filtered_docs.append(doc)
             else:
@@ -473,9 +476,10 @@ class ChatHistoryStore:
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
-            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
+            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source,
+                   retry_error, retry_attempts
             FROM chat_history
-            WHERE session_id = ?
+            WHERE session_id = ? AND excluded_from_context = 0
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -494,7 +498,8 @@ class ChatHistoryStore:
     def count_messages(self, session_id: str) -> int:
         cursor = self.db.conn.cursor()
         cursor.execute(
-            "SELECT COUNT(*) AS message_count FROM chat_history WHERE session_id = ?",
+            """SELECT COUNT(*) AS message_count FROM chat_history
+               WHERE session_id = ? AND excluded_from_context = 0""",
             (session_id,),
         )
         return int(cursor.fetchone()["message_count"])
@@ -507,7 +512,7 @@ class ChatHistoryStore:
             """
             SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
             FROM chat_history
-            WHERE session_id = ? AND id < ?
+            WHERE session_id = ? AND id < ? AND excluded_from_context = 0
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -559,14 +564,59 @@ class ChatHistoryStore:
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
-            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type, input_source
+            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                   input_source, retry_error, retry_attempts
             FROM chat_history
-            WHERE session_id = ?
+            WHERE session_id = ? AND excluded_from_context = 0
             ORDER BY id ASC
             """,
             (session_id,)
         )
         return self._rows_with_attachments(cursor.fetchall())
+
+    def mark_turn_failed(self, session_id: str, user_message_id: int, message: str) -> int:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            UPDATE chat_history
+            SET retry_error = ?, retry_attempts = retry_attempts + 1
+            WHERE id = ? AND session_id = ? AND role = 'user'
+            """,
+            (message, int(user_message_id), session_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Retry target is not a user message in this session")
+        self.db.conn.commit()
+        row = cursor.execute(
+            "SELECT retry_attempts FROM chat_history WHERE id = ?",
+            (int(user_message_id),),
+        ).fetchone()
+        return int(row["retry_attempts"])
+
+    def resolve_turn_failure(self, session_id: str, user_message_id: int) -> None:
+        self.db.conn.execute(
+            """
+            UPDATE chat_history SET retry_error = NULL
+            WHERE id = ? AND session_id = ? AND role = 'user'
+            """,
+            (int(user_message_id), session_id),
+        )
+        self.db.conn.commit()
+
+    def get_retryable_user_message(self, session_id: str, user_message_id: int):
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                   input_source, retry_error, retry_attempts
+            FROM chat_history
+            WHERE id = ? AND session_id = ? AND role = 'user'
+              AND retry_error IS NOT NULL AND excluded_from_context = 0
+            """,
+            (int(user_message_id), session_id),
+        )
+        rows = self._rows_with_attachments(cursor.fetchall())
+        return rows[0] if rows else None
 
     def list_sessions(self):
         cursor = self.db.conn.cursor()
@@ -587,12 +637,14 @@ class ChatHistoryStore:
                     SELECT ch2.content
                     FROM chat_history ch2
                     WHERE ch2.session_id = sessions.session_id
+                      AND ch2.excluded_from_context = 0
                     ORDER BY ch2.id ASC
                     LIMIT 1
                 ) AS preview
             FROM session_ids sessions
             LEFT JOIN chat_sessions cs ON cs.session_id = sessions.session_id
-            LEFT JOIN chat_history ch ON ch.session_id = sessions.session_id
+            LEFT JOIN chat_history ch
+              ON ch.session_id = sessions.session_id AND ch.excluded_from_context = 0
             GROUP BY sessions.session_id, cs.kind, cs.created_at, cs.updated_at
             HAVING COUNT(ch.id) > 0
             ORDER BY updated_at DESC, sessions.session_id DESC
