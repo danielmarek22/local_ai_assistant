@@ -22,8 +22,8 @@ class BashExecutionTool:
     
     name = "execute_bash"
     description = (
-        "Executes local bash commands. Common read-only commands run immediately; "
-        "commands with writes, shell operators, or unrecognized executables require browser approval first."
+        "Executes local commands. A narrow set of read-only commands runs immediately "
+        "without a shell; every other command requires browser approval first."
     )
 
     # Add the JSON schema parameters for Ollama
@@ -38,38 +38,31 @@ class BashExecutionTool:
         "required": ["command"]
     }
 
-    # Common read-only commands that can run without interrupting the user.
+    # Only commands without write, subprocess, or output-file modes belong here.
+    # Multipurpose tools such as git, find, sed, awk, env, rg, jq, sort, and
+    # date require approval because their arguments can change state or execute
+    # another program.
     INSTANT_READ_ONLY_COMMANDS = {
-        "awk",
         "basename",
         "cat",
-        "date",
         "df",
         "dirname",
         "du",
-        "env",
-        "find",
         "free",
-        "git",
         "head",
         "id",
-        "jq",
         "ls",
         "pwd",
-        "rg",
-        "sed",
-        "sort",
         "stat",
         "tail",
         "uname",
-        "uniq",
         "uptime",
         "wc",
         "whoami",
     }
 
     # Shell operators make a command harder to reason about, so they need approval.
-    APPROVAL_OPERATORS = {";", "&&", "||", "|", ">", ">>", "<", "$(", "`"}
+    APPROVAL_OPERATORS = ("\n", "\r", ";", "&&", "||", "|", ">>", ">", "<", "$(", "`")
 
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
@@ -134,15 +127,25 @@ class BashExecutionTool:
             logger.info("Command classified as read-only. Executing without approval.")
 
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                executable="/bin/bash"
-            )
+            if needs_approval:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    executable="/bin/bash",
+                )
+            else:
+                result = subprocess.run(
+                    shlex.split(command),
+                    shell=False,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
             
             output = result.stdout.strip()
             errors = result.stderr.strip()
