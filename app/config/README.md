@@ -49,3 +49,16 @@ Autonomy is globally pausable through `/api/autonomy` and the Web UI. Pausing le
 events durable and does not cancel an already-running external action.
 
 Legacy `tools.web` configuration is accepted temporarily when `integrations.web` is absent.
+
+## Beliefs
+
+`beliefs.processing_mode` accepts `disabled`, `observer`, or `react_tool` and defaults
+to `disabled`. The removed `beliefs.extraction_enabled` key is a startup error. An active
+producer cannot be selected while `beliefs.enabled` is false. `react_tool` also requires
+native late routing. The tracked template is conservative; existing ignored
+`app/config/assistant.yaml` files require manual migration.
+
+Observer mode may process eligible instant turns after the response. React-tool mode
+does not: instant turns bypass all native tools. Storage, belief context, and Knowledge
+inspection remain available in all three processing modes while `beliefs.enabled` is
+true.

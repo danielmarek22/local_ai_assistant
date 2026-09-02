@@ -4,7 +4,7 @@ import time
 import logging
 from typing import Iterator
 
-from .base import LLMClient
+from .base import InferenceFailure, LLMClient
 from app.core.thinking_filter import ThinkingBlockSplitter
 from app.logging import trace_event
 
@@ -28,6 +28,10 @@ _THINKING_MIN_PREDICT = 2048
 # sequences at the top level; they must be passed inside `options`. See
 # _build_stream_options for where these are injected.
 _BUILTIN_STOP_SEQUENCES = ["<|eot_id|>", "<|im_end|>", "<|end_of_sentence|>"]
+_MAX_BUFFERED_LINE_BYTES = 512_000
+_MAX_BUFFERED_CONTENT_CHARS = 256_000
+_MAX_BUFFERED_THINKING_CHARS = 1_000_000
+_MAX_BUFFERED_TOOL_JSON_CHARS = 128_000
 
 
 class OllamaClient(LLMClient):
@@ -109,7 +113,8 @@ class OllamaClient(LLMClient):
         options_override: dict | None = None,
         timeout_override: float | None = None,
         max_retries_override: int | None = None,
-        tools: list[dict] | None = None, # Add tools parameter
+        tools: list[dict] | None = None,
+        format_override: dict | str | None = None,
     ) -> dict:
         """
         Blocking, non-streaming call.
@@ -140,6 +145,7 @@ class OllamaClient(LLMClient):
             think_value=think_value,
             options=request_options,
             tools=tools,
+            format_override=format_override,
         )
 
         logger.info(
@@ -149,6 +155,7 @@ class OllamaClient(LLMClient):
         )
         trace_event("llm", "chat_request", payload=payload)
 
+        request_started = time.perf_counter()
         try:
             r = self._post_with_retry(
                 payload,
@@ -161,7 +168,7 @@ class OllamaClient(LLMClient):
             )
         except requests.HTTPError as exc:
             if not self._should_retry_without_images(exc, request_messages):
-                raise
+                raise self._inference_failure(exc) from exc
 
             response_text = self._http_error_text(exc)
             if self._error_indicates_model_without_images(response_text):
@@ -206,14 +213,29 @@ class OllamaClient(LLMClient):
                     break
                 except requests.HTTPError as retry_exc:
                     if not self._should_retry_without_images(retry_exc, fallback_messages):
-                        raise
+                        raise self._inference_failure(retry_exc) from retry_exc
                     last_exc = retry_exc
                     if self._error_indicates_model_without_images(self._http_error_text(retry_exc)):
                         self._multimodal_supported = False
+                except requests.RequestException as retry_exc:
+                    raise self._inference_failure(retry_exc) from retry_exc
             else:
-                raise last_exc
+                raise self._inference_failure(last_exc) from last_exc
+        except requests.RequestException as exc:
+            raise self._inference_failure(exc) from exc
 
-        data = r.json()
+        try:
+            data = r.json()
+        except (TypeError, ValueError) as exc:
+            raise InferenceFailure(
+                "malformed_response",
+                "Ollama returned malformed JSON for a completed generation.",
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("message", {}), dict):
+            raise InferenceFailure(
+                "malformed_response",
+                "Ollama returned an invalid completed-generation response shape.",
+            )
         message = data.get("message", {})
         finish_reason = data.get("done_reason")
 
@@ -224,16 +246,199 @@ class OllamaClient(LLMClient):
                 "content": message.get("content"),
                 "thinking": message.get("thinking"),
                 "done_reason": finish_reason,
+                "http_wall_duration_ms": round(
+                    (time.perf_counter() - request_started) * 1000, 2
+                ),
+                "ollama_total_duration_ms": self._nanoseconds_to_ms(data.get("total_duration")),
+                "ollama_load_duration_ms": self._nanoseconds_to_ms(data.get("load_duration")),
+                "ollama_prompt_eval_duration_ms": self._nanoseconds_to_ms(
+                    data.get("prompt_eval_duration")
+                ),
+                "ollama_generation_duration_ms": self._nanoseconds_to_ms(
+                    data.get("eval_duration")
+                ),
+                "prompt_eval_count": data.get("prompt_eval_count"),
+                "generation_token_count": data.get("eval_count"),
             },
         )
 
+        return message
+
+    def chat_buffered(
+        self,
+        messages,
+        think_override=None,
+        options_override: dict | None = None,
+        timeout_override: float | None = None,
+        generation_deadline_s: float | None = 120.0,
+        tools: list[dict] | None = None,
+        generation_phase: str | None = None,
+        react_iteration: int | None = None,
+    ) -> dict:
+        """Consume a native streamed generation atomically before exposing its result."""
+        think_value = self._resolve_think_value(think_override)
+        request_options = self._build_stream_options(think_value)
+        request_options = self._merge_options(request_options, options_override)
+        payload = self._build_payload(
+            messages,
+            stream=True,
+            think_value=think_value,
+            options=request_options,
+            tools=tools,
+        )
+        logger.info(
+            "Ollama buffered chat request (stream=True, think=%r, messages=%d)",
+            think_value,
+            len(messages),
+        )
+        effective_num_predict = request_options.get("num_predict")
+        trace_event("llm", "chat_request", payload={
+            "buffered": True,
+            "generation_phase": generation_phase,
+            "react_iteration": react_iteration,
+            "effective_think": think_value,
+            "effective_num_predict": effective_num_predict,
+            "tools_exposed": bool(tools),
+            "tool_count": len(tools or []),
+            "message_count": len(messages),
+        })
+
+        started = time.perf_counter()
+        first_chunk_ms = None
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: list = []
+        content_chars = 0
+        thinking_chars = 0
+        completed = False
+        final_chunk: dict = {}
+        try:
+            with self._post_stream(payload, timeout_override=timeout_override) as response:
+                for line in response.iter_lines():
+                    now = time.perf_counter()
+                    if generation_deadline_s is not None and now - started > generation_deadline_s:
+                        raise InferenceFailure(
+                            "generation_deadline",
+                            "Ollama buffered generation exceeded its total deadline.",
+                        )
+                    if not line:
+                        continue
+                    if first_chunk_ms is None:
+                        first_chunk_ms = round((now - started) * 1000, 2)
+                    if len(line) > _MAX_BUFFERED_LINE_BYTES:
+                        raise InferenceFailure(
+                            "malformed_response",
+                            "Ollama stream chunk exceeded the bounded line size.",
+                        )
+                    try:
+                        chunk = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise InferenceFailure(
+                            "malformed_response",
+                            "Ollama returned malformed streamed JSON.",
+                        ) from exc
+                    if not isinstance(chunk, dict) or not isinstance(chunk.get("message", {}), dict):
+                        raise InferenceFailure(
+                            "malformed_response",
+                            "Ollama returned an invalid streamed response shape.",
+                        )
+                    message = chunk.get("message", {})
+                    content = message.get("content") or ""
+                    thinking = message.get("thinking") or ""
+                    if not isinstance(content, str) or not isinstance(thinking, str):
+                        raise InferenceFailure(
+                            "malformed_response",
+                            "Ollama streamed non-text content or thinking data.",
+                        )
+                    content_chars += len(content)
+                    thinking_chars += len(thinking)
+                    if content_chars > _MAX_BUFFERED_CONTENT_CHARS:
+                        raise InferenceFailure(
+                            "malformed_response", "Ollama content exceeded the bounded buffer."
+                        )
+                    if thinking_chars > _MAX_BUFFERED_THINKING_CHARS:
+                        raise InferenceFailure(
+                            "malformed_response", "Ollama thinking exceeded the bounded buffer."
+                        )
+                    content_parts.append(content)
+                    thinking_parts.append(thinking)
+                    chunk_tool_calls = message.get("tool_calls")
+                    if chunk_tool_calls is not None:
+                        if not isinstance(chunk_tool_calls, list):
+                            raise InferenceFailure(
+                                "malformed_response", "Ollama streamed invalid tool-call data."
+                            )
+                        tool_calls.extend(chunk_tool_calls)
+                        if len(json.dumps(tool_calls, ensure_ascii=True)) > _MAX_BUFFERED_TOOL_JSON_CHARS:
+                            raise InferenceFailure(
+                                "malformed_response", "Ollama tool calls exceeded the bounded buffer."
+                            )
+                    if chunk.get("done"):
+                        completed = True
+                        final_chunk = chunk
+                        break
+        except InferenceFailure:
+            raise
+        except requests.RequestException as exc:
+            raise self._inference_failure(exc) from exc
+        except Exception as exc:
+            raise InferenceFailure(
+                "malformed_response",
+                f"Ollama buffered stream failed: {type(exc).__name__}",
+            ) from exc
+
+        if not completed:
+            raise InferenceFailure(
+                "malformed_response",
+                "Ollama stream ended before a completed generation marker.",
+            )
+        message = {
+            "content": "".join(content_parts),
+            "thinking": "".join(thinking_parts),
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        trace_event(
+            "llm",
+            "chat_response",
+            payload={
+                "buffered": True,
+                "generation_phase": generation_phase,
+                "react_iteration": react_iteration,
+                "effective_think": think_value,
+                "effective_num_predict": effective_num_predict,
+                "tools_exposed": bool(tools),
+                "tool_count": len(tools or []),
+                "tool_call_count": len(tool_calls),
+                "content_chars": len(message["content"]),
+                "thinking_chars_received": min(
+                    len(message["thinking"]), _MAX_BUFFERED_THINKING_CHARS
+                ),
+                "thinking_token_count": final_chunk.get("thinking_count"),
+                "done_reason": final_chunk.get("done_reason"),
+                "time_to_first_chunk_ms": first_chunk_ms,
+                "total_duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "ollama_load_duration_ms": self._nanoseconds_to_ms(final_chunk.get("load_duration")),
+                "ollama_prompt_eval_duration_ms": self._nanoseconds_to_ms(
+                    final_chunk.get("prompt_eval_duration")
+                ),
+                "prompt_eval_count": final_chunk.get("prompt_eval_count"),
+                "ollama_generation_duration_ms": self._nanoseconds_to_ms(
+                    final_chunk.get("eval_duration")
+                ),
+                "generation_token_count": final_chunk.get("eval_count"),
+            },
+        )
         return message
 
     def stream_chat(
         self, 
         messages, 
         think_override=None, 
-        tools: list[dict] | None = None # Add tools parameter
+        tools: list[dict] | None = None,
+        options_override: dict | None = None,
+        generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
     ) -> Iterator[str | dict]:
         """
         Streaming call. Yields text chunks for user-facing responses.
@@ -243,6 +448,7 @@ class OllamaClient(LLMClient):
         """
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
+        request_options = self._merge_options(request_options, options_override)
         request_messages = messages
         self.last_stream_dropped_current_images = False
         self.last_stream_dropped_current_images_count = 0
@@ -269,10 +475,16 @@ class OllamaClient(LLMClient):
         collected_content: list[str] = []
         collected_thinking: list[str] = []
         try:
-            yield from self._stream_payload(payload, collected_content, collected_thinking)
+            yield from self._stream_payload(
+                payload,
+                collected_content,
+                collected_thinking,
+                generation_deadline_s=generation_deadline_s,
+                timeout_override=timeout_override,
+            )
         except requests.HTTPError as exc:
             if not self._should_retry_without_images(exc, request_messages):
-                raise
+                raise self._inference_failure(exc) from exc
 
             response_text = self._http_error_text(exc)
             if self._error_indicates_model_without_images(response_text):
@@ -301,7 +513,11 @@ class OllamaClient(LLMClient):
                     },
                 )
                 try:
-                    yield from self._stream_payload(payload, collected_content, collected_thinking)
+                    yield from self._stream_payload(
+                        payload, collected_content, collected_thinking,
+                        generation_deadline_s=generation_deadline_s,
+                        timeout_override=timeout_override,
+                    )
                     self.last_stream_image_fallback_strategy = strategy
                     if dropped_current_images_count > 0:
                         self.last_stream_dropped_current_images = True
@@ -309,12 +525,14 @@ class OllamaClient(LLMClient):
                     break
                 except requests.HTTPError as retry_exc:
                     if not self._should_retry_without_images(retry_exc, fallback_messages):
-                        raise
+                        raise self._inference_failure(retry_exc) from retry_exc
                     last_exc = retry_exc
                     if self._error_indicates_model_without_images(self._http_error_text(retry_exc)):
                         self._multimodal_supported = False
             else:
-                raise last_exc
+                raise self._inference_failure(last_exc) from last_exc
+        except requests.RequestException as exc:
+            raise self._inference_failure(exc) from exc
 
         logger.info(
             "Ollama stream complete (content_len=%d, thinking_len=%d)",
@@ -339,14 +557,22 @@ class OllamaClient(LLMClient):
         payload: dict,
         collected_content: list[str],
         collected_thinking: list[str],
+        generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
     ) -> Iterator[str | dict]: # Update return type
         """
         Consume a streaming response from /api/chat (native NDJSON format).
         """
         in_thinking_block = False
 
-        with self._post_stream(payload) as r:
+        started = time.perf_counter()
+        with self._post_stream(payload, timeout_override=timeout_override) as r:
             for line in r.iter_lines():
+                if generation_deadline_s is not None and time.perf_counter() - started > generation_deadline_s:
+                    raise InferenceFailure(
+                        "generation_deadline",
+                        "Ollama streamed generation exceeded its total deadline.",
+                    )
                 if not line:
                     continue
 
@@ -395,11 +621,15 @@ class OllamaClient(LLMClient):
         stream: bool,
         think_value,
         options: dict | None = None,
-        tools: list[dict] | None = None, # Add tools parameter
+        tools: list[dict] | None = None,
+        format_override: dict | str | None = None,
     ) -> dict:
         """
         Build a request payload for the native /api/chat endpoint.
         """
+        if tools and format_override is not None:
+            raise ValueError("Ollama tools and format_override cannot be combined")
+
         payload: dict = {
             "model": self.model,
             "messages": messages,
@@ -412,6 +642,8 @@ class OllamaClient(LLMClient):
         # Natively inject schemas if provided
         if tools:
             payload["tools"] = tools
+        if format_override is not None:
+            payload["format"] = format_override
             
         return payload
 
@@ -476,7 +708,7 @@ class OllamaClient(LLMClient):
     # Private — HTTP
     # ------------------------------------------------------------------
 
-    def _post_stream(self, payload: dict) -> requests.Response:
+    def _post_stream(self, payload: dict, timeout_override: float | None = None) -> requests.Response:
         """
         Issue a streaming POST to the native chat endpoint. Returns the raw
         Response used as a context manager so the caller can iterate lines
@@ -489,7 +721,7 @@ class OllamaClient(LLMClient):
             self.url,
             json=payload,
             stream=True,
-            timeout=self.timeout_s,
+            timeout=(timeout_override if timeout_override is not None else self.timeout_s),
         )
         response.raise_for_status()
         return response
@@ -504,14 +736,15 @@ class OllamaClient(LLMClient):
         """
         Issue a non-streaming POST with exponential-backoff retry.
 
-        Retries on transient network errors and 5xx responses.
-        Raises immediately on 4xx or non-retryable errors.
+        Retries only failures known to happen before request establishment.
+        Once a request may be executing, retrying could duplicate generation.
         """
         actual_max_retries = max_retries_override if max_retries_override is not None else self.max_retries
         attempts = actual_max_retries + 1
         request_timeout = timeout_override if timeout_override is not None else self.timeout_s
 
         for attempt in range(1, attempts + 1):
+            attempt_started = time.perf_counter()
             try:
                 response = self.session.post(
                     self.url,
@@ -525,9 +758,38 @@ class OllamaClient(LLMClient):
             except requests.RequestException as exc:
                 is_last = attempt == attempts
                 if is_last or not self._is_retryable(exc):
+                    category = self._inference_failure(exc).category
+                    logger.warning(
+                        "Ollama inference request failed category=%s attempt=%d/%d retry=false",
+                        category, attempt, attempts,
+                    )
+                    trace_event("llm", "request_failure", payload={
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "attempt_duration_ms": round((time.perf_counter() - attempt_started) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "error_category": category,
+                        "retry": False,
+                    })
                     raise
 
                 backoff = self.retry_backoff_s * (2 ** (attempt - 1))
+                trace_event(
+                    "llm",
+                    "request_retry",
+                    payload={
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "attempt_duration_ms": round(
+                            (time.perf_counter() - attempt_started) * 1000, 2
+                        ),
+                        "backoff_ms": round(backoff * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "status_code": getattr(
+                            getattr(exc, "response", None), "status_code", None
+                        ),
+                    },
+                )
                 logger.warning(
                     "Ollama request failed (attempt %d/%d): %s — retrying in %.2fs",
                     attempt,
@@ -539,6 +801,12 @@ class OllamaClient(LLMClient):
 
         raise RuntimeError("unreachable")  # loop always raises or returns
 
+    @staticmethod
+    def _nanoseconds_to_ms(value):
+        if not isinstance(value, (int, float)):
+            return None
+        return round(value / 1_000_000, 2)
+
     # ------------------------------------------------------------------
     # Private — utilities
     # ------------------------------------------------------------------
@@ -549,6 +817,10 @@ class OllamaClient(LLMClient):
         if not self.thinking_enabled:
             return False
         return self.thinking_level or True
+
+    def resolve_think_value(self, think_override=None):
+        """Resolve a turn override against this client's configured reasoning setting."""
+        return self._resolve_think_value(think_override)
 
     def _merge_options(self, base_options: dict, override_options: dict | None) -> dict:
         merged = dict(base_options)
@@ -565,12 +837,24 @@ class OllamaClient(LLMClient):
         return {key: value for key, value in options.items() if value is not None}
 
     def _is_retryable(self, exc: requests.RequestException) -> bool:
-        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-            return True
-        if isinstance(exc, requests.HTTPError):
-            status_code = getattr(exc.response, "status_code", None)
-            return status_code is not None and status_code >= 500
-        return False
+        return isinstance(exc, requests.ConnectTimeout)
+
+    @staticmethod
+    def _inference_failure(exc: requests.RequestException) -> InferenceFailure:
+        if isinstance(exc, requests.ConnectTimeout):
+            category = "connect_timeout"
+        elif isinstance(exc, requests.ReadTimeout):
+            category = "read_timeout"
+        elif isinstance(exc, requests.Timeout):
+            category = "timeout"
+        elif isinstance(exc, requests.HTTPError):
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            category = "server_error" if status is not None and status >= 500 else "http_error"
+        elif isinstance(exc, requests.ConnectionError):
+            category = "connection_error"
+        else:
+            category = "request_error"
+        return InferenceFailure(category, f"Ollama inference failed ({category}).")
 
     def _resolve_image_request_retries(
         self,
@@ -602,9 +886,6 @@ class OllamaClient(LLMClient):
         status_code = getattr(exc.response, "status_code", None)
         if status_code is None:
             return False
-
-        if status_code >= 500:
-            return True
 
         if status_code not in {400, 415, 422}:
             return False

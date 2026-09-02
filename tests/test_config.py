@@ -2,11 +2,19 @@ import tempfile
 import unittest
 
 import yaml
+from pathlib import Path
 
 from app.config import Config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_local_human_has_stable_defaults(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({}, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+        self.assertEqual(config.local_human, {"id": "local-human", "display_name": "You"})
+
     def test_context_uses_injected_memory_limit(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
             yaml.safe_dump(
@@ -35,6 +43,66 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.autonomy["enabled"])
         self.assertEqual(config.autonomy["max_chain_events"], 20)
         self.assertEqual(config.autonomy["global_llm_concurrency"], 1)
+
+    def test_belief_storage_defaults_enabled_but_production_is_disabled(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({}, config_file)
+            config_file.flush()
+            config = Config(config_file.name)
+
+        self.assertTrue(config.beliefs["enabled"])
+        self.assertEqual(config.beliefs["processing_mode"], "disabled")
+        self.assertEqual(config.beliefs["max_candidates"], 4)
+        self.assertEqual(config.beliefs["max_generation_tokens"], 384)
+        self.assertEqual(config.beliefs["max_existing_beliefs"], 24)
+
+    def test_all_belief_processing_modes_are_accepted(self):
+        for mode in ("disabled", "observer", "react_tool"):
+            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
+                "w", suffix=".yaml"
+            ) as config_file:
+                yaml.safe_dump(
+                    {"beliefs": {"enabled": True, "processing_mode": mode}},
+                    config_file,
+                )
+                config_file.flush()
+                config = Config(config_file.name)
+            self.assertEqual(config.beliefs["processing_mode"], mode)
+
+    def test_invalid_belief_processing_mode_fails(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump({"beliefs": {"processing_mode": "invalid"}}, config_file)
+            config_file.flush()
+            with self.assertRaisesRegex(ValueError, "disabled, observer, react_tool"):
+                Config(config_file.name)
+
+    def test_legacy_belief_extraction_key_fails_with_migration_guidance(self):
+        for value in (True, False):
+            with self.subTest(value=value), tempfile.NamedTemporaryFile(
+                "w", suffix=".yaml"
+            ) as config_file:
+                yaml.safe_dump({"beliefs": {"extraction_enabled": value}}, config_file)
+                config_file.flush()
+                with self.assertRaisesRegex(ValueError, "was replaced.*processing_mode"):
+                    Config(config_file.name)
+
+    def test_disabled_belief_storage_rejects_active_producer(self):
+        for mode in ("observer", "react_tool"):
+            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
+                "w", suffix=".yaml"
+            ) as config_file:
+                yaml.safe_dump(
+                    {"beliefs": {"enabled": False, "processing_mode": mode}},
+                    config_file,
+                )
+                config_file.flush()
+                with self.assertRaisesRegex(ValueError, "enabled=false.*disabled"):
+                    Config(config_file.name)
+
+    def test_tracked_template_uses_processing_mode_without_legacy_key(self):
+        template = yaml.safe_load(Path("app/config/assistant-template.yaml").read_text())
+        self.assertEqual(template["beliefs"]["processing_mode"], "disabled")
+        self.assertNotIn("extraction_enabled", template["beliefs"])
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

@@ -62,6 +62,18 @@ class MemoryStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def list_for_inspection(self) -> list[dict]:
+        """Return every canonical SQLite memory row without retrieval side effects."""
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, category, content, importance, created_at, last_accessed_at
+            FROM memory
+            ORDER BY created_at DESC, id DESC
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.65) -> list[str]:
         """
         True semantic search using CPU embeddings for the Orchestrator, 

@@ -1,9 +1,10 @@
 import unittest
 
 from app.core.assistant_state import AssistantState
-from app.core.events import AssistantStateEvent
+from app.core.events import AssistantStateEvent, AvatarOutfitEvent
 from app.integrations import (
     ApprovalRequest,
+    AvatarOutfitEffect,
     CapabilityId,
     IntegrationRegistry,
     RegisteredTool,
@@ -155,6 +156,24 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertEqual(result.status.value, "success")
         self.assertEqual(requests[0]["tool"], "demo__run")
         self.assertEqual(requests[0]["detail_label"], "Value")
+
+    def test_typed_outfit_effect_becomes_avatar_event(self):
+        integration = FakeIntegration()
+        integration._run = lambda _arguments, _context: ToolResult.success(
+            "changed",
+            effects=(AvatarOutfitEffect("pajamas", "/static/avatars/pajamas.vrm"),),
+        )
+        executor = self._executor(integration)
+
+        events, result = consume_generator(executor.execute(
+            ToolCall(CapabilityId("demo", "run"), {"value": "x"}),
+            "session-1",
+            "change",
+        ))
+
+        self.assertEqual(result.status.value, "success")
+        outfit_event = next(event for event in events if isinstance(event, AvatarOutfitEvent))
+        self.assertEqual(outfit_event.outfit, "pajamas")
 
 
 if __name__ == "__main__":

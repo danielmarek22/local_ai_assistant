@@ -19,11 +19,12 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Injected background context behavior
   - Summary inclusion behavior
   - Deduplication and filtering of recent history
-  - Replaying recent stored image attachments into multimodal context
+  - Keeping current image payloads while replacing historical images with bounded text summaries
 
 - `test_memory_store.py`
   - SQLite + vector-store dual writes
   - Semantic retrieval through the memory collection
+  - SQLite-only saved-memory inspection ordering and mutation safety
 
 - `test_chat_history.py`
   - Persisted attachment metadata and upload storage behavior
@@ -55,6 +56,17 @@ Tests currently focus on deterministic core behavior that can be validated witho
   - Session summary access
   - Restoring stored image attachments in session history
   - Local session switching semantics
+
+- `test_knowledge.py`
+  - Read-only owner-scoped belief inspection and pagination
+  - Active, expired, and invalidated status derivation
+  - Production snapshot and exact belief-context preview reuse
+  - FastAPI validation and unavailable/unknown resource behavior
+  - Saved-memory DTO shape, empty state, and byte-for-byte read-only behavior
+
+- `test_knowledge_inspector.mjs`
+  - Knowledge URL encoding, pagination, fetch errors, inspection-session isolation,
+    saved-memory states, and literal hostile-content rendering
 
 - `test_http_retries.py`
   - LLM retry behavior

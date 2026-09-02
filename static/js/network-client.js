@@ -1,8 +1,18 @@
 import { CONFIG } from './config.js';
 
+export function buildKnowledgeBeliefsUrl(filters = {}) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+        if (value === undefined || value === null || value === '') continue;
+        params.set(key, String(value));
+    }
+    const query = params.toString();
+    return `/api/knowledge/beliefs${query ? `?${query}` : ''}`;
+}
+
 export class NetworkClient {
     constructor(handlers) {
-        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onThinkingChunk, onChunk, onAudio, onEnd
+        this.handlers = handlers; // Expects: onSessionInit, onState, onExpression, onAnimation, onOutfit, onThinkingChunk, onChunk, onAudio, onEnd
         this.ws = null;
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
@@ -23,6 +33,9 @@ export class NetworkClient {
             }
             if (this.connectionOptions.sessionMode) {
                 wsUrl.searchParams.set('session_mode', this.connectionOptions.sessionMode);
+            }
+            if (this.connectionOptions.sessionKind) {
+                wsUrl.searchParams.set('session_kind', this.connectionOptions.sessionKind);
             }
 
             console.log(`Connecting to ${wsUrl.toString()}...`);
@@ -60,16 +73,24 @@ export class NetworkClient {
                         serverInstanceId: data.server_instance_id,
                         sessionId: data.session_id,
                         gestureCatalog: data.gesture_catalog || {},
+                        outfitCatalog: data.outfit_catalog || {},
+                        currentOutfit: data.current_outfit || null,
+                        sessionKind: data.session_kind || 'direct',
+                        localHumanDisplayName: data.local_human_display_name || 'You',
+                        localAssistantDisplayName: data.local_assistant_display_name || 'Astra',
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {
-                    this.handlers.onState(data.state);
+                    this.handlers.onState(data.state, data.turn_id || null);
                 }
                 else if (data.type === 'assistant_expression' && this.handlers.onExpression) {
                     this.handlers.onExpression(data.expression);
                 }
                 else if (data.type === 'assistant_animation' && this.handlers.onAnimation) {
-                    this.handlers.onAnimation(data.animation);
+                    this.handlers.onAnimation(data.animation, data.turn_id || null);
+                }
+                else if (data.type === 'assistant_outfit' && this.handlers.onOutfit) {
+                    this.handlers.onOutfit({ outfit: data.outfit, url: data.url });
                 }
                 else if (data.type === 'assistant_thinking_chunk' && this.handlers.onThinkingChunk) {
                     this.handlers.onThinkingChunk(data.content);
@@ -82,6 +103,19 @@ export class NetworkClient {
                 }
                 else if (data.type === 'assistant_end' && this.handlers.onEnd) {
                     this.handlers.onEnd(data.content);
+                }
+                else if (data.type === 'user_message_accepted' && this.handlers.onUserMessageAccepted) {
+                    this.handlers.onUserMessageAccepted({
+                        messageId: data.message_id,
+                        isRetry: Boolean(data.is_retry),
+                    });
+                }
+                else if (data.type === 'assistant_retryable_error' && this.handlers.onRetryableError) {
+                    this.handlers.onRetryableError({
+                        userMessageId: data.user_message_id,
+                        message: data.message,
+                        attempts: data.attempts,
+                    });
                 }
                 else if (data.type === 'user_notice' && this.handlers.onUserNotice) {
                     this.handlers.onUserNotice(data);
@@ -215,6 +249,34 @@ export class NetworkClient {
         }
     }
 
+    sendRetry(messageId, options = {}) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('Cannot retry message: WebSocket is not open.');
+            return false;
+        }
+        this.ws.send(JSON.stringify({
+            type: 'retry_message',
+            message_id: Number(messageId),
+            reasoning: Boolean(options.reasoning),
+            instant_mode: Boolean(options.instantMode),
+        }));
+        return true;
+    }
+
+    sendRelayMessage(senderDisplayName, senderType, text) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('Cannot relay message: WebSocket is not open.');
+            return false;
+        }
+        this.ws.send(JSON.stringify({
+            type: 'relay_message',
+            sender_display_name: senderDisplayName,
+            sender_type: senderType,
+            text,
+        }));
+        return true;
+    }
+
     async listSessions() {
         const response = await fetch('/api/sessions');
         if (!response.ok) {
@@ -241,6 +303,38 @@ export class NetworkClient {
             throw new Error(`Failed to delete session (${response.status})`);
         }
 
+        return response.json();
+    }
+
+    async getEffectiveBeliefs(sessionId) {
+        const params = new URLSearchParams({ session_id: sessionId });
+        return this._getJson(`/api/knowledge/beliefs/effective?${params.toString()}`);
+    }
+
+    async listBeliefs(filters = {}) {
+        return this._getJson(buildKnowledgeBeliefsUrl(filters));
+    }
+
+    async getBelief(beliefId) {
+        return this._getJson(`/api/knowledge/beliefs/${encodeURIComponent(beliefId)}`);
+    }
+
+    async getBeliefContext(sessionId) {
+        const params = new URLSearchParams({ session_id: sessionId });
+        return this._getJson(`/api/knowledge/belief-context?${params.toString()}`);
+    }
+
+    async getSavedMemories() {
+        return this._getJson('/api/knowledge/memories');
+    }
+
+    async _getJson(url) {
+        const response = await fetch(url);
+        if (!response.ok) {
+            const error = new Error(`Request failed (${response.status})`);
+            error.status = response.status;
+            throw error;
+        }
         return response.json();
     }
 

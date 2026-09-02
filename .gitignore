@@ -16,6 +16,12 @@ models/
 static/audio/
 logs/
 app/config/assistant.yaml
-static/avatar.vrm
+static/avatars/
 static/uploads/
 /.codex
+VO_Escoffier_Hello.wav
+app/tts/escoffier.safetensors
+astra_minecraft*
+
+# Generated documentation output
+site/

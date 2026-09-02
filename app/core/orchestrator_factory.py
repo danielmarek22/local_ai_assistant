@@ -16,10 +16,13 @@ from app.services.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
 from app.integrations import (
+    BeliefIntegration,
     IntegrationRegistry,
     MemoryIntegration,
     MindcraftClient,
     MindcraftIntegration,
+    AvatarWardrobe,
+    OutfitIntegration,
     ShellIntegration,
     WebIntegration,
     RuntimeIntegration,
@@ -34,6 +37,18 @@ from app.services.turn_finalizer import TurnFinalizer
 from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
+    discover_outfit_catalog,
+)
+from app.beliefs import (
+    BeliefCandidateExtractor,
+    BeliefContextProvider,
+    BeliefRepository,
+    BeliefSnapshotFormatter,
+    BeliefSnapshotService,
+    BeliefUpdateService,
+    ConversationalBeliefObserver,
+    BeliefTurnPreparer,
+    REACT_TOOL_BELIEF_VERSION,
 )
 
 logger = logging.getLogger("orchestrator_factory")
@@ -61,6 +76,77 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
         options[target_key] = generation[source_key]
 
     return options
+
+
+def _build_belief_components(
+    *, config, llm, db, history_store, agent_id: str,
+    native_late_routing_enabled: bool = True,
+):
+    """Build storage/context and exactly one configured conversational producer."""
+    if not config.beliefs.get("enabled", True):
+        return None, None, [], None, None
+
+    processing_mode = config.beliefs.get("processing_mode", "disabled")
+    if processing_mode == "react_tool" and not native_late_routing_enabled:
+        raise ValueError(
+            "beliefs.processing_mode=react_tool requires native late-routing/tool infrastructure"
+        )
+
+    local_human = getattr(config, "local_human", None) or {
+        "id": "local-human", "display_name": "You"
+    }
+    repository = BeliefRepository(
+        db,
+        legacy_local_human_id=local_human["id"],
+        legacy_local_human_name=local_human["display_name"],
+    )
+    snapshot_service = BeliefSnapshotService(
+        repository,
+        max_beliefs=config.beliefs["max_existing_beliefs"],
+    )
+    context_provider = BeliefContextProvider(
+        owner_agent_id=agent_id,
+        snapshot_service=snapshot_service,
+        formatter=BeliefSnapshotFormatter(
+            max_chars=config.beliefs["max_snapshot_chars"],
+        ),
+    )
+    preparer = BeliefTurnPreparer(
+        snapshot_service=snapshot_service,
+        history_store=history_store,
+    )
+    observers = []
+    belief_integration = None
+    if processing_mode == "observer":
+        extractor = BeliefCandidateExtractor(
+            llm,
+            max_candidates=config.beliefs["max_candidates"],
+            max_context_chars=config.beliefs["max_disambiguating_context_chars"],
+            max_tokens=config.beliefs["max_generation_tokens"],
+            timeout_s=config.beliefs["timeout_s"],
+        )
+        observers.append(ConversationalBeliefObserver(
+            extractor=extractor,
+            update_service=BeliefUpdateService(
+                repository,
+                max_expiry_days=config.beliefs["max_expiry_days"],
+            ),
+            snapshot_service=snapshot_service,
+            history_store=history_store,
+            preparer=preparer,
+        ))
+    elif processing_mode == "react_tool":
+        belief_integration = BeliefIntegration(
+            update_service=BeliefUpdateService(
+                repository,
+                extractor_version=REACT_TOOL_BELIEF_VERSION,
+                max_expiry_days=config.beliefs["max_expiry_days"],
+            ),
+            max_candidates=config.beliefs["max_candidates"],
+        )
+    elif processing_mode != "disabled":
+        raise ValueError(f"Unsupported belief processing mode: {processing_mode}")
+    return repository, context_provider, observers, belief_integration, preparer
 
 
 def build_orchestrator() -> Orchestrator:
@@ -121,11 +207,23 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Initializing database and stores")
 
-    db = Database()
+    db = Database(
+        legacy_local_human_id=config.local_human["id"],
+        legacy_local_human_name=config.local_human["display_name"],
+    )
     autonomy_store = AutonomyStore(db.path)
     vector_store = VectorStore()
 
-    history_store = ChatHistoryStore(db, vector_store)
+    agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
+    assistant_name = str(config.assistant.get("display_name", "Astra")).strip() or "Astra"
+    history_store = ChatHistoryStore(
+        db,
+        vector_store,
+        local_human_id=config.local_human["id"],
+        local_human_name=config.local_human["display_name"],
+        local_assistant_id=agent_id,
+        local_assistant_name=assistant_name,
+    )
     memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
 
@@ -163,17 +261,51 @@ def build_orchestrator() -> Orchestrator:
         memory_store=memory_store,
         memory_policy=memory_policy,
     )
+    native_late_routing_enabled = True
+    (
+        belief_repository,
+        belief_context_provider,
+        completion_observers,
+        belief_integration,
+        belief_turn_preparer,
+    ) = (
+        _build_belief_components(
+            config=config,
+            llm=llm,
+            db=db,
+            history_store=history_store,
+            agent_id=agent_id,
+            native_late_routing_enabled=native_late_routing_enabled,
+        )
+    )
     turn_finalizer = TurnFinalizer(
         history_store=history_store,
         summary_store=summary_store,
         summarizer=history_summarizer,
         summary_trigger=config.orchestrator["summary_trigger"],
+        completion_observers=completion_observers,
     )
 
     # --------------------------------------------------
     # Integrations
     # --------------------------------------------------
-    integrations = [RuntimeIntegration(), VisionIntegration()]
+    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
+    avatar_controls_cfg = avatar_controls_cfg if isinstance(avatar_controls_cfg, dict) else {}
+    outfit_catalog = discover_outfit_catalog()
+    configured_outfit = str(avatar_controls_cfg.get("default_outfit", "")).strip()
+    initial_outfit = (
+        configured_outfit
+        if configured_outfit in outfit_catalog
+        else "default"
+        if "default" in outfit_catalog
+        else next(iter(sorted(outfit_catalog)), "")
+    )
+    wardrobe = AvatarWardrobe(outfit_catalog, initial_outfit)
+
+    integrations = [RuntimeIntegration(), VisionIntegration(), OutfitIntegration(wardrobe)]
+    if belief_integration is not None:
+        integrations.append(belief_integration)
+        logger.info("Belief ReAct integration registered")
     web_cfg = config.integrations.get("web", {})
 
     if web_cfg.get("enabled", False):
@@ -247,8 +379,7 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
     gesture_catalog = discover_gesture_catalog()
-    avatar_controls_cfg = config.assistant.get("avatar_controls", {})
-    allowed_expressions = avatar_controls_cfg.get("expressions") if isinstance(avatar_controls_cfg, dict) else None
+    allowed_expressions = avatar_controls_cfg.get("expressions")
 
     # Executable capabilities are supplied only through native schemas in agent mode.
     base_system_prompt = config.assistant["system_prompt"]
@@ -284,9 +415,32 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
-        late_routing_enabled=True,
+        late_routing_enabled=native_late_routing_enabled,
         integration_context_limit=config.context["integration_context_limit"],
+        agent_id=agent_id,
+        timezone_name=str(config.beliefs.get("timezone", "UTC")),
+        belief_context_provider=belief_context_provider,
+        local_human_id=config.local_human["id"],
+        local_human_name=config.local_human["display_name"],
+        local_assistant_name=assistant_name,
+        belief_processing_mode=config.beliefs["processing_mode"],
+        generation_deadline_s=float(
+            config.orchestrator.get("generation_deadline_s", 600.0)
+        ),
+        recovery_deadline_s=float(
+            config.orchestrator.get("recovery_deadline_s", 180.0)
+        ),
+        recovery_num_predict=int(
+            config.orchestrator.get("recovery_num_predict", 192)
+        ),
+        belief_turn_preparer=(
+            belief_turn_preparer
+            if config.beliefs["processing_mode"] == "react_tool"
+            else None
+        ),
     )
+    orchestrator.belief_repository = belief_repository
+    orchestrator.avatar_wardrobe = wardrobe
     orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
     orchestrator.autonomy_runtime = AutonomyRuntime(
         orchestrator=orchestrator,

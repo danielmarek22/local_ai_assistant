@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from app.storage.database import Database
 from app.memory.memory_store import MemoryStore
 
@@ -101,6 +102,57 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(deleted_count, 1)
         self.assertEqual(self.store.get_all(limit=10), [])
         self.assertEqual(self.vector_store.semantic_collection.deleted_ids, [memory_id])
+
+    def test_inspection_returns_actual_schema_in_stable_order_without_mutation(self):
+        rows = [
+            ("memory-a", "general", "Older", 1, "2026-08-25 09:00:00", "2026-08-25 10:00:00"),
+            ("memory-b", "preference", "Same timestamp B", 3, "2026-08-26 09:00:00", "2026-08-26 10:00:00"),
+            ("memory-c", None, "Same timestamp C", 2, "2026-08-26 09:00:00", "2026-08-26 11:00:00"),
+        ]
+        self.db.conn.executemany(
+            """
+            INSERT INTO memory (id, category, content, importance, created_at, last_accessed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self.db.conn.commit()
+        before = [tuple(row) for row in self.db.conn.execute(
+            "SELECT id, category, content, importance, created_at, last_accessed_at FROM memory ORDER BY id"
+        ).fetchall()]
+
+        with patch.object(
+            self.store,
+            "get_relevant",
+            side_effect=AssertionError("semantic retrieval must not run"),
+        ), patch.object(
+            self.store,
+            "add",
+            side_effect=AssertionError("memory-tool writes must not run"),
+        ), patch.object(
+            self.store.collection,
+            "query",
+            side_effect=AssertionError("Chroma must not be queried"),
+        ), patch.object(
+            self.store.collection,
+            "add",
+            side_effect=AssertionError("embeddings must not be created"),
+        ):
+            inspected = self.store.list_for_inspection()
+
+        after = [tuple(row) for row in self.db.conn.execute(
+            "SELECT id, category, content, importance, created_at, last_accessed_at FROM memory ORDER BY id"
+        ).fetchall()]
+        self.assertEqual(before, after)
+        self.assertEqual([row["id"] for row in inspected], ["memory-c", "memory-b", "memory-a"])
+        self.assertEqual(
+            set(inspected[0]),
+            {"id", "category", "content", "importance", "created_at", "last_accessed_at"},
+        )
+        self.assertEqual(len(inspected), 3)
+
+    def test_inspection_empty_storage_returns_empty_list(self):
+        self.assertEqual(self.store.list_for_inspection(), [])
 
 
 if __name__ == "__main__":

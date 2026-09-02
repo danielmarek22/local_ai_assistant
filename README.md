@@ -38,7 +38,7 @@ Attachments are handled as a first-class part of the conversation. The current i
 
 - the browser converts selected or pasted images to Base64 before sending them
 - the backend stores the image bytes on disk and attachment metadata in SQLite
-- recent image turns can be replayed directly into the multimodal prompt
+- current-turn images are sent to the multimodal model; historical images are represented by their stored summaries so prompt size does not grow with old binary payloads
 - each stored image is summarized once for long-term retrieval through episodic vector search
 - deleting a session removes its SQLite rows, vector entries, and uploaded files
 
@@ -46,6 +46,11 @@ In practice, this gives the project two views of memory:
 
 - a structured local database for browsing, summaries, and session management
 - a vector search layer for semantic retrieval during turns
+
+The browser also includes a read-only Knowledge tab for inspecting effective beliefs,
+all stored belief records, the exact belief section inserted into Astra's context, and
+global structured memories saved through the memory tool. Summary and vector-search
+inspection remain future work.
 
 ## Entry Points
 
@@ -68,6 +73,36 @@ Expect iteration, forks, and refactors.
 ## Directory Overview
 
 See the `README.md` files inside each subdirectory of `app/` for detailed explanations.
+
+## Documentation
+
+The generated architecture and development documentation lives in `docs/` and is
+configured by `mkdocs.yml`.
+
+From the project root, install the lightweight documentation dependencies once:
+
+```bash
+venv_app/bin/python -m pip install -r requirements-docs.txt
+```
+
+Then start the live-reloading documentation server:
+
+```bash
+venv_app/bin/python -m mkdocs serve --dev-addr 127.0.0.1:8000
+```
+
+Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in a browser. You can replace
+`8000` with another free port when running several previews at once. Stop the server
+with `Ctrl+C`.
+
+To validate the complete site without starting a server, run:
+
+```bash
+venv_app/bin/python -m mkdocs build --strict
+```
+
+The generated HTML is written to the ignored `site/` directory. More maintenance
+notes are available in the [documentation guide](docs/guides/documentation.md).
 
 ## Running Tests
 

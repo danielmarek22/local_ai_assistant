@@ -5,6 +5,8 @@ from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
+    UserMessageAcceptedEvent,
+    AssistantTurnFailureEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
@@ -12,6 +14,8 @@ from app.core.events import (
     AutonomyOutcomeEvent,
 )
 from app.core.orchestrator import Orchestrator
+from app.core.conversation import InputSource, SenderAttribution, SenderType, SessionKind
+from app.core.turn_input import InputModality
 from app.core.plan import Plan
 from app.integrations import (
     CapabilityId,
@@ -29,6 +33,14 @@ from app.perception.keys import PerceptionKey
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 from app.services.turn_finalizer import TurnFinalizer
+from app.beliefs import (
+    BeliefCandidateExtractor,
+    BeliefRepository,
+    BeliefSnapshotService,
+    BeliefUpdateService,
+    ConversationalBeliefObserver,
+)
+from app.storage.database import Database
 
 def consume_generator(gen):
     events = []
@@ -54,8 +66,11 @@ class FakeToolExecutor:
         self.context = context
         self.integration_context = integration_context
         self.calls = []
+        self.native_contexts = []
+        self.results = []
 
-    def get_native_tools(self, allowed_capabilities=None):
+    def get_native_tools(self, allowed_capabilities=None, **kwargs):
+        self.native_contexts.append(kwargs)
         tools = [{
             "type": "function",
             "function": {
@@ -74,18 +89,37 @@ class FakeToolExecutor:
     def execute(self, call: ToolCall, session_id: str, user_text: str, approval_callback=None, **_kwargs):
         self.calls.append((call, session_id, user_text, approval_callback))
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
+        if self.results:
+            return self.results.pop(0)
         return ToolResult.success(self.context or "tool info")
 
 class FakeHistoryStore:
     def __init__(self):
         self.records = []
         self.recent_rows = []
+        self.senders = []
+        self.session_kinds = {}
+        self.added_session_kinds = []
 
-    def add(self, session_id: str, role: str, content: str, attachments=None):
+    def add(
+        self, session_id: str, role: str, content: str, attachments=None,
+        sender=None, session_kind=SessionKind.DIRECT,
+    ):
+        requested_kind = SessionKind(session_kind)
+        self.session_kinds.setdefault(session_id, requested_kind)
+        self.added_session_kinds.append(requested_kind)
         self.records.append((session_id, role, content, attachments or []))
+        self.senders.append(sender)
+        return len(self.records)
+
+    def get_session_kind(self, session_id: str):
+        return self.session_kinds.get(session_id, SessionKind.DIRECT)
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
+
+    def get_before(self, _session_id: str, _message_id: int, limit: int = 2):
+        return self.recent_rows[-limit:]
 
     def search_past_conversations(self, query: str, current_session: str, limit: int = 4):
         # Fake retrieved episodic memory
@@ -102,9 +136,21 @@ class FakeContextBuilder:
             "user_text": user_text,
             "memory_context": memory_context,
             "integration_context": integration_context,
+            "belief_context": kwargs.get("belief_context"),
             "attachments": kwargs.get("attachments", []),
+            "current_sender": kwargs.get("current_sender"),
+            "session_kind": kwargs.get("session_kind"),
         })
         return [{"role": "user", "content": user_text}]
+
+
+class FakeBeliefContextProvider:
+    def __init__(self):
+        self.calls = []
+
+    def context_for_turn(self, session_id):
+        self.calls.append(session_id)
+        return f"snapshot-{len(self.calls)}"
 
 class FakeLLM:
     def __init__(self, chunks, error=None, chat_responses=None):
@@ -126,6 +172,26 @@ class FakeLLM:
             yield chunk
         if self.error is not None:
             raise self.error
+
+
+class BufferedPhaseLLM:
+    def __init__(self, responses, configured_think=True):
+        self.responses = list(responses)
+        self.configured_think = configured_think
+        self.calls = []
+
+    def resolve_think_value(self, override=None):
+        return self.configured_think if override is None else override
+
+    def chat_buffered(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+    def chat(self, **_kwargs):
+        raise AssertionError("buffered ReAct path expected")
+
+    def stream_chat(self, *_args, **_kwargs):
+        raise AssertionError("streaming recovery not expected")
 
 
 class FakeMemoryStore:
@@ -193,6 +259,9 @@ class OrchestratorTests(unittest.TestCase):
         late_routing_enabled=False,
         chat_responses=None,
         integration_context=None,
+        belief_context_provider=None,
+        belief_processing_mode="disabled",
+        belief_turn_preparer=None,
     ):
         llm = FakeLLM(
             llm_chunks or ["Hello", " world"],
@@ -228,6 +297,9 @@ class OrchestratorTests(unittest.TestCase):
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
             late_routing_enabled=late_routing_enabled,
+            belief_context_provider=belief_context_provider,
+            belief_processing_mode=belief_processing_mode,
+            belief_turn_preparer=belief_turn_preparer,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
 
@@ -284,8 +356,100 @@ class OrchestratorTests(unittest.TestCase):
         list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         self.assertEqual(len(llm.chat_calls), 1)
-        self.assertEqual(len(llm.calls), 0)
+        self.assertEqual(len(llm.calls), 1)
         self.assertEqual(llm.chat_calls[0][2][0]["function"]["name"], "shell__execute")
+
+    def test_react_mode_propagates_persisted_authoritative_turn_unchanged(self):
+        class Prepared:
+            def __init__(self, turn):
+                self.authoritative_turn = turn
+
+            def tool_catalog_message(self):
+                return "frozen catalog"
+
+        class Preparer:
+            def __init__(self):
+                self.turns = []
+
+            def prepare(self, turn):
+                self.turns.append(turn)
+                return Prepared(turn)
+
+        preparer = Preparer()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[{"content": "Done"}],
+            summary_trigger=999,
+            belief_processing_mode="react_tool",
+            belief_turn_preparer=preparer,
+        )
+        sender = SenderAttribution(
+            "relay:human:alice", "Alice", SenderType.HUMAN,
+            InputSource.MANUAL_RELAY,
+        )
+        list(built[0].handle_user_input(
+            "group-a", "I am testing", sender=sender,
+            session_kind=SessionKind.MANUAL_GROUP,
+        ))
+
+        turn = preparer.turns[0]
+        forwarded = built[7].native_contexts[0]
+        self.assertIs(forwarded["authoritative_turn"], turn)
+        self.assertIs(forwarded["prepared_belief_turn"].authoritative_turn, turn)
+        self.assertEqual(turn.session_id, "group-a")
+        self.assertEqual(turn.session_kind, SessionKind.MANUAL_GROUP)
+        self.assertEqual(turn.user_message_id, 1)
+        self.assertEqual(turn.user_text, "I am testing")
+        self.assertEqual(turn.sender_id, "relay:human:alice")
+        self.assertEqual(turn.sender_display_name, "Alice")
+        self.assertEqual(turn.sender_type, SenderType.HUMAN)
+        self.assertEqual(turn.input_source, InputSource.MANUAL_RELAY)
+        self.assertEqual(turn.owner_agent_id, "default-agent")
+        self.assertEqual(turn.timezone_name, "UTC")
+        self.assertIsNotNone(turn.observed_at.tzinfo)
+
+    def test_react_instant_turn_bypasses_preparation_and_tools(self):
+        class Preparer:
+            def __init__(self):
+                self.calls = []
+
+            def prepare(self, turn):
+                self.calls.append(turn)
+                raise AssertionError("instant mode must not prepare belief tools")
+
+        preparer = Preparer()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+            belief_processing_mode="react_tool",
+            belief_turn_preparer=preparer,
+        )
+        list(built[0].handle_user_input("instant", "I am busy", instant_mode=True))
+
+        self.assertEqual(preparer.calls, [])
+        self.assertEqual(built[7].native_contexts, [])
+        self.assertEqual(len(built[1].calls), 1)
+
+    def test_late_routing_prompt_calibrates_memory_and_beliefs_without_forcing_calls(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[{"content": "No tool needed"}],
+            summary_trigger=999,
+        )
+        list(built[0].handle_user_input("prompt", "hello"))
+        system_text = "\n".join(
+            message["content"]
+            for message in built[1].chat_calls[0][0]
+            if message.get("role") == "system"
+        )
+        self.assertIn("Use beliefs__update", system_text)
+        self.assertIn("Use memory__write", system_text)
+        self.assertIn("Use neither", system_text)
+        self.assertIn("If no tools are needed", system_text)
+        self.assertIn("at most one native tool call per inference step", system_text)
 
     def test_integration_context_is_injected_in_direct_and_agent_modes(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -309,6 +473,162 @@ class OrchestratorTests(unittest.TestCase):
         )
         list(agent[0].handle_user_input(self.SESSION_ID, "hello"))
         self.assertEqual(agent[-1].calls[0]["integration_context"], "connected state")
+
+    def test_orchestrator_collects_belief_context_for_normal_turn(self):
+        provider = FakeBeliefContextProvider()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+        )
+        list(built[0].handle_user_input(self.SESSION_ID, "hello", instant_mode=True))
+
+        self.assertEqual(provider.calls, [self.SESSION_ID])
+        self.assertEqual(built[-1].calls[0]["belief_context"], "snapshot-1")
+
+    def test_background_and_integration_turns_collect_belief_context(self):
+        provider = FakeBeliefContextProvider()
+        proactive = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+        )
+        list(proactive[0].handle_proactive_event(self.SESSION_ID, event_text="changed"))
+        self.assertEqual(proactive[-1].calls[0]["belief_context"], "snapshot-1")
+        self.assertIsNone(proactive[-1].calls[0]["current_sender"])
+
+        integration = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            belief_context_provider=provider,
+            chat_responses=[{"content": "done"}],
+        )
+        event = IntegrationEvent(EventId("demo", "finished"), {}, self.SESSION_ID)
+        spec = EventSpec(
+            event=event.event,
+            description="finished",
+            payload_schema={"type": "object", "properties": {}},
+        )
+        list(integration[0].handle_integration_event(self.SESSION_ID, event, spec))
+        self.assertEqual(integration[-1].calls[0]["belief_context"], "snapshot-2")
+        self.assertIsNone(integration[-1].calls[0]["current_sender"])
+
+    def test_group_internal_turns_never_use_local_human_attribution(self):
+        proactive = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+        )
+        proactive[2].session_kinds[self.SESSION_ID] = SessionKind.MANUAL_GROUP
+        list(proactive[0].handle_proactive_event(self.SESSION_ID, event_text="changed"))
+        proactive_sender = proactive[-1].calls[0]["current_sender"]
+        self.assertEqual(proactive[-1].calls[0]["session_kind"], SessionKind.MANUAL_GROUP)
+        self.assertEqual(proactive_sender.sender_type, SenderType.SYSTEM)
+        self.assertEqual(proactive_sender.input_source, InputSource.SYSTEM_RUNTIME)
+        self.assertNotEqual(proactive_sender.sender_id, proactive[0].local_human_id)
+
+        integration = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+            chat_responses=[{"content": "done"}],
+        )
+        integration[2].session_kinds[self.SESSION_ID] = SessionKind.MANUAL_GROUP
+        event = IntegrationEvent(EventId("demo", "finished"), {}, self.SESSION_ID)
+        spec = EventSpec(
+            event=event.event,
+            description="finished",
+            payload_schema={"type": "object", "properties": {}},
+        )
+        list(integration[0].handle_integration_event(self.SESSION_ID, event, spec))
+        integration_sender = integration[-1].calls[0]["current_sender"]
+        self.assertEqual(integration[-1].calls[0]["session_kind"], SessionKind.MANUAL_GROUP)
+        self.assertEqual(integration_sender.sender_type, SenderType.INTEGRATION_RUNTIME)
+        self.assertEqual(integration_sender.input_source, InputSource.INTEGRATION_RUNTIME)
+        self.assertNotEqual(integration_sender.sender_id, integration[0].local_human_id)
+
+    def test_handle_user_input_persists_requested_group_kind_before_first_message(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            summary_trigger=999,
+        )
+        list(built[0].handle_user_input(
+            "new-group",
+            "hello group",
+            instant_mode=True,
+            session_kind=SessionKind.MANUAL_GROUP,
+        ))
+
+        self.assertEqual(built[2].get_session_kind("new-group"), SessionKind.MANUAL_GROUP)
+        self.assertEqual(built[2].added_session_kinds[0], SessionKind.MANUAL_GROUP)
+
+    def test_late_routing_loop_uses_one_frozen_belief_snapshot(self):
+        provider = FakeBeliefContextProvider()
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+            belief_context_provider=provider,
+            chat_responses=[
+                {
+                    "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "shell__execute",
+                        "arguments": {"command": "pwd"},
+                    }}],
+                },
+                {"content": "done"},
+            ],
+        )
+        list(built[0].handle_user_input(self.SESSION_ID, "run pwd"))
+
+        self.assertEqual(provider.calls, [self.SESSION_ID])
+        self.assertEqual(built[-1].calls[0]["belief_context"], "snapshot-1")
+        self.assertEqual(len(built[1].chat_calls), 2)
+
+    def test_extractor_failure_and_malformed_output_do_not_break_real_turn(self):
+        class ExtractionLLM:
+            def __init__(self, response=None, error=None):
+                self.response = response
+                self.error = error
+
+            def chat(self, **_kwargs):
+                if self.error:
+                    raise self.error
+                return self.response
+
+        cases = [
+            ExtractionLLM(error=RuntimeError("extractor unavailable")),
+            ExtractionLLM(response={"content": "not a tool call"}),
+        ]
+        for extraction_llm in cases:
+            with self.subTest(error=extraction_llm.error):
+                built = self._build_orchestrator(
+                    plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+                    summary_trigger=999,
+                )
+                belief_db = Database(":memory:")
+                repository = BeliefRepository(belief_db)
+                observer = ConversationalBeliefObserver(
+                    extractor=BeliefCandidateExtractor(extraction_llm),
+                    update_service=BeliefUpdateService(repository),
+                    snapshot_service=BeliefSnapshotService(repository),
+                    history_store=built[2],
+                )
+                built[0].turn_finalizer.completion_observers = [observer]
+
+                events = list(built[0].handle_user_input(
+                    self.SESSION_ID, "I'm busy for an hour", instant_mode=True
+                ))
+
+                self.assertTrue(any(
+                    isinstance(event, AssistantSpeechEvent) and event.is_final
+                    for event in events
+                ))
+                self.assertEqual(
+                    repository.get_active("default-agent", self.SESSION_ID),
+                    [],
+                )
+                repository.close()
+                belief_db.conn.close()
 
     def test_agent_mode_executes_namespaced_tool_call_and_continues(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -336,6 +656,373 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(len(llm.chat_calls), 2)
         self.assertEqual(str(executor.calls[0][0].capability), "shell__execute")
+        self.assertEqual([call[1] for call in llm.chat_calls], [True, True])
+
+    def test_successful_belief_continuation_preserves_enabled_reasoning(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+        )
+        client = BufferedPhaseLLM([
+            self._belief_tool_response("my"),
+            {"content": "Belief applied."},
+        ])
+        built[0].llm = client
+        list(built[0].handle_user_input(
+            "belief-success-phase", "my current activity is testing", think_override=True
+        ))
+        self.assertEqual(
+            [(call["generation_phase"], call["think_override"], call["options_override"])
+             for call in client.calls],
+            [("initial", True, None), ("continuation", True, None)],
+        )
+        self.assertEqual([call["react_iteration"] for call in client.calls], [1, 2])
+
+    def test_successful_unrelated_tool_continuation_preserves_reasoning(self):
+        tool_response = {"content": "", "tool_calls": [{"function": {
+            "name": "shell__execute", "arguments": {"command": "pwd"},
+        }}]}
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                built = self._build_orchestrator(
+                    plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+                    late_routing_enabled=True,
+                    summary_trigger=999,
+                )
+                client = BufferedPhaseLLM([tool_response, {"content": "Done."}])
+                built[0].llm = client
+                list(built[0].handle_user_input(
+                    f"tool-phase-{enabled}", "run pwd", think_override=enabled
+                ))
+                self.assertEqual(
+                    [(call["generation_phase"], call["think_override"])
+                     for call in client.calls],
+                    [("initial", enabled), ("continuation", enabled)],
+                )
+                self.assertTrue(all(call["options_override"] is None for call in client.calls))
+
+    def test_unrelated_tool_then_belief_update_remain_sequential(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[
+                {"content": "", "tool_calls": [{"function": {
+                    "name": "shell__execute", "arguments": {"command": "pwd"},
+                }}]},
+                {"content": "", "tool_calls": [{"function": {
+                    "name": "beliefs__update",
+                    "arguments": {"assertions": [], "invalidations": []},
+                }}]},
+                {"content": "Done"},
+            ],
+            summary_trigger=999,
+        )
+        list(built[0].handle_user_input("sequential", "run and remember"))
+        self.assertEqual(len(built[1].chat_calls), 3)
+        self.assertEqual(
+            [str(item[0].capability) for item in built[7].calls],
+            ["shell__execute", "beliefs__update"],
+        )
+
+    def test_step_exhaustion_keeps_forced_safe_final_response(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[
+                {"content": "", "tool_calls": [{"function": {
+                    "name": "shell__execute", "arguments": {"command": "one"},
+                }}]},
+                {"content": "", "tool_calls": [{"function": {
+                    "name": "shell__execute", "arguments": {"command": "two"},
+                }}]},
+            ],
+            llm_chunks=["Safe final"],
+            summary_trigger=999,
+        )
+        built[0].max_late_routing_steps = 2
+        events = list(built[0].handle_user_input("exhaust", "keep trying"))
+        self.assertEqual(len(built[1].chat_calls), 2)
+        self.assertEqual(len(built[1].calls), 1)
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Safe final"
+            for event in events
+        ))
+        self.assertTrue(all(
+            record[2].strip()
+            for record in built[2].records
+            if record[1] == "assistant"
+        ))
+
+    @staticmethod
+    def _belief_tool_response(subject_reference="You"):
+        return {"content": "", "tool_calls": [{"function": {
+            "name": "beliefs__update",
+            "arguments": {
+                "assertions": [{
+                    "subject_reference": subject_reference,
+                    "predicate": "current_activity",
+                    "value": "testing",
+                    "visibility": "SESSION_CURRENT",
+                    "expiry_policy": "END_OF_SESSION",
+                    "evidence_excerpt": "my current activity is testing",
+                }],
+                "invalidations": [],
+            },
+        }}]}
+
+    def test_belief_error_followed_by_empty_generation_forces_tool_free_response(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[self._belief_tool_response(), {"content": "   "}],
+            llm_chunks=["Safe recovery"],
+            summary_trigger=999,
+        )
+        built[7].results = [ToolResult.error(
+            "assertions.0.subject_reference must be copied exactly",
+            diagnostics={
+                "category": "subject_reference_grounding",
+                "error_code": "SUBJECT_REFERENCE_GROUNDING",
+                "repository_accessed": True,
+            },
+        )]
+        events = list(built[0].handle_user_input(
+            "belief-empty", "my current activity is testing"
+        ))
+        self.assertEqual(len(built[7].calls), 1)
+        self.assertEqual(len(built[1].chat_calls), 2)
+        self.assertEqual(len(built[1].calls), 1)
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Safe recovery"
+            for event in events
+        ))
+        self.assertTrue(all(
+            record[2].strip()
+            for record in built[2].records
+            if record[1] == "assistant"
+        ))
+
+    def test_two_rejected_belief_attempts_force_response_and_bound_calls(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[
+                self._belief_tool_response("You"),
+                self._belief_tool_response("You"),
+                self._belief_tool_response("You"),
+            ],
+            llm_chunks=["Beliefs aside, let's continue."],
+            summary_trigger=999,
+        )
+        built[7].results = [
+            ToolResult.error("first rejection"),
+            ToolResult.error("second rejection"),
+        ]
+        events = list(built[0].handle_user_input(
+            "belief-bound", "my current activity is testing"
+        ))
+        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(built[1].chat_calls), 2)
+        self.assertEqual(len(built[1].calls), 1)
+        recovery_messages = built[1].calls[0][0]
+        self.assertIn(
+            "Do not call beliefs__update again",
+            "\n".join(str(item.get("content", "")) for item in recovery_messages),
+        )
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Beliefs aside, let's continue."
+            for event in events
+        ))
+
+    def test_two_belief_rejections_then_instant_recovery_timeout_persists_fallback(self):
+        class BufferedTimeoutLLM:
+            def __init__(self, responses):
+                self.responses = list(responses)
+                self.calls = []
+                self.stream_calls = []
+
+            def chat_buffered(self, **kwargs):
+                self.calls.append(kwargs)
+                if not self.responses:
+                    raise TimeoutError("recovery timed out before first chunk")
+                return self.responses.pop(0)
+
+            def chat(self, **_kwargs):
+                raise AssertionError("buffered ReAct path expected")
+
+            def stream_chat(self, messages, **kwargs):
+                self.stream_calls.append((messages, kwargs))
+                raise TimeoutError("instant recovery timed out before first chunk")
+
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+        )
+        client = BufferedTimeoutLLM([
+            self._belief_tool_response("my"),
+            self._belief_tool_response("my"),
+        ])
+        built[0].llm = client
+        built[7].results = [
+            ToolResult.error("first rejection", diagnostics={
+                "category": "native_schema_validation",
+                "error_code": "NATIVE_SCHEMA_VALIDATION",
+                "repository_accessed": False,
+            }),
+            ToolResult.error("second rejection", diagnostics={
+                "category": "visibility",
+                "error_code": "VISIBILITY",
+                "repository_accessed": True,
+            }),
+        ]
+        events = list(built[0].handle_user_input(
+            "belief-timeout", "my current activity is testing"
+        ))
+        final = [event.text for event in events
+                 if isinstance(event, AssistantSpeechEvent) and event.is_final]
+        self.assertEqual(final, [])
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.message, "Astra couldn't finish this response.")
+        self.assertEqual(failure.user_message_id, 1)
+        assistant_rows = [row for row in built[2].records if row[1] == "assistant"]
+        self.assertEqual(assistant_rows, [])
+        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.stream_calls), 1)
+        self.assertTrue(client.calls[0]["think_override"])
+        self.assertIsNone(client.calls[0]["options_override"])
+        self.assertFalse(client.calls[1]["think_override"])
+        self.assertEqual(client.calls[1]["options_override"], {"num_predict": 512})
+        self.assertEqual(
+            [call["generation_phase"] for call in client.calls],
+            ["initial", "correction"],
+        )
+        self.assertEqual([call["react_iteration"] for call in client.calls], [1, 2])
+        recovery_messages, recovery_kwargs = client.stream_calls[0]
+        self.assertEqual(len(recovery_messages), 2)
+        self.assertEqual(recovery_messages[-1], {
+            "role": "user", "content": "my current activity is testing"
+        })
+        self.assertIn("Latest tool observation", recovery_messages[0]["content"])
+        self.assertFalse(recovery_kwargs["think_override"])
+        self.assertEqual(recovery_kwargs["options_override"], {"num_predict": 192})
+        self.assertEqual(recovery_kwargs["generation_deadline_s"], 180.0)
+        self.assertEqual(recovery_kwargs["timeout_override"], 180.0)
+
+    def test_late_routing_uses_extended_generation_budget(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            summary_trigger=999,
+        )
+        client = BufferedPhaseLLM([{"content": "Eventually answered."}])
+        built[0].llm = client
+
+        list(built[0].handle_user_input("slow-model", "take your time"))
+
+        self.assertEqual(client.calls[0]["timeout_override"], 600.0)
+        self.assertEqual(client.calls[0]["generation_deadline_s"], 600.0)
+
+    def test_forced_recovery_empty_emits_retryable_failure_without_assistant_history(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[{"content": ""}],
+            llm_chunks=["   "],
+            summary_trigger=999,
+        )
+        events = list(built[0].handle_user_input("double-empty", "hello"))
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.message, "Astra couldn't finish this response.")
+        self.assertEqual(failure.user_message_id, 1)
+        assistant_rows = [
+            record for record in built[2].records if record[1] == "assistant"
+        ]
+        self.assertEqual(assistant_rows, [])
+
+    def test_retry_reuses_existing_user_message_without_duplicate_history(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            llm_chunks=["Recovered answer"],
+            summary_trigger=999,
+        )
+        built[2].add("retry-session", "user", "Original question")
+
+        events = list(built[0].handle_user_input(
+            "retry-session",
+            "Original question",
+            instant_mode=True,
+            existing_user_message_id=1,
+        ))
+
+        user_rows = [row for row in built[2].records if row[1] == "user"]
+        self.assertEqual(len(user_rows), 1)
+        accepted = next(event for event in events if isinstance(event, UserMessageAcceptedEvent))
+        self.assertEqual(accepted.message_id, 1)
+        self.assertTrue(accepted.is_retry)
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Recovered answer"
+            for event in events
+        ))
+
+    def test_successful_corrected_belief_call_continues_to_final_response(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[
+                self._belief_tool_response("You"),
+                self._belief_tool_response("my"),
+                {"content": "Correction applied and response complete."},
+            ],
+            summary_trigger=999,
+        )
+        built[7].results = [
+            ToolResult.error("use a grounded reference"),
+            ToolResult.success("Belief changes applied successfully."),
+        ]
+        events = list(built[0].handle_user_input(
+            "belief-corrected", "my current activity is testing"
+        ))
+        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(built[1].chat_calls), 3)
+        self.assertEqual(
+            [call[1] for call in built[1].chat_calls],
+            [True, False, True],
+        )
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Correction applied and response complete."
+            for event in events
+        ))
+
+    def test_initial_empty_no_tool_generation_forces_recovery(self):
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            late_routing_enabled=True,
+            chat_responses=[{"content": "\n\t"}],
+            llm_chunks=["Recovered initial response"],
+            summary_trigger=999,
+        )
+        events = list(built[0].handle_user_input("initial-empty", "hello"))
+        self.assertEqual(len(built[1].chat_calls), 1)
+        self.assertEqual(len(built[1].calls), 1)
+        self.assertTrue(any(
+            isinstance(event, AssistantSpeechEvent)
+            and event.is_final
+            and event.text == "Recovered initial response"
+            for event in events
+        ))
 
     def test_malformed_tool_name_becomes_observation_without_execution(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -1002,15 +1689,14 @@ class OrchestratorTests(unittest.TestCase):
             summary_trigger=999,
         )
 
-        events = []
-        with self.assertRaises(RuntimeError):
-            for event in orch.handle_user_input(self.SESSION_ID, "hello"):
-                events.append(event)
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
         state_values = [
             event.state for event in events if isinstance(event, AssistantStateEvent)
         ]
         self.assertEqual(state_values[-1], AssistantState.IDLE)
+        failure = next(event for event in events if isinstance(event, AssistantTurnFailureEvent))
+        self.assertEqual(failure.user_message_id, 1)
 
     def test_user_input_generator_close_does_not_yield_during_generatorexit(self):
         plan = Plan(actions=[Action(type=ActionType.RESPOND)])
@@ -1079,6 +1765,22 @@ class OrchestratorTests(unittest.TestCase):
             perception_snapshot[PerceptionKey.USER_INPUT.value]["text"],
             "hello",
         )
+
+    def test_normal_text_and_voice_use_authoritative_local_identity(self):
+        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
+        built = self._build_orchestrator(plan=plan, summary_trigger=999)
+        orch, history = built[0], built[2]
+        orch.local_human_id = "person-1"
+        orch.local_human_name = "Local Person"
+
+        list(orch.handle_user_input("text-session", "hello", input_modality=InputModality.TEXT))
+        list(orch.handle_user_input("voice-session", "spoken", input_modality=InputModality.VOICE))
+
+        text_sender = history.senders[0]
+        voice_sender = history.senders[2]
+        self.assertEqual((text_sender.sender_id, text_sender.sender_display_name), ("person-1", "Local Person"))
+        self.assertEqual(text_sender.input_source.value, "local_text")
+        self.assertEqual(voice_sender.input_source.value, "local_voice")
 
 
 if __name__ == "__main__":

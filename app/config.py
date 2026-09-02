@@ -15,6 +15,7 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
+        self.local_human = self._load_local_human_config(self.raw.get("local_human"))
 
         # Planner
         self.planner = self.raw.get(
@@ -43,6 +44,8 @@ class Config:
 
         # Context
         self.context = self._load_context_config(self.raw.get("context"))
+
+        self.beliefs = self._load_beliefs_config(self.raw.get("beliefs"))
 
         self.autonomy = self._load_autonomy_config(self.raw.get("autonomy"))
 
@@ -83,6 +86,15 @@ class Config:
                 "trace_backup_count": 5,
             },
         )
+
+    @staticmethod
+    def _load_local_human_config(raw_local_human: dict | None) -> dict:
+        config = {"id": "local-human", "display_name": "You"}
+        if isinstance(raw_local_human, dict):
+            config.update(raw_local_human)
+        config["id"] = str(config.get("id") or "local-human").strip() or "local-human"
+        config["display_name"] = str(config.get("display_name") or "You").strip() or "You"
+        return config
 
     @staticmethod
     def _default_tts_config() -> dict:
@@ -201,6 +213,39 @@ class Config:
             return config
 
         config.update(raw_context)
+        return config
+
+    @staticmethod
+    def _load_beliefs_config(raw_beliefs: dict | None) -> dict:
+        config = {
+            "enabled": True,
+            "processing_mode": "disabled",
+            "timezone": "UTC",
+            "max_candidates": 4,
+            "max_existing_beliefs": 24,
+            "max_snapshot_chars": 2000,
+            "max_disambiguating_context_chars": 1000,
+            "max_generation_tokens": 384,
+            "timeout_s": 30.0,
+            "max_expiry_days": 90,
+        }
+        if isinstance(raw_beliefs, dict):
+            if "extraction_enabled" in raw_beliefs:
+                raise ValueError(
+                    "beliefs.extraction_enabled was replaced by beliefs.processing_mode; "
+                    "valid values are: disabled, observer, react_tool"
+                )
+            config.update(raw_beliefs)
+        valid_modes = {"disabled", "observer", "react_tool"}
+        mode = config.get("processing_mode")
+        if mode not in valid_modes:
+            raise ValueError(
+                "beliefs.processing_mode must be one of: disabled, observer, react_tool"
+            )
+        if not bool(config.get("enabled", True)) and mode != "disabled":
+            raise ValueError(
+                "beliefs.enabled=false requires beliefs.processing_mode=disabled"
+            )
         return config
 
     @staticmethod

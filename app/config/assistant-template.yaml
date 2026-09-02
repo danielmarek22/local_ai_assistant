@@ -21,7 +21,13 @@ llm:
       rep_pen: 1.1
       min_p: null
 
+local_human:
+  id: local-human
+  display_name: You
+
 assistant:
+  id: default-agent
+  display_name: Astra
   system_prompt: |
     You are Astra, a local, user-aligned personal assistant.
 
@@ -30,6 +36,7 @@ assistant:
   personality:
     default_emotion: neutral
   avatar_controls:
+    default_outfit: default
     expressions:
       - happy
       - angry
@@ -45,11 +52,28 @@ planner:
   
 orchestrator:
   summary_trigger: 10
+  # Slow local models may spend a significant part of this budget evaluating context.
+  generation_deadline_s: 600
+  # Recovery streams a short, no-thinking answer with tools disabled.
+  recovery_deadline_s: 180
+  recovery_num_predict: 192
 
 context:
   history_limit: 6
   injected_memory_limit: 5
   integration_context_limit: 4000
+
+beliefs:
+  enabled: true
+  processing_mode: disabled  # disabled | observer | react_tool
+  timezone: UTC
+  max_candidates: 4
+  max_existing_beliefs: 24
+  max_snapshot_chars: 2000
+  max_disambiguating_context_chars: 1000
+  max_generation_tokens: 384
+  timeout_s: 30.0
+  max_expiry_days: 90
 
 autonomy:
   enabled: false

@@ -13,6 +13,9 @@ from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
 from app.perception.state import ImageAttachment, PerceptionState
 from app.storage.database import Database
+from app.core.conversation import (
+    InputSource, SenderAttribution, SenderType, SessionKind, derive_relay_sender_id,
+)
 
 
 def _load_server_module():
@@ -67,6 +70,17 @@ class FakeOrchestrator:
         self.history = history_store
         self.summary_store = summary_store
         self.gesture_catalog = gesture_catalog or {}
+        self.agent_id = "agent-a"
+        self.belief_repository = FakeBeliefRepository()
+
+
+class FakeBeliefRepository:
+    def __init__(self):
+        self.deleted_sessions = []
+
+    def delete_session(self, owner_agent_id, session_id):
+        self.deleted_sessions.append((owner_agent_id, session_id))
+        return 0
 
 
 class FakeMemoryReflector:
@@ -196,6 +210,25 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(session_b["message_count"], 2)
         self.assertEqual(session_b["preview"], "Second chat")
 
+    def test_list_sessions_excludes_repeatedly_created_empty_sessions(self):
+        for index in range(3):
+            direct_id = f"unused-direct-{index}"
+            group_id = f"unused-group-{index}"
+            for _ in range(2):
+                self.history.ensure_session(direct_id, SessionKind.DIRECT)
+                self.history.ensure_session(group_id, SessionKind.MANUAL_GROUP)
+
+        sessions = server_module.asyncio.run(server_module.list_sessions())["sessions"]
+        self.assertEqual(
+            {session["session_id"] for session in sessions},
+            {"session-a", "session-b"},
+        )
+        self.assertEqual(
+            self.history.get_session_kind("unused-group-2"),
+            SessionKind.MANUAL_GROUP,
+        )
+        self.assertTrue(self.history.session_exists("unused-direct-2"))
+
     def test_get_session_returns_messages_and_summary(self):
         payload = server_module.asyncio.run(server_module.get_session("session-b"))
 
@@ -233,6 +266,20 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0]["mime_type"], "image/png")
         self.assertTrue(attachments[0]["url"].startswith("/static/"))
 
+    def test_get_session_exposes_retry_state_on_original_user_message(self):
+        message_id = self.history.add("retry-session", "user", "Please try")
+        self.history.mark_turn_failed(
+            "retry-session", message_id, "Astra couldn't finish this response."
+        )
+
+        payload = server_module.asyncio.run(server_module.get_session("retry-session"))
+
+        self.assertEqual(payload["messages"][0]["id"], message_id)
+        self.assertEqual(payload["messages"][0]["retryable_failure"], {
+            "message": "Astra couldn't finish this response.",
+            "attempts": 1,
+        })
+
     def test_delete_session_removes_rows(self):
         message_id = self.history.add(
             "session-b",
@@ -260,6 +307,10 @@ class ServerSessionTests(unittest.TestCase):
             self.vector_store.episodic_collection.deleted_wheres,
         )
         self.assertFalse(attachment_dir.exists())
+        self.assertEqual(
+            self.fake_orchestrator.belief_repository.deleted_sessions,
+            [("agent-a", "session-b")],
+        )
 
     def test_run_memory_reflection_returns_reflector_summary(self):
         payload = server_module.asyncio.run(
@@ -304,6 +355,17 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertNotEqual(session_id, "session-a")
 
+    def test_resolve_session_id_restores_saved_session_after_server_restart(self):
+        session_id = server_module.resolve_session_id(
+            session_mode="resume",
+            requested_session_id="session-a",
+            known_server_instance_id="stale-server",
+            server_instance_id="server-1",
+            requested_session_exists=True,
+        )
+
+        self.assertEqual(session_id, "session-a")
+
     def test_parse_user_message_supports_structured_reasoning_override(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(
             '{"type":"user_message","text":"hello","reasoning":true}'
@@ -323,6 +385,22 @@ class ServerSessionTests(unittest.TestCase):
         self.assertIsNone(reasoning)
         self.assertIs(instant_mode, True)
         self.assertEqual(attachments, [])
+
+    def test_parse_retry_message_accepts_only_a_stored_message_reference(self):
+        message_id, reasoning, instant_mode = server_module.parse_retry_message({
+            "type": "retry_message",
+            "message_id": 42,
+            "reasoning": False,
+            "instant_mode": True,
+        })
+
+        self.assertEqual(message_id, 42)
+        self.assertIs(reasoning, False)
+        self.assertTrue(instant_mode)
+        with self.assertRaises(ValueError):
+            server_module.parse_retry_message({
+                "type": "retry_message", "message_id": "42"
+            })
 
     def test_parse_user_message_parses_base64_image_attachments(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(
@@ -449,6 +527,80 @@ class ServerSessionTests(unittest.TestCase):
         self.assertIs(instant_mode, False)
         self.assertEqual(attachments, [])
 
+    def test_relay_validation_kind_types_spoofing_and_deterministic_id(self):
+        payload = {
+            "type": "relay_message",
+            "sender_display_name": "  Claude   Agent  ",
+            "sender_type": "external_agent",
+            "text": "Hello from elsewhere",
+        }
+        text, sender = server_module.parse_relay_message(payload, SessionKind.MANUAL_GROUP)
+        self.assertEqual(text, "Hello from elsewhere")
+        self.assertEqual(sender.sender_display_name, "Claude Agent")
+        self.assertEqual(sender.sender_type, SenderType.EXTERNAL_AGENT)
+        self.assertEqual(
+            sender.sender_id,
+            derive_relay_sender_id(SenderType.EXTERNAL_AGENT, "claude agent"),
+        )
+        human_payload = {**payload, "sender_type": "human", "sender_display_name": "Alice"}
+        _, human_sender = server_module.parse_relay_message(human_payload, SessionKind.MANUAL_GROUP)
+        self.assertEqual(human_sender.sender_type, SenderType.HUMAN)
+        with self.assertRaises(ValueError):
+            server_module.parse_relay_message(payload, SessionKind.DIRECT)
+        for rejected_type in ("local_assistant", "system", "tool", "integration_runtime"):
+            with self.subTest(rejected_type=rejected_type), self.assertRaises(ValueError):
+                server_module.parse_relay_message(
+                    {**payload, "sender_type": rejected_type}, SessionKind.MANUAL_GROUP
+                )
+        for spoof in ("sender_id", "role", "input_source", "target", "attachments", "tool"):
+            with self.subTest(spoof=spoof), self.assertRaises(ValueError):
+                server_module.parse_relay_message(
+                    {**payload, spoof: "spoofed"}, SessionKind.MANUAL_GROUP
+                )
+
+    def test_user_message_rejects_server_controlled_sender_fields(self):
+        for field in ("role", "sender_id", "sender_type", "input_source", "target", "tool"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                server_module.parse_user_message(json.dumps({
+                    "type": "user_message", "text": "hello", field: "spoofed",
+                }))
+
+    def test_durable_session_kind_and_sender_history_api_round_trip(self):
+        self.history.ensure_session("empty-group", SessionKind.MANUAL_GROUP)
+        empty_payload = server_module.asyncio.run(server_module.get_session("empty-group"))
+        self.assertEqual(empty_payload["kind"], "manual_group")
+        self.assertEqual(empty_payload["messages"], [])
+
+        self.assertEqual(
+            self.history.ensure_session("group-api", SessionKind.MANUAL_GROUP),
+            SessionKind.MANUAL_GROUP,
+        )
+        # Re-ensuring cannot mutate an existing session kind.
+        self.assertEqual(
+            self.history.ensure_session("group-api", SessionKind.DIRECT),
+            SessionKind.MANUAL_GROUP,
+        )
+        sender = SenderAttribution(
+            "relay:human:abc", "Alice", SenderType.HUMAN, InputSource.MANUAL_RELAY
+        )
+        self.history.add("group-api", "user", "Relayed hello", sender=sender)
+
+        payload = server_module.asyncio.run(server_module.get_session("group-api"))
+        self.assertEqual(payload["kind"], "manual_group")
+        self.assertEqual(
+            {key: payload["messages"][0][key] for key in (
+                "sender_id", "sender_display_name", "sender_type", "input_source"
+            )},
+            {
+                "sender_id": sender.sender_id,
+                "sender_display_name": "Alice",
+                "sender_type": "human",
+                "input_source": "manual_relay",
+            },
+        )
+        sessions = server_module.asyncio.run(server_module.list_sessions())["sessions"]
+        self.assertEqual(next(item for item in sessions if item["session_id"] == "group-api")["kind"], "manual_group")
+
     def test_should_forward_state_holds_responding_until_audio(self):
         self.assertFalse(server_module._should_forward_state(server_module.AssistantState.RESPONDING))
         self.assertTrue(server_module._should_forward_state(server_module.AssistantState.THINKING))
@@ -458,6 +610,8 @@ class ServerSessionTests(unittest.TestCase):
             server_instance_id="server-1",
             session_id="session-a",
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            outfit_catalog={"default": "/static/avatar.vrm"},
+            current_outfit="default",
         )
 
         self.assertEqual(
@@ -467,6 +621,11 @@ class ServerSessionTests(unittest.TestCase):
                 "server_instance_id": "server-1",
                 "session_id": "session-a",
                 "gesture_catalog": {"greeting": "/static/animations/Gestures/Greeting.fbx"},
+                "outfit_catalog": {"default": "/static/avatar.vrm"},
+                "current_outfit": "default",
+                "session_kind": "direct",
+                "local_human_display_name": "You",
+                "local_assistant_display_name": "Astra",
             },
         )
 

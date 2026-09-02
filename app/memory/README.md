@@ -24,6 +24,8 @@ Memory should be treated as an *active system*, not just a database.
   - stores long-term fact-like memory in SQLite
   - stores embeddings in Chroma's `semantic_memory`
   - retrieves relevant facts semantically from Chroma
+  - exposes a separate SQLite-only, read-only inspection list for the Knowledge UI;
+    this path does not query Chroma or update access timestamps
 - `SummaryStore`
   - stores one summary per conversation session in SQLite
 - `SimpleMemoryPolicy`
@@ -39,7 +41,9 @@ The attachment model now has a shared `Attachment` base type, but persistence is
 4. Retrieved memory is injected into perception and into prompt context for response generation.
 5. The current user/assistant messages are persisted to both chat history layers.
 6. If the user attached images, those files are stored, summarized once for long-term retrieval, and linked back to the chat message.
-7. Recent user turns with images can be replayed into the multimodal prompt from stored attachments.
+7. Current-turn images are sent as multimodal payloads. Historical image turns use their
+   stored filename and summary as text, avoiding repeated binary payloads while keeping
+   visual context retrievable.
 8. If enough turns have accumulated and no summary exists yet, the session is summarized.
 
 ## Data Access
@@ -57,3 +61,7 @@ Deleting a session removes:
 - attachment rows from SQLite
 - uploaded image files on disk
 - episodic vector entries for both text turns and image summaries
+
+Long-term structured records in the global `memory` table are not session-owned and
+therefore survive chat-session deletion. Their current schema has no source session or
+message provenance.

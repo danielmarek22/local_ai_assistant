@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from app.perception.attachments import Attachment
+from app.core.conversation import SenderAttribution
 
 class InputModality(str, Enum):
     TEXT = "text"
@@ -15,6 +16,7 @@ class TurnInput:
     think_override: bool | None = None
     instant_mode: bool = False
     input_modality: InputModality = InputModality.TEXT
+    sender: SenderAttribution | None = None
 
     def _attachment_noun(self) -> str:
         types = {

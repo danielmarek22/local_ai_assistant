@@ -1,0 +1,110 @@
+site_name: Project Astra
+site_description: Architecture and development documentation for the local-first Astra assistant.
+site_author: Project Astra
+repo_name: danielmarek22/local_ai_assistant
+repo_url: https://github.com/danielmarek22/local_ai_assistant
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: en
+  logo: assets/images/astra-logo.png
+  favicon: assets/images/astra-logo.png
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: astra-light
+      primary: deep-purple
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Project map:
+      - System map: project-map.md
+      - Where do I change...?: guides/where-to-change.md
+  - Architecture:
+      - Overview: architecture.md
+      - Runtime lifecycle: architecture/runtime.md
+      - Context construction: architecture/context-building.md
+      - Memory: architecture/memory.md
+      - Beliefs: architecture/beliefs.md
+  - Development:
+      - Working on Astra: guides/development.md
+      - Documentation: guides/documentation.md
+  - Services:
+      - Service catalog: services/index.md
+      - PocketTTS: services/pocket-tts.md
+      - Mindcraft integration: services/mindcraft.md
+  - Roadmap: roadmap.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+extra_css:
+  - assets/stylesheets/astra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/solid/robot
+      link: index.html
+      name: Project Astra
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn

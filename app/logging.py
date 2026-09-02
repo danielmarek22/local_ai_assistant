@@ -22,11 +22,16 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "memory_retrieval",
         "plan_result",
         "assistant_response",
+        "assistant_response_failed",
         "planner_input",
         "llm_stream_complete",
         "late_routing_directive",
         "late_routing_observation",
         "late_routing_stream_complete",
+        "late_routing_inference_timing",
+        "late_routing_inference_failure",
+        "belief_update_rejected",
+        "forced_recovery",
         "proactive_event",
     ),
     "context_builder": ("context_built",),
@@ -37,6 +42,8 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "stream_request",
         "stream_response",
         "stream_retry_without_images",
+        "request_retry",
+        "request_failure",
     ),
     "web_search": (
         "probe_start",
@@ -83,6 +90,10 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "llm_output",
         "reflection_complete",
         "reflection_parse_error",
+    ),
+    "belief_observer": (
+        "extraction_complete",
+        "extraction_failed",
     ),
 }
 

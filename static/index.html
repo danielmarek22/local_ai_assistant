@@ -30,13 +30,31 @@
             <button class="chat-tab active" type="button" role="tab" aria-selected="true" aria-controls="chat-view" data-tab-target="chat-view">Chat</button>
             <button class="chat-tab" type="button" role="tab" aria-selected="false" aria-controls="config-view" data-tab-target="config-view">Config</button>
             <button class="chat-tab" type="button" role="tab" aria-selected="false" aria-controls="history-view" data-tab-target="history-view">History</button>
+            <button class="chat-tab" type="button" role="tab" aria-selected="false" aria-controls="knowledge-view" data-tab-target="knowledge-view">Knowledge</button>
         </div>
 
         <div id="tab-panels">
             <section id="chat-view" class="tab-panel active" role="tabpanel">
-                <div id="chat-history">
-                    <div class="message astra">System: Online. Ready.</div>
+                <div id="conversation-mode-control" class="conversation-mode-control" role="radiogroup" aria-label="Conversation mode">
+                    <button class="conversation-mode-btn active" type="button" role="radio" aria-checked="true" data-conversation-mode="direct">Direct</button>
+                    <button class="conversation-mode-btn" type="button" role="radio" aria-checked="false" data-conversation-mode="manual_group">Group</button>
                 </div>
+                <div id="chat-history">
+                    <div class="message astra" data-sender-display-name="System" data-sender-type="system" data-input-source="system_runtime">System: Online. Ready.</div>
+                </div>
+
+                <details id="relay-composer" class="relay-composer hidden">
+                    <summary>Relay message</summary>
+                    <div class="relay-composer-fields">
+                        <input id="relay-sender-name" type="text" maxlength="80" placeholder="Sender display name" autocomplete="off">
+                        <select id="relay-sender-type" aria-label="Relay sender type">
+                            <option value="human">Human</option>
+                            <option value="external_agent">External agent</option>
+                        </select>
+                        <textarea id="relay-text" rows="2" placeholder="Paste a message to relay..."></textarea>
+                        <button id="relay-btn" type="button">Relay</button>
+                    </div>
+                </details>
 
                 <div id="input-area">
                     <div id="composer-field">
@@ -193,6 +211,93 @@
                     </div>
                     <div id="history-status" class="history-status hidden"></div>
                     <div id="history-list" class="history-list"></div>
+                </div>
+            </section>
+
+            <section id="knowledge-view" class="tab-panel" role="tabpanel" aria-hidden="true">
+                <div class="knowledge-panel">
+                    <div class="panel-section-header knowledge-header">
+                        <div>
+                            <h2>Knowledge</h2>
+                            <p>Read-only inspection of Astra's stored and effective beliefs.</p>
+                        </div>
+                        <button id="knowledge-refresh-btn" class="history-toolbar-btn" type="button">Refresh</button>
+                    </div>
+                    <label class="knowledge-session-control" for="knowledge-session-select">
+                        <span>Inspection session</span>
+                        <select id="knowledge-session-select"></select>
+                    </label>
+                    <div class="knowledge-subtabs" role="tablist" aria-label="Knowledge views">
+                        <button class="knowledge-subtab active" type="button" data-knowledge-view="effective" aria-selected="true">Effective state</button>
+                        <button class="knowledge-subtab" type="button" data-knowledge-view="all" aria-selected="false">All records</button>
+                        <button class="knowledge-subtab" type="button" data-knowledge-view="context" aria-selected="false">Context preview</button>
+                        <button class="knowledge-subtab" type="button" data-knowledge-view="memories" aria-selected="false">Saved memories</button>
+                    </div>
+                    <div id="knowledge-status" class="knowledge-status hidden" aria-live="polite"></div>
+
+                    <section id="knowledge-effective-panel" class="knowledge-content active" data-knowledge-panel="effective">
+                        <p class="knowledge-help">Session-specific beliefs override global beliefs only within an identical subject, predicate, epistemic-status, and evidence-source track.</p>
+                        <div id="knowledge-effective-table"></div>
+                    </section>
+
+                    <section id="knowledge-all-panel" class="knowledge-content" data-knowledge-panel="all" aria-hidden="true">
+                        <form id="knowledge-filters" class="knowledge-filters">
+                            <input name="subject_id" type="text" maxlength="128" placeholder="Subject ID">
+                            <input name="source_sender_id" type="text" maxlength="128" placeholder="Source sender ID">
+                            <input name="predicate" type="text" maxlength="64" placeholder="Predicate">
+                            <select name="epistemic_status" aria-label="Epistemic status">
+                                <option value="">Any epistemic status</option>
+                                <option value="SELF_REPORT">Self report</option>
+                                <option value="ATTRIBUTED_CLAIM">Attributed claim</option>
+                            </select>
+                            <select name="visibility" aria-label="Visibility">
+                                <option value="">Any visibility</option>
+                                <option value="AGENT_CURRENT">Global</option>
+                                <option value="SESSION_CURRENT">Session</option>
+                            </select>
+                            <select name="record_status" aria-label="Record status">
+                                <option value="">Any record status</option>
+                                <option value="active">Active</option>
+                                <option value="expired">Expired</option>
+                                <option value="invalidated">Invalidated</option>
+                            </select>
+                            <input name="scope_session_id" type="text" maxlength="128" placeholder="Scope session ID">
+                            <input name="source_session_id" type="text" maxlength="128" placeholder="Source session ID">
+                            <select name="limit" aria-label="Page size">
+                                <option value="25">25 per page</option>
+                                <option value="50" selected>50 per page</option>
+                                <option value="100">100 per page</option>
+                            </select>
+                            <div class="knowledge-filter-actions">
+                                <button type="submit">Apply</button>
+                                <button id="knowledge-filter-reset" type="button">Reset</button>
+                            </div>
+                        </form>
+                        <div id="knowledge-all-table"></div>
+                        <div class="knowledge-pagination">
+                            <button id="knowledge-prev-btn" type="button">Previous</button>
+                            <span id="knowledge-page-info"></span>
+                            <button id="knowledge-next-btn" type="button">Next</button>
+                        </div>
+                    </section>
+
+                    <section id="knowledge-context-panel" class="knowledge-content" data-knowledge-panel="context" aria-hidden="true">
+                        <pre id="knowledge-context-text" class="knowledge-context-text"></pre>
+                    </section>
+
+                    <section id="knowledge-memories-panel" class="knowledge-content" data-knowledge-panel="memories" aria-hidden="true">
+                        <p id="knowledge-memories-explanation" class="knowledge-help"></p>
+                        <div class="knowledge-memory-summary">Total saved memories: <span id="knowledge-memory-count">0</span></div>
+                        <div id="knowledge-memory-table"></div>
+                    </section>
+
+                    <aside id="knowledge-detail" class="knowledge-detail hidden" aria-label="Belief details">
+                        <div class="knowledge-detail-header">
+                            <h3>Belief details</h3>
+                            <button id="knowledge-detail-close" type="button" aria-label="Close belief details">x</button>
+                        </div>
+                        <div id="knowledge-detail-content"></div>
+                    </aside>
                 </div>
             </section>
         </div>

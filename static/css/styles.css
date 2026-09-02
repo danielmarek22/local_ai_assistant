@@ -556,7 +556,8 @@ body {
 }
 
 .history-panel,
-.config-panel {
+.config-panel,
+.knowledge-panel {
     flex: 1;
     min-width: 0;
     min-height: 0;
@@ -567,6 +568,260 @@ body {
 .history-panel h2 {
     margin: 0 0 6px;
     font-size: 18px;
+}
+
+.knowledge-panel {
+    position: relative;
+    overflow: hidden;
+}
+
+.knowledge-panel h2 {
+    margin: 0 0 6px;
+    font-size: 18px;
+}
+
+.knowledge-panel p {
+    margin: 0;
+    color: #aab4bd;
+    line-height: 1.4;
+    font-size: 13px;
+}
+
+.knowledge-header {
+    padding-bottom: 12px;
+}
+
+.knowledge-session-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 20px 12px;
+    color: #c7d0d8;
+    font-size: 12px;
+}
+
+.knowledge-session-control select,
+.knowledge-filters input,
+.knowledge-filters select {
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.28);
+    color: #eef5fb;
+    padding: 8px 9px;
+}
+
+.knowledge-session-control select {
+    flex: 1;
+}
+
+.knowledge-subtabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 20px 12px;
+}
+
+.knowledge-subtab,
+.knowledge-filter-actions button,
+.knowledge-pagination button,
+.knowledge-detail-header button {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #dbe5ec;
+    padding: 7px 9px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.knowledge-subtab {
+    flex: 1 1 calc(50% - 6px);
+}
+
+.knowledge-memory-summary {
+    margin-bottom: 10px;
+    color: #c8d3db;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-memory-table {
+    min-width: 850px;
+}
+
+.knowledge-memory-table td:nth-child(3) {
+    min-width: 260px;
+    white-space: pre-wrap;
+}
+
+.knowledge-subtab.active {
+    border-color: rgba(0, 255, 153, 0.4);
+    background: rgba(0, 255, 153, 0.12);
+    color: #effff8;
+}
+
+.knowledge-status {
+    margin: 0 20px 12px;
+    padding: 9px 11px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #d7dee5;
+    font-size: 12px;
+}
+
+.knowledge-status.error {
+    background: rgba(255, 80, 80, 0.12);
+    color: #ffb8b8;
+}
+
+.knowledge-content {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 20px 20px;
+}
+
+.knowledge-content.active {
+    display: block;
+}
+
+.knowledge-help {
+    margin-bottom: 12px !important;
+}
+
+.knowledge-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.knowledge-filter-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.knowledge-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+}
+
+.knowledge-table {
+    width: 100%;
+    min-width: 1150px;
+    border-collapse: collapse;
+    color: #dce5eb;
+    font-size: 11px;
+}
+
+.knowledge-table th,
+.knowledge-table td {
+    max-width: 230px;
+    padding: 8px 9px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-table th {
+    position: sticky;
+    top: 0;
+    background: #202427;
+    color: #aebbc5;
+    font-weight: 600;
+}
+
+.knowledge-table tbody tr {
+    cursor: pointer;
+}
+
+.knowledge-table tbody tr:hover,
+.knowledge-table tbody tr:focus {
+    outline: none;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.knowledge-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 12px;
+    color: #aebbc5;
+    font-size: 12px;
+}
+
+.knowledge-pagination button:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.knowledge-context-text {
+    margin: 0;
+    min-height: 80px;
+    padding: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.32);
+    color: #e7eef3;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.knowledge-detail {
+    position: absolute;
+    inset: 105px 12px 12px;
+    z-index: 3;
+    overflow-y: auto;
+    padding: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 12px;
+    background: rgba(18, 21, 23, 0.98);
+    box-shadow: 0 14px 35px rgba(0, 0, 0, 0.55);
+}
+
+.knowledge-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.knowledge-detail-header h3 {
+    margin: 0;
+    font-size: 15px;
+}
+
+.knowledge-detail-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 35%) minmax(0, 1fr);
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.knowledge-detail-label {
+    color: #9fadb8;
+    font-size: 11px;
+}
+
+.knowledge-detail-value {
+    color: #e5edf2;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+}
+
+.knowledge-detail-value.pre {
+    margin: 0;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .history-panel p {
@@ -810,6 +1065,57 @@ body {
     text-transform: uppercase;
 }
 
+.turn-retry-card {
+    align-self: flex-end;
+    width: min(85%, 420px);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: -4px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 180, 66, 0.42);
+    border-radius: 10px;
+    background: rgba(255, 180, 66, 0.1);
+    color: #f5d6a0;
+    font-size: 12px;
+}
+
+.turn-retry-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.turn-retry-copy span {
+    color: rgba(245, 214, 160, 0.7);
+    font-size: 11px;
+}
+
+.turn-retry-button {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid rgba(255, 180, 66, 0.55);
+    border-radius: 8px;
+    background: rgba(255, 180, 66, 0.16);
+    color: #ffe4b5;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+}
+
+.turn-retry-button:hover:not(:disabled) {
+    background: rgba(255, 180, 66, 0.25);
+}
+
+.turn-retry-button:disabled {
+    cursor: default;
+    opacity: 0.65;
+}
+
 /* Markdown content in assistant bubbles */
 .message.astra p,
 .message.thinking p {
@@ -884,6 +1190,71 @@ body {
     gap: 10px;
     border-bottom-left-radius: 15px;
     border-bottom-right-radius: 15px;
+}
+
+.conversation-mode-control {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.conversation-mode-btn {
+    padding: 5px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 999px;
+    background: transparent;
+    color: #bbb;
+    cursor: pointer;
+}
+
+.conversation-mode-btn.active {
+    background: rgba(0, 195, 255, 0.18);
+    border-color: rgba(0, 195, 255, 0.6);
+    color: #fff;
+}
+
+.relay-composer {
+    padding: 10px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.22);
+}
+
+.relay-composer summary { cursor: pointer; color: #9ddfff; font-size: 13px; }
+.relay-composer-fields { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 10px; }
+.relay-composer-fields textarea { grid-column: 1 / -1; resize: vertical; }
+.relay-composer-fields input,
+.relay-composer-fields select,
+.relay-composer-fields textarea {
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.35);
+    color: #eee;
+}
+.relay-composer-fields button { grid-column: 2; padding: 7px 14px; }
+
+.message.group-message .message-sender-header {
+    margin-bottom: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.78;
+}
+
+.message.group-message.sender-external-agent {
+    align-self: flex-end;
+    background: rgba(170, 100, 255, 0.24);
+    border: 1px solid rgba(190, 140, 255, 0.35);
+    color: #f4ebff;
+}
+
+.message.group-message.sender-human.source-manual-relay {
+    background: rgba(255, 176, 64, 0.2);
+    border: 1px solid rgba(255, 176, 64, 0.35);
+    color: #fff4df;
 }
 
 #composer-field {

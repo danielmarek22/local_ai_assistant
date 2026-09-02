@@ -5,6 +5,7 @@ from datetime import datetime
 from app.perception.attachments import AudioAttachment
 from app.perception.state import ImageAttachment
 from app.services.context_builder import ContextBuilder
+from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
 
 
 class FakeHistoryStore:
@@ -15,6 +16,9 @@ class FakeHistoryStore:
     def get_recent(self, session_id: str, limit: int):
         self.last_limit = limit
         return self.rows
+
+    def count_messages(self, session_id: str):
+        return len(self.rows)
 
 
 class FakeSummaryStore:
@@ -168,7 +172,7 @@ class ContextBuilderTests(unittest.TestCase):
 
         self.assertEqual(messages[-1]["images"], [audio.base64_data, "aW1hZ2U="])
 
-    def test_build_replays_recent_history_images_for_user_messages(self):
+    def test_build_replaces_recent_history_images_with_text_context(self):
         history = FakeHistoryStore(
             [
                 {
@@ -180,6 +184,7 @@ class ContextBuilderTests(unittest.TestCase):
                             mime_type="image/png",
                             base64_data="aGVsbG8=",
                             size_bytes=5,
+                            summary_text="A cat sitting on a desk.",
                         )
                     ],
                 }
@@ -200,8 +205,39 @@ class ContextBuilderTests(unittest.TestCase):
         )
 
         self.assertEqual(messages[-2]["role"], "user")
-        self.assertEqual(messages[-2]["content"], "Earlier screenshot")
-        self.assertEqual(messages[-2]["images"], ["aGVsbG8="])
+        self.assertEqual(
+            messages[-2]["content"],
+            "Earlier screenshot\n"
+            "[Earlier attached image: earlier.png. Image summary: A cat sitting on a desk.]",
+        )
+        self.assertNotIn("images", messages[-2])
+
+    def test_build_mentions_unsummarized_history_image_without_replaying_it(self):
+        history = FakeHistoryStore([
+            {
+                "role": "user",
+                "content": "Earlier screenshot",
+                "attachments": [
+                    ImageAttachment(
+                        name="earlier.png",
+                        mime_type="image/png",
+                        base64_data="aGVsbG8=",
+                        size_bytes=5,
+                    )
+                ],
+            }
+        ])
+        builder = ContextBuilder(
+            "System prompt", history, summary_store=FakeSummaryStore(None)
+        )
+
+        messages = builder.build("abc123", "What did I send?")
+
+        self.assertEqual(
+            messages[-2]["content"],
+            "Earlier screenshot\n[Earlier attached image: earlier.png]",
+        )
+        self.assertNotIn("images", messages[-2])
 
     def test_build_unwraps_summary_store_tuple(self):
         history = FakeHistoryStore([])
@@ -222,6 +258,22 @@ class ContextBuilderTests(unittest.TestCase):
         system_content = messages[0]["content"]
         self.assertIn("Summary of previous conversation:\nConversation summary.", system_content)
         self.assertNotIn("('Conversation summary.', 4)", system_content)
+
+    def test_build_keeps_every_message_since_summary_checkpoint(self):
+        history = FakeHistoryStore([
+            {"role": "user", "content": f"Message {index}"}
+            for index in range(9)
+        ])
+        builder = ContextBuilder(
+            system_prompt="System prompt",
+            history_store=history,
+            summary_store=FakeSummaryStore(("Summary through message 4.", 4)),
+            history_limit=10,
+        )
+
+        builder.build(session_id="abc123", user_text="Current question")
+
+        self.assertEqual(history.last_limit, 5)
 
     def test_build_deduplicates_current_user_message_against_stored_attachment_variant(self):
         image_b64 = "aGVsbG8="
@@ -273,6 +325,50 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(len(user_messages), 1)
         self.assertEqual(user_messages[0]["content"], "Current question")
         self.assertEqual(user_messages[0]["images"], [image_b64])
+
+    def test_group_context_attributes_identical_text_from_different_senders(self):
+        history = FakeHistoryStore([
+            {
+                "role": "user", "content": "I agree", "attachments": [],
+                "sender_id": "relay:human:a", "sender_display_name": "Alice",
+                "sender_type": "human", "input_source": "manual_relay",
+            }
+        ])
+        builder = ContextBuilder("System prompt", history, summary_store=FakeSummaryStore(None))
+        bob = SenderAttribution(
+            "relay:human:b", "Bob", SenderType.HUMAN, InputSource.MANUAL_RELAY
+        )
+
+        messages = builder.build(
+            "group", "I agree", current_sender=bob, session_kind=SessionKind.MANUAL_GROUP
+        )
+
+        user_messages = [message for message in messages if message["role"] == "user"]
+        self.assertEqual(len(user_messages), 2)
+        self.assertIn('"sender_display_name":"Alice"', user_messages[0]["content"])
+        self.assertIn('"sender_display_name":"Bob"', user_messages[1]["content"])
+        self.assertIn("MANUAL GROUP CHAT ATTRIBUTION", messages[0]["content"])
+
+    def test_direct_context_format_remains_plain(self):
+        builder = ContextBuilder("System prompt", FakeHistoryStore([]), summary_store=FakeSummaryStore(None))
+        messages = builder.build("direct", "Hello", session_kind=SessionKind.DIRECT)
+        self.assertEqual(messages[-1], {"role": "user", "content": "Hello"})
+        self.assertNotIn("MANUAL GROUP CHAT ATTRIBUTION", messages[0]["content"])
+
+    def test_group_context_without_authoritative_sender_omits_synthetic_participant(self):
+        builder = ContextBuilder(
+            "System prompt",
+            FakeHistoryStore([]),
+            summary_store=FakeSummaryStore(None),
+        )
+        messages = builder.build(
+            "group",
+            "",
+            session_kind=SessionKind.MANUAL_GROUP,
+        )
+
+        self.assertEqual([message["role"] for message in messages], ["system"])
+        self.assertNotIn('"sender_display_name":"You"', messages[0]["content"])
 
 
 if __name__ == "__main__":

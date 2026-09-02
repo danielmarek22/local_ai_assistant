@@ -32,6 +32,12 @@ export class UIManager {
         this.reflectNowBtn = document.getElementById('reflect-now-btn');
         this.reflectStatus = document.getElementById('reflect-status');
         this.sendBtn = document.getElementById('send-btn');
+        this.conversationModeButtons = Array.from(document.querySelectorAll('[data-conversation-mode]'));
+        this.relayComposer = document.getElementById('relay-composer');
+        this.relaySenderName = document.getElementById('relay-sender-name');
+        this.relaySenderType = document.getElementById('relay-sender-type');
+        this.relayText = document.getElementById('relay-text');
+        this.relayBtn = document.getElementById('relay-btn');
         this.chatCloseBtn = document.getElementById('chat-close-btn');
         this.chatOpenBtn = document.getElementById('chat-open-btn');
         this.micBtn = document.getElementById('mic-btn');
@@ -56,6 +62,11 @@ export class UIManager {
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
+        this.conversationMode = 'direct';
+        this.localHumanDisplayName = 'You';
+        this.localAssistantDisplayName = 'Astra';
+        this.onConversationModeChangeHandler = null;
+        this.onRelayHandler = null;
         this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
         this.agentModeStorageKey = CONFIG.UI.STORAGE_KEYS.AGENT_MODE;
         this.hideThinkingStorageKey = CONFIG.UI.STORAGE_KEYS.HIDE_THINKING;
@@ -71,6 +82,8 @@ export class UIManager {
         this.defaultMessages = this.serializeChatHistory();
         this.pendingToolApprovals = [];
         this.activeToolApproval = null;
+        this.onRetryHandler = null;
+        this.activeRetryMessageId = null;
 
         // STT recording state
         this._mediaRecorder = null;
@@ -92,6 +105,7 @@ export class UIManager {
         this.initTabs();
         this.initHistoryControls();
         this.initComposerControls();
+        this.initConversationControls();
         this.initConfigControls();
         this.initMicControls();
         this.initToolApprovalControls();
@@ -511,8 +525,13 @@ export class UIManager {
     appendVoiceUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        const msgDiv = this.createMessageDiv('user', text, attachments);
+        const msgDiv = this.createMessageDiv('user', text, attachments, {
+            senderDisplayName: this.localHumanDisplayName,
+            senderType: 'human',
+            inputSource: 'local_voice',
+        });
         msgDiv.classList.add('from-stt');
+        msgDiv.dataset.awaitingMessageId = 'true';
     }
 
     // ============================================================
@@ -643,6 +662,64 @@ export class UIManager {
 
             this.closeComposerMenu();
         });
+    }
+
+    initConversationControls() {
+        this.restoreLastRelaySender();
+        for (const button of this.conversationModeButtons) {
+            button.addEventListener('click', () => {
+                const nextMode = button.dataset.conversationMode;
+                if (!['direct', 'manual_group'].includes(nextMode) || nextMode === this.conversationMode) return;
+                if (this.onConversationModeChangeHandler) {
+                    this.onConversationModeChangeHandler(nextMode);
+                }
+            });
+        }
+        this.relayBtn?.addEventListener('click', () => {
+            if (this.conversationMode !== 'manual_group' || !this.onRelayHandler) return;
+            const senderDisplayName = this.relaySenderName.value.trim();
+            const senderType = this.relaySenderType.value;
+            const text = this.relayText.value.trim();
+            if (!senderDisplayName || !text || !['human', 'external_agent'].includes(senderType)) return;
+            this.persistLastRelaySender(senderDisplayName, senderType);
+            this.onRelayHandler({ senderDisplayName, senderType, text });
+            this.relayText.value = '';
+            this.relayText.focus();
+        });
+    }
+
+    setConversationMode(mode, {
+        localHumanDisplayName = this.localHumanDisplayName,
+        localAssistantDisplayName = this.localAssistantDisplayName,
+    } = {}) {
+        this.conversationMode = mode === 'manual_group' ? 'manual_group' : 'direct';
+        this.localHumanDisplayName = localHumanDisplayName || 'You';
+        this.localAssistantDisplayName = localAssistantDisplayName || 'Astra';
+        for (const button of this.conversationModeButtons) {
+            const active = button.dataset.conversationMode === this.conversationMode;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-checked', String(active));
+        }
+        this.relayComposer?.classList.toggle('hidden', this.conversationMode !== 'manual_group');
+        this.chatHistory.classList.toggle('group-transcript', this.conversationMode === 'manual_group');
+    }
+
+    getConversationMode() { return this.conversationMode; }
+    onConversationModeChange(callback) { this.onConversationModeChangeHandler = callback; }
+    onRelay(callback) { this.onRelayHandler = callback; }
+
+    restoreLastRelaySender() {
+        try {
+            const value = JSON.parse(localStorage.getItem(CONFIG.UI.STORAGE_KEYS.LAST_RELAY_SENDER) || 'null');
+            if (value && typeof value.name === 'string') this.relaySenderName.value = value.name;
+            if (value && ['human', 'external_agent'].includes(value.type)) this.relaySenderType.value = value.type;
+        } catch (error) {
+            localStorage.removeItem(CONFIG.UI.STORAGE_KEYS.LAST_RELAY_SENDER);
+        }
+    }
+
+    persistLastRelaySender(name, type) {
+        localStorage.setItem(CONFIG.UI.STORAGE_KEYS.LAST_RELAY_SENDER, JSON.stringify({ name, type }));
     }
 
     async handlePasteEvent(event) {
@@ -1108,7 +1185,22 @@ export class UIManager {
     appendUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        this.createMessageDiv('user', text, attachments);
+        const msgDiv = this.createMessageDiv('user', text, attachments, {
+            senderDisplayName: this.localHumanDisplayName,
+            senderType: 'human',
+            inputSource: 'local_text',
+        });
+        msgDiv.dataset.awaitingMessageId = 'true';
+    }
+
+    appendRelayMessage(text, senderDisplayName, senderType) {
+        this.currentThinkingMessageDiv = null;
+        this.currentAiMessageDiv = null;
+        this.createMessageDiv('user', text, [], {
+            senderDisplayName,
+            senderType,
+            inputSource: 'manual_relay',
+        });
     }
 
     addNoticeToLastUserMessage(text, tone = 'warning') {
@@ -1139,9 +1231,112 @@ export class UIManager {
         return messages[messages.length - 1];
     }
 
+    findUserMessageById(messageId) {
+        const target = String(messageId);
+        return Array.from(this.chatHistory.querySelectorAll('.message.user'))
+            .find((message) => message.dataset.messageId === target) || null;
+    }
+
+    acknowledgeUserMessage(messageId, isRetry = false) {
+        if (isRetry) {
+            this.activeRetryMessageId = String(messageId);
+            return;
+        }
+        const message = this.chatHistory.querySelector('.message.user[data-awaiting-message-id="true"]');
+        if (!message) return;
+        message.dataset.messageId = String(messageId);
+        delete message.dataset.awaitingMessageId;
+        this.persistChatHistory();
+    }
+
+    showRetryableError(messageId, message, attempts = 1) {
+        const userMessage = this.findUserMessageById(messageId);
+        if (!userMessage) return;
+
+        this.currentAiMessageDiv?.remove();
+        this.currentThinkingMessageDiv?.remove();
+        this.currentAiMessageDiv = null;
+        this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
+
+        userMessage.dataset.retryError = message;
+        userMessage.dataset.retryAttempts = String(Math.max(1, Number(attempts) || 1));
+        this.renderRetryCard(userMessage, message, attempts);
+        this.persistChatHistory();
+        this.scrollToBottom();
+    }
+
+    renderRetryCard(userMessage, message, attempts = 1) {
+        const messageId = userMessage.dataset.messageId;
+        if (!messageId) return;
+        this.chatHistory.querySelector(`.turn-retry-card[data-user-message-id="${messageId}"]`)?.remove();
+
+        const card = document.createElement('div');
+        card.className = 'turn-retry-card';
+        card.dataset.userMessageId = messageId;
+
+        const copy = document.createElement('div');
+        copy.className = 'turn-retry-copy';
+        const title = document.createElement('strong');
+        title.textContent = message || "Astra couldn't finish this response.";
+        copy.appendChild(title);
+        if (Number(attempts) > 1) {
+            const attemptText = document.createElement('span');
+            attemptText.textContent = `${attempts} attempts so far`;
+            copy.appendChild(attemptText);
+        }
+
+        const retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.className = 'turn-retry-button';
+        retryButton.textContent = 'Retry message';
+        retryButton.addEventListener('click', () => {
+            if (this.onRetryHandler) this.onRetryHandler({ messageId: Number(messageId) });
+        });
+
+        card.append(copy, retryButton);
+        userMessage.insertAdjacentElement('afterend', card);
+    }
+
+    beginRetry(messageId) {
+        const target = String(messageId);
+        this.activeRetryMessageId = target;
+        const card = this.chatHistory.querySelector(
+            `.turn-retry-card[data-user-message-id="${target}"]`
+        );
+        if (!card) return;
+        card.classList.add('retrying');
+        const button = card.querySelector('.turn-retry-button');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Retrying…';
+        }
+    }
+
+    clearRetryableError(messageId) {
+        const target = String(messageId);
+        const userMessage = this.findUserMessageById(target);
+        if (userMessage) {
+            delete userMessage.dataset.retryError;
+            delete userMessage.dataset.retryAttempts;
+        }
+        this.chatHistory.querySelector(
+            `.turn-retry-card[data-user-message-id="${target}"]`
+        )?.remove();
+        this.persistChatHistory();
+    }
+
+    onRetry(callback) {
+        this.onRetryHandler = callback;
+    }
+
     startAiMessage() {
         if (!this.currentAiMessageDiv) {
-            this.currentAiMessageDiv = this.createMessageDiv('astra', '');
+            this.currentAiMessageDiv = this.createMessageDiv('astra', '', [], {
+                senderDisplayName: this.localAssistantDisplayName,
+                senderType: 'local_assistant',
+                inputSource: 'assistant_generation',
+            });
         }
     }
 
@@ -1172,7 +1367,11 @@ export class UIManager {
 
     finalizeAiMessage(text) {
         if (!this.currentAiMessageDiv && text) {
-            this.currentAiMessageDiv = this.createMessageDiv('astra', '');
+            this.currentAiMessageDiv = this.createMessageDiv('astra', '', [], {
+                senderDisplayName: this.localAssistantDisplayName,
+                senderType: 'local_assistant',
+                inputSource: 'assistant_generation',
+            });
         }
 
         if (this.currentAiMessageDiv) {
@@ -1180,15 +1379,20 @@ export class UIManager {
             this.persistChatHistory();
             this.currentAiMessageDiv = null;
         }
+        if (this.activeRetryMessageId) {
+            this.clearRetryableError(this.activeRetryMessageId);
+            this.activeRetryMessageId = null;
+        }
     }
 
     finalizeThinkingMessage() {
         this.currentThinkingMessageDiv = null;
     }
 
-    createMessageDiv(sender, text, attachments = []) {
+    createMessageDiv(sender, text, attachments = [], metadata = {}) {
         const msgDiv = document.createElement('div');
         msgDiv.classList.add('message', sender);
+        this.setMessageMetadata(msgDiv, metadata);
         this.setMessageContent(msgDiv, text, attachments);
         this.chatHistory.appendChild(msgDiv);
         this.persistChatHistory();
@@ -1224,6 +1428,7 @@ export class UIManager {
                 link.setAttribute('target', '_blank');
                 link.setAttribute('rel', 'noopener noreferrer');
             }
+            this.prependSenderHeader(msgDiv);
             return;
         }
 
@@ -1246,6 +1451,44 @@ export class UIManager {
 
             msgDiv.appendChild(gallery);
         }
+        this.prependSenderHeader(msgDiv);
+    }
+
+    setMessageMetadata(msgDiv, metadata = {}) {
+        const senderType = metadata.senderType || '';
+        const inputSource = metadata.inputSource || '';
+        msgDiv.dataset.senderId = metadata.senderId || '';
+        msgDiv.dataset.senderDisplayName = metadata.senderDisplayName || '';
+        msgDiv.dataset.senderType = senderType;
+        msgDiv.dataset.inputSource = inputSource;
+        if (metadata.messageId) msgDiv.dataset.messageId = String(metadata.messageId);
+        if (metadata.retryableFailure?.message) {
+            msgDiv.dataset.retryError = metadata.retryableFailure.message;
+            msgDiv.dataset.retryAttempts = String(metadata.retryableFailure.attempts || 1);
+        }
+        const controlledTypes = ['human', 'external_agent', 'local_assistant', 'system', 'tool', 'integration_runtime'];
+        const controlledSources = ['local_text', 'local_voice', 'manual_relay', 'assistant_generation', 'system_runtime', 'tool_runtime', 'integration_runtime'];
+        if (controlledTypes.includes(senderType)) msgDiv.classList.add(`sender-${senderType.replaceAll('_', '-')}`);
+        if (controlledSources.includes(inputSource)) msgDiv.classList.add(`source-${inputSource.replaceAll('_', '-')}`);
+        if (this.conversationMode === 'manual_group') msgDiv.classList.add('group-message');
+    }
+
+    prependSenderHeader(msgDiv) {
+        if (this.conversationMode !== 'manual_group') return;
+        const existing = msgDiv.querySelector('.message-sender-header');
+        if (existing) existing.remove();
+        const header = document.createElement('div');
+        header.className = 'message-sender-header';
+        header.textContent = msgDiv.dataset.senderDisplayName || this.fallbackSenderLabel(msgDiv);
+        msgDiv.prepend(header);
+    }
+
+    fallbackSenderLabel(msgDiv) {
+        if (msgDiv.classList.contains('astra')) return this.localAssistantDisplayName;
+        if (msgDiv.classList.contains('thinking')) return `${this.localAssistantDisplayName} thinking`;
+        if (msgDiv.classList.contains('system')) return 'System';
+        if (msgDiv.classList.contains('tool')) return 'Tool';
+        return this.localHumanDisplayName;
     }
 
     normalizeAttachments(attachments) {
@@ -1346,6 +1589,7 @@ export class UIManager {
         this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
         this.restoreChatHistory();
     }
 
@@ -1392,6 +1636,15 @@ export class UIManager {
                 sender,
                 text: message.dataset.rawText || '',
                 attachments: this.readStoredAttachments(message.dataset.attachments),
+                senderId: message.dataset.senderId || '',
+                senderDisplayName: message.dataset.senderDisplayName || '',
+                senderType: message.dataset.senderType || '',
+                inputSource: message.dataset.inputSource || '',
+                messageId: Number(message.dataset.messageId) || null,
+                retryableFailure: message.dataset.retryError ? {
+                    message: message.dataset.retryError,
+                    attempts: Number(message.dataset.retryAttempts) || 1,
+                } : null,
             };
         });
     }
@@ -1426,18 +1679,33 @@ export class UIManager {
 
             const msgDiv = document.createElement('div');
             msgDiv.classList.add('message', message.sender);
+            this.setMessageMetadata(msgDiv, message);
             this.setMessageContent(msgDiv, message.text, message.attachments || []);
             this.chatHistory.appendChild(msgDiv);
+            if (message.retryableFailure?.message && message.messageId) {
+                this.renderRetryCard(
+                    msgDiv,
+                    message.retryableFailure.message,
+                    message.retryableFailure.attempts,
+                );
+            }
         }
 
         this.scrollToBottom();
     }
 
     renderSessionMessages(sessionData) {
+        this.setConversationMode(sessionData.kind || 'direct');
         const messages = sessionData.messages.map((message) => ({
             sender: message.role === 'assistant' ? 'astra' : message.role,
             text: message.content,
             attachments: message.attachments || [],
+            senderId: message.sender_id,
+            senderDisplayName: message.sender_display_name,
+            senderType: message.sender_type,
+            inputSource: message.input_source,
+            messageId: message.id,
+            retryableFailure: message.retryable_failure,
         }));
 
         this.currentAiMessageDiv = null;
@@ -1449,6 +1717,7 @@ export class UIManager {
     resetChatToDefault() {
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
+        this.activeRetryMessageId = null;
         this.clearPendingAttachments();
         this.renderMessages(this.defaultMessages);
         this.persistChatHistory();

@@ -10,6 +10,12 @@ from app.logging import trace_event
 from app.perception.attachments import Attachment, ImageAttachment, attachment_from_stored_record
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
+from app.core.conversation import (
+    InputSource,
+    SenderAttribution,
+    SenderType,
+    SessionKind,
+)
 
 
 logger = logging.getLogger("chat_history")
@@ -22,6 +28,10 @@ class ChatHistoryStore:
         vector_store: VectorStore,
         uploads_root: str = "static/uploads",
         image_summarizer=None,
+        local_human_id: str = "local-human",
+        local_human_name: str = "You",
+        local_assistant_id: str = "default-agent",
+        local_assistant_name: str = "Astra",
     ):
         self.db = db
         self.vector_store = vector_store
@@ -29,6 +39,76 @@ class ChatHistoryStore:
         self.uploads_root = Path(uploads_root)
         self.uploads_root.mkdir(parents=True, exist_ok=True)
         self.image_summarizer = image_summarizer
+        self.local_human_id = local_human_id
+        self.local_human_name = local_human_name
+        self.local_assistant_id = local_assistant_id
+        self.local_assistant_name = local_assistant_name
+
+    def ensure_session(self, session_id: str, kind: SessionKind | str = SessionKind.DIRECT) -> SessionKind:
+        requested_kind = SessionKind(kind)
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
+        row = cursor.fetchone()
+        if row is not None:
+            return SessionKind(row["kind"])
+        cursor.execute(
+            "INSERT OR IGNORE INTO chat_sessions (session_id, kind) VALUES (?, ?)",
+            (session_id, requested_kind.value),
+        )
+        self.db.conn.commit()
+        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
+        return SessionKind(cursor.fetchone()["kind"])
+
+    def get_session_kind(self, session_id: str) -> SessionKind:
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
+        row = cursor.fetchone()
+        return SessionKind(row["kind"]) if row is not None else SessionKind.DIRECT
+
+    def session_exists(self, session_id: str) -> bool:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT (
+                EXISTS(SELECT 1 FROM chat_sessions WHERE session_id = ?)
+                OR EXISTS(SELECT 1 FROM chat_history WHERE session_id = ?)
+            ) AS session_exists
+            """,
+            (session_id, session_id),
+        )
+        return bool(cursor.fetchone()["session_exists"])
+
+    def default_sender(self, role: str, input_source: InputSource | str | None = None) -> SenderAttribution:
+        source = InputSource(input_source) if input_source is not None else None
+        if role == "user":
+            return SenderAttribution(
+                self.local_human_id,
+                self.local_human_name,
+                SenderType.HUMAN,
+                source or InputSource.LOCAL_TEXT,
+            )
+        if role == "assistant":
+            return SenderAttribution(
+                self.local_assistant_id,
+                self.local_assistant_name,
+                SenderType.LOCAL_ASSISTANT,
+                source or InputSource.ASSISTANT_GENERATION,
+            )
+        if role == "tool":
+            return SenderAttribution("tool-runtime", "Tool", SenderType.TOOL, source or InputSource.TOOL_RUNTIME)
+        return SenderAttribution("system-runtime", "System", SenderType.SYSTEM, source or InputSource.SYSTEM_RUNTIME)
+
+    def effective_sender(self, row: dict) -> SenderAttribution:
+        fallback = self.default_sender(row["role"])
+        try:
+            return SenderAttribution(
+                sender_id=row.get("sender_id") or fallback.sender_id,
+                sender_display_name=row.get("sender_display_name") or fallback.sender_display_name,
+                sender_type=SenderType(row.get("sender_type") or fallback.sender_type.value),
+                input_source=InputSource(row.get("input_source") or fallback.input_source.value),
+            )
+        except ValueError:
+            return fallback
 
     def add(
         self,
@@ -36,9 +116,13 @@ class ChatHistoryStore:
         role: str,
         content: str,
         attachments: list[Attachment] | None = None,
+        sender: SenderAttribution | None = None,
+        session_kind: SessionKind | str = SessionKind.DIRECT,
     ):
         current_time = time.time()
         attachments = attachments or []
+        sender = sender or self.default_sender(role)
+        session_kind = self.ensure_session(session_id, session_kind)
         trace_event(
             "chat_history",
             "history_add",
@@ -46,6 +130,10 @@ class ChatHistoryStore:
             payload={
                 "role": role,
                 "content": content,
+                "sender_id": sender.sender_id,
+                "sender_display_name": sender.sender_display_name,
+                "sender_type": sender.sender_type.value,
+                "input_source": sender.input_source.value,
                 "attachments": [
                     {
                         "name": attachment.name,
@@ -64,10 +152,22 @@ class ChatHistoryStore:
 
         cursor = self.db.conn.cursor()
         cursor.execute(
-            "INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)",
-            (session_id, role, content)
+            """
+            INSERT INTO chat_history (
+                session_id, role, content, sender_id, sender_display_name,
+                sender_type, input_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id, role, content, sender.sender_id, sender.sender_display_name,
+                sender.sender_type.value, sender.input_source.value,
+            )
         )
         message_id = cursor.lastrowid
+        cursor.execute(
+            "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+            (session_id,),
+        )
 
         attachment_records = []
         if attachments:
@@ -82,20 +182,24 @@ class ChatHistoryStore:
 
         self.db.conn.commit()
 
-        vector_docs = [f"{role.upper()}: {content}"]
+        vector_docs = [self._build_message_vector_doc(role, content, sender, session_kind)]
         vector_metadatas = [{
             "session_id": session_id,
             "role": role,
             "timestamp": current_time,
             "source": "message",
             "message_id": message_id,
+            "sender_id": sender.sender_id,
+            "sender_display_name": sender.sender_display_name,
+            "sender_type": sender.sender_type.value,
+            "input_source": sender.input_source.value,
         }]
 
         for record in attachment_records:
             if not record.summary_text:
                 continue
             vector_docs.append(
-                self._build_attachment_vector_doc(role, content, record)
+                self._build_attachment_vector_doc(role, content, record, sender, session_kind)
             )
             vector_metadatas.append({
                 "session_id": session_id,
@@ -104,6 +208,10 @@ class ChatHistoryStore:
                 "source": "image_attachment",
                 "message_id": message_id,
                 "attachment_id": record.attachment_id,
+                "sender_id": sender.sender_id,
+                "sender_display_name": sender.sender_display_name,
+                "sender_type": sender.sender_type.value,
+                "input_source": sender.input_source.value,
             })
 
         self.collection.add(
@@ -113,6 +221,17 @@ class ChatHistoryStore:
         )
 
         return message_id
+
+    def _build_message_vector_doc(
+        self,
+        role: str,
+        content: str,
+        sender: SenderAttribution,
+        session_kind: SessionKind,
+    ) -> str:
+        if session_kind == SessionKind.DIRECT:
+            return f"{role.upper()}: {content}"
+        return f"{sender.sender_type.value.upper()} {sender.sender_display_name}: {content}"
 
     def _store_attachments(
         self,
@@ -220,9 +339,15 @@ class ChatHistoryStore:
         role: str,
         content: str,
         attachment: ImageAttachment,
+        sender: SenderAttribution | None = None,
+        session_kind: SessionKind = SessionKind.DIRECT,
     ) -> str:
+        sender = sender or self.default_sender(role)
+        subject = role.upper()
+        if session_kind == SessionKind.MANUAL_GROUP:
+            subject = f"{sender.sender_type.value.upper()} {sender.sender_display_name}"
         parts = [
-            f"{role.upper()} shared image '{attachment.name}'.",
+            f"{subject} shared image '{attachment.name}'.",
             f"Image summary: {attachment.summary_text}",
         ]
         if content and not (
@@ -296,6 +421,13 @@ class ChatHistoryStore:
         hydrated_rows = []
         for row in rows:
             item = dict(row)
+            sender = self.effective_sender(item)
+            item.update({
+                "sender_id": sender.sender_id,
+                "sender_display_name": sender.sender_display_name,
+                "sender_type": sender.sender_type.value,
+                "input_source": sender.input_source.value,
+            })
             item["attachments"] = attachments_by_message.get(row["id"], [])
             hydrated_rows.append(item)
 
@@ -323,7 +455,10 @@ class ChatHistoryStore:
         filtered_docs = []
 
         # STRICT FILTERING: Drop episodic memories that are too far away
+        legacy_fallback = "I'm sorry, I lost my train of thought. Could you repeat that?"
         for doc, distance in zip(documents, distances):
+            if legacy_fallback in doc:
+                continue
             if distance <= max_distance:
                 filtered_docs.append(doc)
             else:
@@ -341,9 +476,10 @@ class ChatHistoryStore:
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
-            SELECT id, role, content
+            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source,
+                   retry_error, retry_attempts
             FROM chat_history
-            WHERE session_id = ?
+            WHERE session_id = ? AND excluded_from_context = 0
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -359,44 +495,170 @@ class ChatHistoryStore:
         )
         return hydrated
 
+    def count_messages(self, session_id: str) -> int:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) AS message_count FROM chat_history
+               WHERE session_id = ? AND excluded_from_context = 0""",
+            (session_id,),
+        )
+        return int(cursor.fetchone()["message_count"])
+
+    def get_before(self, session_id: str, message_id: int, limit: int = 2):
+        if limit <= 0:
+            return []
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
+            FROM chat_history
+            WHERE session_id = ? AND id < ? AND excluded_from_context = 0
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, message_id, limit),
+        )
+        rows = list(reversed([dict(row) for row in cursor.fetchall()]))
+        for row in rows:
+            sender = self.effective_sender(row)
+            row.update({
+                "sender_id": sender.sender_id,
+                "sender_display_name": sender.sender_display_name,
+                "sender_type": sender.sender_type.value,
+                "input_source": sender.input_source.value,
+            })
+        return rows
+
+    def get_participant_senders_before(
+        self,
+        session_id: str,
+        message_id: int,
+        *,
+        limit: int = 32,
+    ) -> list[dict]:
+        """Return the latest authoritative row for each prior participant sender."""
+        if limit <= 0:
+            return []
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            WITH latest AS (
+                SELECT sender_id, MAX(id) AS latest_id
+                FROM chat_history
+                WHERE session_id = ? AND id < ?
+                  AND sender_type IN ('human', 'external_agent')
+                  AND sender_id IS NOT NULL AND sender_id != ''
+                GROUP BY sender_id
+            )
+            SELECT ch.sender_id, ch.sender_display_name, ch.sender_type, latest.latest_id
+            FROM latest
+            JOIN chat_history ch ON ch.id = latest.latest_id
+            ORDER BY latest.latest_id DESC, ch.sender_id ASC
+            LIMIT ?
+            """,
+            (session_id, message_id, int(limit)),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_all(self, session_id: str):
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
-            SELECT id, role, content, timestamp
+            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                   input_source, retry_error, retry_attempts
             FROM chat_history
-            WHERE session_id = ?
+            WHERE session_id = ? AND excluded_from_context = 0
             ORDER BY id ASC
             """,
             (session_id,)
         )
         return self._rows_with_attachments(cursor.fetchall())
 
+    def mark_turn_failed(self, session_id: str, user_message_id: int, message: str) -> int:
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            UPDATE chat_history
+            SET retry_error = ?, retry_attempts = retry_attempts + 1
+            WHERE id = ? AND session_id = ? AND role = 'user'
+            """,
+            (message, int(user_message_id), session_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Retry target is not a user message in this session")
+        self.db.conn.commit()
+        row = cursor.execute(
+            "SELECT retry_attempts FROM chat_history WHERE id = ?",
+            (int(user_message_id),),
+        ).fetchone()
+        return int(row["retry_attempts"])
+
+    def resolve_turn_failure(self, session_id: str, user_message_id: int) -> None:
+        self.db.conn.execute(
+            """
+            UPDATE chat_history SET retry_error = NULL
+            WHERE id = ? AND session_id = ? AND role = 'user'
+            """,
+            (int(user_message_id), session_id),
+        )
+        self.db.conn.commit()
+
+    def get_retryable_user_message(self, session_id: str, user_message_id: int):
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                   input_source, retry_error, retry_attempts
+            FROM chat_history
+            WHERE id = ? AND session_id = ? AND role = 'user'
+              AND retry_error IS NOT NULL AND excluded_from_context = 0
+            """,
+            (int(user_message_id), session_id),
+        )
+        rows = self._rows_with_attachments(cursor.fetchall())
+        return rows[0] if rows else None
+
     def list_sessions(self):
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
+            WITH session_ids AS (
+                SELECT session_id FROM chat_sessions
+                UNION
+                SELECT DISTINCT session_id FROM chat_history
+            )
             SELECT
-                ch.session_id,
-                MIN(ch.timestamp) AS started_at,
-                MAX(ch.timestamp) AS updated_at,
-                COUNT(*) AS message_count,
+                sessions.session_id,
+                COALESCE(cs.kind, 'direct') AS kind,
+                COALESCE(MIN(ch.timestamp), cs.created_at) AS started_at,
+                COALESCE(MAX(ch.timestamp), cs.updated_at) AS updated_at,
+                COUNT(ch.id) AS message_count,
                 (
                     SELECT ch2.content
                     FROM chat_history ch2
-                    WHERE ch2.session_id = ch.session_id
+                    WHERE ch2.session_id = sessions.session_id
+                      AND ch2.excluded_from_context = 0
                     ORDER BY ch2.id ASC
                     LIMIT 1
                 ) AS preview
-            FROM chat_history ch
-            GROUP BY ch.session_id
-            ORDER BY updated_at DESC, ch.session_id DESC
+            FROM session_ids sessions
+            LEFT JOIN chat_sessions cs ON cs.session_id = sessions.session_id
+            LEFT JOIN chat_history ch
+              ON ch.session_id = sessions.session_id AND ch.excluded_from_context = 0
+            GROUP BY sessions.session_id, cs.kind, cs.created_at, cs.updated_at
+            HAVING COUNT(ch.id) > 0
+            ORDER BY updated_at DESC, sessions.session_id DESC
             """
         )
         return cursor.fetchall()
 
     def delete_session(self, session_id: str) -> int:
         cursor = self.db.conn.cursor()
+        session_exists = self.session_exists(session_id)
+        cursor.execute(
+            "DELETE FROM chat_sessions WHERE session_id = ?",
+            (session_id,),
+        )
         cursor.execute(
             """
             DELETE FROM chat_attachments
@@ -417,4 +679,4 @@ class ChatHistoryStore:
         self.collection.delete(where={"session_id": session_id})
         shutil.rmtree(self.uploads_root / session_id, ignore_errors=True)
 
-        return deleted_count
+        return deleted_count if deleted_count > 0 else int(session_exists)

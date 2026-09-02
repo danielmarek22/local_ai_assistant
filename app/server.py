@@ -1,8 +1,8 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Path as ApiPath, Query, WebSocket, WebSocketDisconnect
 import asyncio
-from typing import Iterator, Any
+from typing import Annotated, Iterator, Any
 import hashlib
 import json
 import logging
@@ -20,12 +20,16 @@ from app.config import Config
 from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
+from app.core.conversation import SessionKind, relay_sender
 from app.core.events import (
     AssistantSpeechEvent,
+    UserMessageAcceptedEvent,
+    AssistantTurnFailureEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
     AvatarExpressionEvent,
     AvatarAnimationEvent,
+    AvatarOutfitEvent,
 )
 from app.logging import setup_logging_from_config
 from app.perception.attachments import Attachment, AudioAttachment, ImageAttachment, attachment_from_payload
@@ -37,6 +41,17 @@ from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
 from app.services.vision_watchdog import VisionWatchdog
 from app.services.connection_hub import SessionConnectionHub
+from app.knowledge import (
+    BeliefDetailDTO,
+    BeliefListResponse,
+    BeliefRecordStatus,
+    ContextPreviewResponse,
+    EffectiveBeliefsResponse,
+    KnowledgeService,
+    SavedMemoryListResponse,
+)
+from app.knowledge.models import BeliefFiltersDTO
+from app.beliefs.models import EpistemicStatus, VisibilityPolicy
 from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 
 config = Config()
@@ -223,6 +238,7 @@ def resolve_session_id(
     requested_session_id: str | None,
     known_server_instance_id: str | None,
     server_instance_id: str,
+    requested_session_exists: bool = False,
 ) -> str:
     if session_mode == "open" and requested_session_id:
         return requested_session_id
@@ -230,7 +246,10 @@ def resolve_session_id(
     if (
         session_mode == "resume"
         and requested_session_id
-        and known_server_instance_id == server_instance_id
+        and (
+            known_server_instance_id == server_instance_id
+            or requested_session_exists
+        )
     ):
         return requested_session_id
 
@@ -248,6 +267,16 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
 
     if payload.get("type") != "user_message":
         return raw_text, None, False, []
+
+    forbidden_fields = {
+        "role", "sender_id", "sender_display_name", "sender_type", "input_source",
+        "target", "system", "tool", "tool_name", "tool_calls",
+    }
+    supplied_forbidden = sorted(forbidden_fields.intersection(payload))
+    if supplied_forbidden:
+        raise ValueError(
+            "User message contains server-controlled fields: " + ", ".join(supplied_forbidden)
+        )
 
     text = payload.get("text")
     if not isinstance(text, str):
@@ -277,6 +306,41 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
         raise ValueError("User message instant_mode flag must be boolean")
 
     return text, reasoning_override, instant_mode, attachments
+
+
+def parse_retry_message(payload: dict) -> tuple[int, bool | None, bool]:
+    if payload.get("type") != "retry_message":
+        raise ValueError("Invalid retry message type")
+    allowed_fields = {"type", "message_id", "reasoning", "instant_mode"}
+    unexpected = sorted(set(payload) - allowed_fields)
+    if unexpected:
+        raise ValueError("Retry message contains unsupported fields: " + ", ".join(unexpected))
+    message_id = payload.get("message_id")
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+        raise ValueError("Retry message ID must be a positive integer")
+    reasoning = payload.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, bool):
+        raise ValueError("Retry reasoning flag must be boolean or null")
+    instant_mode = payload.get("instant_mode", False)
+    if not isinstance(instant_mode, bool):
+        raise ValueError("Retry instant_mode flag must be boolean")
+    return message_id, reasoning, instant_mode
+
+
+def parse_relay_message(payload: dict, session_kind: SessionKind | str):
+    if SessionKind(session_kind) != SessionKind.MANUAL_GROUP:
+        raise ValueError("Relay messages are only allowed in manual_group sessions")
+    allowed_fields = {"type", "sender_display_name", "sender_type", "text"}
+    unexpected = sorted(set(payload) - allowed_fields)
+    if unexpected:
+        raise ValueError("Relay message contains unsupported fields: " + ", ".join(unexpected))
+    if payload.get("type") != "relay_message":
+        raise ValueError("Invalid relay message type")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Relay message text must not be empty")
+    sender = relay_sender(payload.get("sender_type"), payload.get("sender_display_name"))
+    return text, sender
 
 
 @dataclass
@@ -479,12 +543,22 @@ def _build_session_init_payload(
     server_instance_id: str,
     session_id: str,
     gesture_catalog: dict[str, str] | None = None,
+    outfit_catalog: dict[str, str] | None = None,
+    current_outfit: str | None = None,
+    session_kind: SessionKind | str = SessionKind.DIRECT,
+    local_human_display_name: str = "You",
+    local_assistant_display_name: str = "Astra",
 ) -> dict:
     return {
         "type": "session_init",
         "server_instance_id": server_instance_id,
         "session_id": session_id,
         "gesture_catalog": dict(gesture_catalog or {}),
+        "outfit_catalog": dict(outfit_catalog or {}),
+        "current_outfit": current_outfit,
+        "session_kind": SessionKind(session_kind).value,
+        "local_human_display_name": local_human_display_name,
+        "local_assistant_display_name": local_assistant_display_name,
     }
 
 
@@ -633,6 +707,24 @@ async def _stream_orchestrator_events(
                 await _send_ws_payload(ws, notice_payload)
                 image_notice_sent = True
 
+        if isinstance(event, UserMessageAcceptedEvent):
+            await _send_ws_payload(ws, {
+                "type": "user_message_accepted",
+                "message_id": event.message_id,
+                "is_retry": event.is_retry,
+            })
+            continue
+
+        if isinstance(event, AssistantTurnFailureEvent):
+            pending_chunks.clear()
+            await _send_ws_payload(ws, {
+                "type": "assistant_retryable_error",
+                "user_message_id": event.user_message_id,
+                "message": event.message,
+                "attempts": event.attempts,
+            })
+            continue
+
         if isinstance(event, AssistantStateEvent):
             state_tracker["state"] = event.state
             if not _should_forward_state(event.state):
@@ -662,6 +754,15 @@ async def _stream_orchestrator_events(
             await _send_ws_payload(ws, {
                 "type": "assistant_animation",
                 "animation": event.animation,
+            })
+            continue
+
+        if isinstance(event, AvatarOutfitEvent):
+            logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
+            await _send_ws_payload(ws, {
+                "type": "assistant_outfit",
+                "outfit": event.outfit,
+                "url": event.url,
             })
             continue
 
@@ -919,6 +1020,7 @@ async def list_sessions():
     sessions = [
         {
             "session_id": row["session_id"],
+            "kind": row["kind"],
             "started_at": row["started_at"],
             "updated_at": row["updated_at"],
             "message_count": row["message_count"],
@@ -934,24 +1036,150 @@ async def get_session(session_id: str):
     history_store = app.state.orchestrator.history
     rows = history_store.get_all(session_id)
 
-    if not rows:
+    if not rows and not history_store.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     summary = app.state.orchestrator.summary_store.get(session_id)
     summary_text = summary[0] if summary else None
     return {
         "session_id": session_id,
+        "kind": history_store.get_session_kind(session_id).value,
         "summary": summary_text,
         "messages": [
             {
                 "role": row["role"],
+                "id": row["id"],
                 "content": row["content"],
                 "timestamp": row["timestamp"],
                 "attachments": [attachment.to_api_payload() for attachment in row.get("attachments", [])],
+                "sender_id": row["sender_id"],
+                "sender_display_name": row["sender_display_name"],
+                "sender_type": row["sender_type"],
+                "input_source": row["input_source"],
+                "retryable_failure": (
+                    {
+                        "message": row["retry_error"],
+                        "attempts": row["retry_attempts"],
+                    }
+                    if row.get("retry_error")
+                    else None
+                ),
             }
             for row in rows
         ],
     }
+
+
+def _knowledge_service(
+    *,
+    require_beliefs: bool = True,
+    require_memories: bool = False,
+) -> KnowledgeService:
+    orchestrator = app.state.orchestrator
+    repository = getattr(orchestrator, "belief_repository", None)
+    provider = getattr(orchestrator, "belief_context_provider", None)
+    memory_retriever = getattr(orchestrator, "memory_retriever", None)
+    memory_store = getattr(memory_retriever, "memory", None)
+    if require_beliefs and (repository is None or provider is None):
+        raise HTTPException(status_code=503, detail="Knowledge subsystem is unavailable")
+    if require_memories and memory_store is None:
+        raise HTTPException(status_code=503, detail="Saved memory storage is unavailable")
+    return KnowledgeService(
+        owner_agent_id=orchestrator.agent_id,
+        repository=repository,
+        context_provider=provider,
+        history_store=orchestrator.history,
+        memory_store=memory_store,
+    )
+
+
+SessionIdQuery = Annotated[
+    str,
+    Query(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[^\x00-\x1f\x7f]+$",
+    ),
+]
+
+
+def _require_known_session(service: KnowledgeService, session_id: str) -> None:
+    if not service.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/api/knowledge/memories", response_model=SavedMemoryListResponse)
+async def list_saved_memories():
+    return _knowledge_service(
+        require_beliefs=False,
+        require_memories=True,
+    ).list_saved_memories()
+
+
+@app.get(
+    "/api/knowledge/beliefs/effective",
+    response_model=EffectiveBeliefsResponse,
+)
+async def get_effective_beliefs(session_id: SessionIdQuery):
+    service = _knowledge_service()
+    _require_known_session(service, session_id)
+    return service.effective_beliefs(session_id)
+
+
+@app.get("/api/knowledge/beliefs", response_model=BeliefListResponse)
+async def list_beliefs_for_inspection(
+    subject_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    source_sender_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    predicate: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    epistemic_status: EpistemicStatus | None = None,
+    visibility: VisibilityPolicy | None = None,
+    record_status: BeliefRecordStatus | None = None,
+    scope_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    source_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=100000)] = 0,
+):
+    filters = BeliefFiltersDTO(
+        subject_id=subject_id,
+        source_sender_id=source_sender_id,
+        predicate=predicate,
+        epistemic_status=epistemic_status,
+        visibility=visibility,
+        record_status=record_status,
+        scope_session_id=scope_session_id,
+        source_session_id=source_session_id,
+    )
+    return _knowledge_service().list_beliefs(
+        filters=filters,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/knowledge/beliefs/{belief_id}",
+    response_model=BeliefDetailDTO,
+)
+async def get_belief_for_inspection(
+    belief_id: Annotated[
+        str,
+        ApiPath(min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$"),
+    ],
+):
+    detail = _knowledge_service().get_belief_detail(belief_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Belief not found")
+    return detail
+
+
+@app.get(
+    "/api/knowledge/belief-context",
+    response_model=ContextPreviewResponse,
+)
+async def get_belief_context_preview(session_id: SessionIdQuery):
+    service = _knowledge_service()
+    _require_known_session(service, session_id)
+    return service.context_preview(session_id)
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -959,6 +1187,9 @@ async def delete_session(session_id: str):
     orchestrator = app.state.orchestrator
     deleted_count = orchestrator.history.delete_session(session_id)
     orchestrator.summary_store.delete(session_id)
+    belief_repository = getattr(orchestrator, "belief_repository", None)
+    if belief_repository is not None:
+        belief_repository.delete_session(orchestrator.agent_id, session_id)
 
     if deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1022,13 +1253,29 @@ async def websocket_endpoint(ws: WebSocket):
     session_mode = ws.query_params.get("session_mode", "new")
     requested_session_id = ws.query_params.get("session_id")
     known_server_instance_id = ws.query_params.get("server_instance_id")
+    requested_session_kind_value = ws.query_params.get("session_kind", SessionKind.DIRECT.value)
+    try:
+        requested_session_kind = SessionKind(requested_session_kind_value)
+    except ValueError:
+        requested_session_kind = SessionKind.DIRECT
 
+    orchestrator = app.state.orchestrator
+    history_store = orchestrator.history
     session_id = resolve_session_id(
         session_mode=session_mode,
         requested_session_id=requested_session_id,
         known_server_instance_id=known_server_instance_id,
         server_instance_id=server_instance_id,
+        requested_session_exists=bool(
+            requested_session_id
+            and history_store.session_exists(requested_session_id)
+        ),
     )
+
+    if requested_session_id and session_id == requested_session_id:
+        session_kind = history_store.get_session_kind(session_id)
+    else:
+        session_kind = history_store.ensure_session(session_id, requested_session_kind)
 
     await ws.accept()
     hub = app.state.connection_hub
@@ -1043,9 +1290,17 @@ async def websocket_endpoint(ws: WebSocket):
         server_instance_id=server_instance_id,
         session_id=session_id,
         gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+        outfit_catalog=getattr(
+            getattr(orchestrator, "avatar_wardrobe", None), "catalog", {}
+        ),
+        current_outfit=getattr(
+            getattr(orchestrator, "avatar_wardrobe", None), "current_outfit", None
+        ),
+        session_kind=session_kind,
+        local_human_display_name=getattr(orchestrator, "local_human_name", "You"),
+        local_assistant_display_name=getattr(orchestrator, "local_assistant_name", "Astra"),
     ))
 
-    orchestrator = app.state.orchestrator
     watchdog = getattr(app.state, "vision_watchdog", None)
     event_loop = asyncio.get_running_loop()
     assistant_state_tracker = {"state": AssistantState.IDLE}
@@ -1200,6 +1455,8 @@ async def websocket_endpoint(ws: WebSocket):
                 break
 
             try:
+                turn_sender = None
+                existing_user_message_id = None
                 # ── VOICE PATH ────────────────────────────────────────────
                 # Check `is not None` rather than truthiness — an empty bytes
                 # value (b"") is falsy, which would wrongly fall through to
@@ -1354,9 +1611,33 @@ async def websocket_endpoint(ws: WebSocket):
                                 raise ValueError("User config reasoning flag must be boolean or null")
                         continue
 
-                    user_text, reasoning_override, instant_mode, attachments = parse_user_message(
-                        text_payload
-                    )
+                    if (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "relay_message"
+                    ):
+                        user_text, turn_sender = parse_relay_message(parsed_payload, session_kind)
+                        reasoning_override = connection_reasoning_override
+                        instant_mode = connection_instant_mode
+                        attachments = []
+                    elif (
+                        isinstance(parsed_payload, dict)
+                        and parsed_payload.get("type") == "retry_message"
+                    ):
+                        existing_user_message_id, reasoning_override, instant_mode = (
+                            parse_retry_message(parsed_payload)
+                        )
+                        retry_row = orchestrator.history.get_retryable_user_message(
+                            session_id, existing_user_message_id
+                        )
+                        if retry_row is None:
+                            raise ValueError("That message is no longer available for retry")
+                        user_text = retry_row["content"]
+                        attachments = list(retry_row.get("attachments", []))
+                        turn_sender = orchestrator.history.effective_sender(retry_row)
+                    else:
+                        user_text, reasoning_override, instant_mode, attachments = parse_user_message(
+                            text_payload
+                        )
                     pending_voice_attachments = []
                     input_modality = InputModality.TEXT
 
@@ -1371,10 +1652,12 @@ async def websocket_endpoint(ws: WebSocket):
                     pending_voice_attachments = []
 
                 original_attachment_count = len(attachments)
-                vision_attachment_count = _append_recent_vision_attachments(
-                    orchestrator,
-                    attachments,
-                )
+                vision_attachment_count = 0
+                if turn_sender is None and existing_user_message_id is None:
+                    vision_attachment_count = _append_recent_vision_attachments(
+                        orchestrator,
+                        attachments,
+                    )
                 if vision_attachment_count:
                     logger.debug(
                         "[%s] Added %d recent vision frame(s) to user turn context",
@@ -1402,6 +1685,9 @@ async def websocket_endpoint(ws: WebSocket):
                             instant_mode=instant_mode, attachments=attachments,
                             input_modality=input_modality,
                             tool_approval_callback=request_tool_approval,
+                            sender=turn_sender,
+                            session_kind=session_kind,
+                            existing_user_message_id=existing_user_message_id,
                         ),
                         connection_id, original_attachment_count, assistant_state_tracker,
                     )
@@ -1414,6 +1700,9 @@ async def websocket_endpoint(ws: WebSocket):
                                 instant_mode=instant_mode, attachments=attachments,
                                 input_modality=input_modality,
                                 tool_approval_callback=request_tool_approval,
+                                sender=turn_sender,
+                                session_kind=session_kind,
+                                existing_user_message_id=existing_user_message_id,
                             ),
                             connection_id, original_attachment_count, assistant_state_tracker,
                         )
