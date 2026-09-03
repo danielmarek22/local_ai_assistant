@@ -1,20 +1,39 @@
 import unittest
 from unittest.mock import patch
 from app.storage.database import Database
-from app.memory.memory_store import MemoryStore
+from app.memory.memory_store import MemoryIndexSyncError, MemoryStore
 
 
 class FakeCollection:
     def __init__(self):
         self.ids = []
         self.docs = []
+        self.metadatas = []
         self.distances = []
         self.deleted_ids = []
 
     def add(self, ids, documents, metadatas):
         self.ids.extend(ids)
         self.docs.extend(documents)
+        self.metadatas.extend(metadatas)
         self.distances.extend(metadata.get("distance", 0.2) for metadata in metadatas)
+
+    def upsert(self, ids, documents, metadatas):
+        retained = [
+            (mem_id, doc, metadata, distance)
+            for mem_id, doc, metadata, distance in zip(
+                self.ids, self.docs, self.metadatas, self.distances
+            )
+            if mem_id not in ids
+        ]
+        self.ids = [record[0] for record in retained]
+        self.docs = [record[1] for record in retained]
+        self.metadatas = [record[2] for record in retained]
+        self.distances = [record[3] for record in retained]
+        self.add(ids, documents, metadatas)
+
+    def get(self, include=None):
+        return {"ids": list(self.ids)}
 
     def query(self, query_texts, n_results, where=None):
         # Fake search behavior: return everything we have up to n_results
@@ -28,13 +47,16 @@ class FakeCollection:
         if ids:
             self.deleted_ids.extend(ids)
             filtered_records = [
-                (mem_id, doc, distance)
-                for mem_id, doc, distance in zip(self.ids, self.docs, self.distances)
+                (mem_id, doc, metadata, distance)
+                for mem_id, doc, metadata, distance in zip(
+                    self.ids, self.docs, self.metadatas, self.distances
+                )
                 if mem_id not in ids
             ]
             self.ids = [record[0] for record in filtered_records]
             self.docs = [record[1] for record in filtered_records]
-            self.distances = [record[2] for record in filtered_records]
+            self.metadatas = [record[2] for record in filtered_records]
+            self.distances = [record[3] for record in filtered_records]
 
 
 class FakeVectorStore:
@@ -102,6 +124,64 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(deleted_count, 1)
         self.assertEqual(self.store.get_all(limit=10), [])
         self.assertEqual(self.vector_store.semantic_collection.deleted_ids, [memory_id])
+
+    def test_failed_index_write_reports_canonical_save_and_reconciliation_repairs_it(self):
+        with patch.object(self.store.collection, "upsert", side_effect=RuntimeError("offline")):
+            with self.assertRaises(MemoryIndexSyncError) as raised:
+                self.store.add("Saved canonically", category="fact", importance=2)
+
+        self.assertEqual(raised.exception.operation, "upsert")
+        self.assertEqual(raised.exception.canonical_changes, 1)
+        canonical = self.store.list_for_inspection()
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(canonical[0]["content"], "Saved canonically")
+        self.assertEqual(self.store.collection.ids, [])
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report, {
+            "canonical_count": 1,
+            "upserted_count": 1,
+            "removed_count": 0,
+        })
+        self.assertEqual(self.store.collection.ids, [canonical[0]["id"]])
+
+    def test_reconciliation_updates_canonical_entries_and_removes_orphans(self):
+        memory_id = self.store.add("Current content", category="fact", importance=3)
+        self.store.collection.upsert(
+            ids=[memory_id, "orphan"],
+            documents=["Stale content", "No canonical row"],
+            metadatas=[
+                {"category": "old", "importance": 1},
+                {"category": "old", "importance": 1},
+            ],
+        )
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report["removed_count"], 1)
+        self.assertEqual(self.store.collection.ids, [memory_id])
+        self.assertEqual(self.store.collection.docs, ["Current content"])
+        self.assertEqual(
+            self.store.collection.metadatas,
+            [{"category": "fact", "importance": 3}],
+        )
+
+    def test_failed_index_delete_reports_committed_canonical_deletion(self):
+        memory_id = self.store.add("Delete canonically")
+
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("offline")):
+            with self.assertRaises(MemoryIndexSyncError) as raised:
+                self.store.delete_memories([memory_id])
+
+        self.assertEqual(raised.exception.operation, "delete")
+        self.assertEqual(raised.exception.canonical_changes, 1)
+        self.assertEqual(self.store.list_for_inspection(), [])
+        self.assertIn(memory_id, self.store.collection.ids)
+
+        report = self.store.reconcile_index()
+        self.assertEqual(report["removed_count"], 1)
+        self.assertEqual(self.store.collection.ids, [])
 
     def test_inspection_returns_actual_schema_in_stable_order_without_mutation(self):
         rows = [

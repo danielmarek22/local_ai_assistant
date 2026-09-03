@@ -8,13 +8,25 @@ from app.storage.vector_store import VectorStore
 logger = logging.getLogger("memory_store")
 
 
+class MemoryIndexSyncError(RuntimeError):
+    """A canonical SQLite mutation succeeded but its vector update failed."""
+
+    def __init__(self, operation: str, memory_ids: list[str], canonical_changes: int):
+        self.operation = operation
+        self.memory_ids = memory_ids
+        self.canonical_changes = canonical_changes
+        super().__init__(
+            f"Memory {operation} indexing failed after {canonical_changes} canonical change(s)"
+        )
+
+
 class MemoryStore:
     def __init__(self, db: Database, vector_store: VectorStore):
         self.db = db
         self.vector_store = vector_store
         self.collection = self.vector_store.semantic_collection
 
-    def add(self, content: str, category: str = "general", importance: int = 1) -> None:
+    def add(self, content: str, category: str = "general", importance: int = 1) -> str:
         mem_id = str(uuid.uuid4())
         trace_event(
             "memory_store",
@@ -38,12 +50,50 @@ class MemoryStore:
         )
         self.db.conn.commit()
 
-        # 2. Save to Vector Store using the SAME UUID
-        self.collection.add(
-            ids=[mem_id],
-            documents=[content],
-            metadatas=[{"category": category, "importance": importance}]
-        )
+        # 2. Idempotently index the canonical row using the SAME UUID.
+        try:
+            self.collection.upsert(
+                ids=[mem_id],
+                documents=[content],
+                metadatas=[{"category": category, "importance": importance}],
+            )
+        except Exception as exc:
+            raise MemoryIndexSyncError("upsert", [mem_id], 1) from exc
+        return mem_id
+
+    def reconcile_index(self, batch_size: int = 100) -> dict[str, int]:
+        """Make the semantic index match canonical SQLite memory rows."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+
+        rows = self.list_for_inspection()
+        canonical_ids = {row["id"] for row in rows}
+        for offset in range(0, len(rows), batch_size):
+            batch = rows[offset : offset + batch_size]
+            self.collection.upsert(
+                ids=[row["id"] for row in batch],
+                documents=[row["content"] for row in batch],
+                metadatas=[
+                    {
+                        "category": row["category"] or "general",
+                        "importance": row["importance"],
+                    }
+                    for row in batch
+                ],
+            )
+
+        indexed_ids = set(self.collection.get(include=[])["ids"])
+        orphaned_ids = sorted(indexed_ids - canonical_ids)
+        if orphaned_ids:
+            self.collection.delete(ids=orphaned_ids)
+
+        report = {
+            "canonical_count": len(rows),
+            "upserted_count": len(rows),
+            "removed_count": len(orphaned_ids),
+        }
+        logger.info("Reconciled semantic memory index: %s", report)
+        return report
 
     def get_all(self, limit: int = 20) -> list[dict]:
         """
@@ -161,7 +211,10 @@ class MemoryStore:
         deleted_count = cursor.rowcount
         self.db.conn.commit()
 
-        # 2. Delete from ChromaDB
-        self.collection.delete(ids=memory_ids)
+        # 2. Delete from ChromaDB. A reconciliation can complete this cleanup.
+        try:
+            self.collection.delete(ids=memory_ids)
+        except Exception as exc:
+            raise MemoryIndexSyncError("delete", memory_ids, deleted_count) from exc
         logger.info("Deleted %d stale memories", deleted_count)
         return deleted_count

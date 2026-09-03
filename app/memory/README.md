@@ -23,6 +23,8 @@ Memory should be treated as an *active system*, not just a database.
 - `MemoryStore`
   - stores long-term fact-like memory in SQLite
   - stores embeddings in Chroma's `semantic_memory`
+  - uses the canonical SQLite UUID as the idempotent vector document ID
+  - can reconcile missing, stale, and orphaned semantic vector entries from SQLite
   - retrieves relevant facts semantically from Chroma
   - exposes a separate SQLite-only, read-only inspection list for the Knowledge UI;
     this path does not query Chroma or update access timestamps
@@ -52,6 +54,11 @@ Memory store classes execute SQL through the shared SQLite connection provided
 by `app/storage/database.py` and use `app/storage/vector_store.py` for Chroma
 collections. This is a pragmatic hybrid design rather than a strict repository
 layer.
+
+SQLite is authoritative for semantic memories. If a vector write or deletion fails,
+`MemoryStore` raises `MemoryIndexSyncError` with the completed canonical change count
+and affected IDs. `reconcile_index()` can then rebuild the semantic projection without
+duplicating canonical rows.
 
 ## Deletion Semantics
 
