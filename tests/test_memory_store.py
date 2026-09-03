@@ -1,5 +1,8 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import main as main_module
 from app.storage.database import Database
 from app.memory.memory_store import MemoryIndexSyncError, MemoryStore
 
@@ -233,6 +236,85 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_inspection_empty_storage_returns_empty_list(self):
         self.assertEqual(self.store.list_for_inspection(), [])
+
+
+class ReconcileIndexesCommandTests(unittest.TestCase):
+    def test_cli_dispatches_reconciliation_and_prints_json_report(self):
+        report = {
+            "semantic": {"canonical_count": 1, "upserted_count": 1, "removed_count": 0},
+            "episodic": {"canonical_count": 2, "upserted_count": 2, "removed_count": 1},
+        }
+        config = SimpleNamespace(logging={})
+
+        with patch.object(main_module, "Config", return_value=config), patch.object(
+            main_module, "setup_logging_from_config"
+        ), patch.object(
+            main_module, "reconcile_indexes", return_value=report
+        ) as reconcile, patch("builtins.print") as print_output:
+            exit_code = main_module.main(["reconcile-indexes"])
+
+        self.assertEqual(exit_code, 0)
+        reconcile.assert_called_once_with(config)
+        print_output.assert_called_once_with(
+            '{"episodic": {"canonical_count": 2, "removed_count": 1, '
+            '"upserted_count": 2}, "semantic": {"canonical_count": 1, '
+            '"removed_count": 0, "upserted_count": 1}}'
+        )
+
+    def test_command_reconciles_both_indexes_without_building_orchestrator(self):
+        connection = Mock()
+        database = SimpleNamespace(conn=connection)
+        semantic = Mock()
+        semantic.reconcile_index.return_value = {
+            "canonical_count": 2,
+            "upserted_count": 2,
+            "removed_count": 1,
+        }
+        episodic = Mock()
+        episodic.reconcile_index.return_value = {
+            "canonical_count": 4,
+            "upserted_count": 4,
+            "removed_count": 0,
+        }
+        config = SimpleNamespace(
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+        )
+
+        with patch.object(main_module, "Database", return_value=database), patch.object(
+            main_module, "VectorStore", return_value=object()
+        ), patch.object(
+            main_module, "MemoryStore", return_value=semantic
+        ), patch.object(
+            main_module, "ChatHistoryStore", return_value=episodic
+        ):
+            report = main_module.reconcile_indexes(config)
+
+        self.assertEqual(report["semantic"]["removed_count"], 1)
+        self.assertEqual(report["episodic"]["canonical_count"], 4)
+        semantic.reconcile_index.assert_called_once_with()
+        episodic.reconcile_index.assert_called_once_with()
+        connection.close.assert_called_once_with()
+
+    def test_command_closes_database_when_reconciliation_fails(self):
+        connection = Mock()
+        database = SimpleNamespace(conn=connection)
+        config = SimpleNamespace(
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+        )
+        semantic = Mock()
+        semantic.reconcile_index.side_effect = RuntimeError("index unavailable")
+
+        with patch.object(main_module, "Database", return_value=database), patch.object(
+            main_module, "VectorStore", return_value=object()
+        ), patch.object(
+            main_module, "MemoryStore", return_value=semantic
+        ), patch.object(main_module, "ChatHistoryStore", return_value=Mock()):
+            with self.assertRaisesRegex(RuntimeError, "index unavailable"):
+                main_module.reconcile_indexes(config)
+
+        connection.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

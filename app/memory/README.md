@@ -62,6 +62,10 @@ SQLite is authoritative for semantic memories. If a vector write or deletion fai
 and affected IDs. `reconcile_index()` can then rebuild the semantic projection without
 duplicating canonical rows.
 
+Run `python main.py reconcile-indexes` with the application stopped to reconcile both
+semantic and episodic Chroma collections from SQLite. The command initializes storage
+only and prints a JSON report containing canonical, upserted, and removed counts.
+
 ## Deletion Semantics
 
 Deleting a session removes:
