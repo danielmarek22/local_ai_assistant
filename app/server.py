@@ -2,6 +2,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, Request, WebSocket, WebSocketDisconnect
 import asyncio
+from collections import deque
 from typing import Annotated, Callable, Iterator, Any
 import hashlib
 import json
@@ -508,12 +509,32 @@ async def _send_turn_error(ws: WebSocket, message: str) -> None:
         })
 
 
+class WebSocketMessageInbox:
+    """Own WebSocket reads and replay messages deferred by nested protocol waits."""
+
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+        self._deferred: deque[dict[str, Any]] = deque()
+
+    async def receive(self) -> dict[str, Any]:
+        if self._deferred:
+            return self._deferred.popleft()
+        return await self.websocket.receive()
+
+    async def receive_live(self) -> dict[str, Any]:
+        return await self.websocket.receive()
+
+    def defer(self, message: dict[str, Any]) -> None:
+        self._deferred.append(message)
+
+
 async def _request_tool_approval(
-    ws: WebSocket,
+    inbox: WebSocketMessageInbox,
     request: dict,
     connection_id: str,
     timeout_seconds: float = TOOL_APPROVAL_TIMEOUT_SECONDS,
 ) -> bool:
+    ws = inbox.websocket
     approval_id = uuid.uuid4().hex
     tool_name = str(request.get("tool", "unknown"))
     title = str(request.get("title", "Approve action?"))
@@ -540,27 +561,27 @@ async def _request_tool_approval(
             logger.warning("[%s] Tool approval timed out for %s", connection_id, tool_name)
             return False
 
-        raw_message = await asyncio.wait_for(ws.receive(), timeout=remaining)
+        raw_message = await asyncio.wait_for(inbox.receive_live(), timeout=remaining)
         if raw_message.get("type") == "websocket.disconnect":
             raise WebSocketDisconnect()
 
+        payload = None
         text_payload = raw_message.get("text")
-        if text_payload is None:
-            continue
+        if text_payload is not None:
+            try:
+                candidate = json.loads(text_payload)
+            except json.JSONDecodeError:
+                candidate = None
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("type") == "tool_approval_response"
+                and candidate.get("approval_id") == approval_id
+            ):
+                payload = candidate
 
-        try:
-            payload = json.loads(text_payload)
-        except json.JSONDecodeError:
-            continue
-
-        if not isinstance(payload, dict):
-            continue
-
-        if (
-            payload.get("type") != "tool_approval_response"
-            or payload.get("approval_id") != approval_id
-        ):
-            logger.debug("[%s] Ignoring websocket message while awaiting tool approval", connection_id)
+        if payload is None:
+            inbox.defer(raw_message)
+            logger.debug("[%s] Deferred websocket message while awaiting tool approval", connection_id)
             continue
 
         try:
@@ -1433,12 +1454,13 @@ async def websocket_endpoint(ws: WebSocket):
     pending_voice_attachments: list[Attachment] = []
     connection_instant_mode = False
     connection_reasoning_override: bool | None = None
+    inbox = WebSocketMessageInbox(ws)
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     def request_tool_approval(request: dict) -> bool:
         future = asyncio.run_coroutine_threadsafe(
             _request_tool_approval(
-                ws=ws,
+                inbox=inbox,
                 request=request,
                 connection_id=connection_id,
             ),
@@ -1566,7 +1588,7 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             # receive() instead of receive_text() so we can handle both
             # text frames (keyboard) and binary frames (microphone audio).
-            raw_message = await ws.receive()
+            raw_message = await inbox.receive()
             hub.touch(connection_id)
 
             # Starlette surfaces disconnects as a message dict rather than

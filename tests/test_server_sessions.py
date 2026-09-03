@@ -247,6 +247,24 @@ class FakeApprovalWebSocket(FakeWebSocket):
         }
 
 
+class FakeInterleavedApprovalWebSocket(FakeWebSocket):
+    def __init__(self, interleaved_messages):
+        super().__init__()
+        self.interleaved_messages = list(interleaved_messages)
+
+    async def receive(self):
+        if self.interleaved_messages:
+            return self.interleaved_messages.pop(0)
+        approval_id = self.messages[-1]["approval_id"]
+        return {
+            "text": json.dumps({
+                "type": "tool_approval_response",
+                "approval_id": approval_id,
+                "approved": True,
+            })
+        }
+
+
 class FakeHandshakeWebSocket:
     def __init__(self, query_params):
         self.query_params = query_params
@@ -820,7 +838,7 @@ class ServerSessionTests(unittest.TestCase):
 
         approved = server_module.asyncio.run(
             server_module._request_tool_approval(
-                ws,
+                server_module.WebSocketMessageInbox(ws),
                 {
                     "tool": "shell__execute",
                     "title": "Approve command?",
@@ -848,7 +866,7 @@ class ServerSessionTests(unittest.TestCase):
                 with self.assertLogs("server", level="WARNING"):
                     approved = server_module.asyncio.run(
                         server_module._request_tool_approval(
-                            ws,
+                            server_module.WebSocketMessageInbox(ws),
                             {"tool": "shell__execute"},
                             connection_id="conn-1",
                             timeout_seconds=1.0,
@@ -860,13 +878,40 @@ class ServerSessionTests(unittest.TestCase):
         ws = FakeApprovalWebSocket(approved=False)
         approved = server_module.asyncio.run(
             server_module._request_tool_approval(
-                ws,
+                server_module.WebSocketMessageInbox(ws),
                 {"tool": "shell__execute"},
                 connection_id="conn-1",
                 timeout_seconds=1.0,
             )
         )
         self.assertFalse(approved)
+
+    def test_request_tool_approval_preserves_interleaved_messages_in_order(self):
+        interleaved_messages = [
+            {"text": json.dumps({"type": "user_message", "text": "keep me"})},
+            {"text": json.dumps({"type": "set_instant_mode", "enabled": True})},
+        ]
+        ws = FakeInterleavedApprovalWebSocket(interleaved_messages)
+        inbox = server_module.WebSocketMessageInbox(ws)
+
+        approved = server_module.asyncio.run(
+            server_module._request_tool_approval(
+                inbox,
+                {"tool": "shell__execute"},
+                connection_id="conn-1",
+                timeout_seconds=1.0,
+            )
+        )
+
+        self.assertTrue(approved)
+        self.assertEqual(
+            server_module.asyncio.run(inbox.receive()),
+            interleaved_messages[0],
+        )
+        self.assertEqual(
+            server_module.asyncio.run(inbox.receive()),
+            interleaved_messages[1],
+        )
 
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
         text = (
