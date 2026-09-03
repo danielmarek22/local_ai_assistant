@@ -585,7 +585,7 @@ uiManager.onHistoryDelete(async (sessionId) => {
     uiManager.setHistoryStatus('');
 
     try {
-        await client.deleteSession(sessionId);
+        const deletion = await client.deleteSession(sessionId);
 
         if (sessionId === currentSessionId) {
             clearSessionContext();
@@ -593,6 +593,12 @@ uiManager.onHistoryDelete(async (sessionId) => {
         }
 
         await refreshHistory();
+        if (!deletion.cleanup_complete) {
+            uiManager.setHistoryStatus(
+                'Conversation deleted, but some stored files or search data could not be cleaned up.',
+                'warning'
+            );
+        }
     } catch (error) {
         console.error(error);
         uiManager.setHistoryStatus('Failed to delete that conversation.', 'error');

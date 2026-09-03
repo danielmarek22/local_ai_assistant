@@ -216,10 +216,16 @@ class FakeCollection:
     def add(self, *args, **kwargs):
         pass
 
+    def upsert(self, *args, **kwargs):
+        pass
+
+    def get(self, include=None):
+        return {"ids": []}
+
     def query(self, *args, **kwargs):
         return {"documents": [[]]}
 
-    def delete(self, where=None):
+    def delete(self, ids=None, where=None):
         self.deleted_wheres.append(where)
 
 class FakeVectorStore:
@@ -437,6 +443,8 @@ class ServerSessionTests(unittest.TestCase):
         response = server_module.asyncio.run(server_module.delete_session("session-b"))
 
         self.assertEqual(response["deleted"], True)
+        self.assertEqual(response["cleanup_complete"], True)
+        self.assertEqual(response["cleanup_errors"], [])
         self.assertEqual(self.history.get_all("session-b"), [])
         self.assertIsNone(self.summary_store.get("session-b"))
         self.assertIn(

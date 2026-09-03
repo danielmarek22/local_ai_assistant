@@ -3,7 +3,7 @@ import logging
 import mimetypes
 import shutil
 import time
-import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.logging import trace_event
@@ -21,6 +21,20 @@ from app.paths import STATIC_DIR, resolve_app_path
 
 
 logger = logging.getLogger("chat_history")
+
+
+@dataclass(frozen=True)
+class SessionDeletionResult:
+    deleted_count: int
+    cleanup_errors: tuple[str, ...] = ()
+
+    @property
+    def deleted(self) -> bool:
+        return self.deleted_count > 0
+
+    @property
+    def cleanup_complete(self) -> bool:
+        return not self.cleanup_errors
 
 
 class ChatHistoryStore:
@@ -219,13 +233,146 @@ class ChatHistoryStore:
                 "input_source": sender.input_source.value,
             })
 
-        self.collection.add(
-            ids=[str(uuid.uuid4()) for _ in vector_docs],
-            documents=vector_docs,
-            metadatas=vector_metadatas,
-        )
+        vector_ids = [self._message_vector_id(message_id)] + [
+            self._attachment_vector_id(record.attachment_id)
+            for record in attachment_records
+            if record.summary_text
+        ]
+        try:
+            self.collection.upsert(
+                ids=vector_ids,
+                documents=vector_docs,
+                metadatas=vector_metadatas,
+            )
+        except Exception:
+            logger.exception(
+                "Message %d was saved canonically but its episodic index update failed; "
+                "reconciliation is required",
+                message_id,
+            )
 
         return message_id
+
+    @staticmethod
+    def _message_vector_id(message_id: int) -> str:
+        return f"message:{message_id}"
+
+    @staticmethod
+    def _attachment_vector_id(attachment_id: int | None) -> str:
+        if attachment_id is None:
+            raise ValueError("Stored attachment is missing its canonical ID")
+        return f"attachment:{attachment_id}"
+
+    def reconcile_index(self, batch_size: int = 100) -> dict[str, int]:
+        """Make the episodic index match canonical, visible chat history."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+
+        records = self._canonical_vector_records()
+        canonical_ids = {record["id"] for record in records}
+        for offset in range(0, len(records), batch_size):
+            batch = records[offset : offset + batch_size]
+            self.collection.upsert(
+                ids=[record["id"] for record in batch],
+                documents=[record["document"] for record in batch],
+                metadatas=[record["metadata"] for record in batch],
+            )
+
+        indexed_ids = set(self.collection.get(include=[])["ids"])
+        orphaned_ids = sorted(indexed_ids - canonical_ids)
+        if orphaned_ids:
+            self.collection.delete(ids=orphaned_ids)
+
+        report = {
+            "canonical_count": len(records),
+            "upserted_count": len(records),
+            "removed_count": len(orphaned_ids),
+        }
+        logger.info("Reconciled episodic history index: %s", report)
+        return report
+
+    def _canonical_vector_records(self) -> list[dict]:
+        rows = self.db.conn.execute(
+            """
+            SELECT ch.id, ch.session_id, ch.role, ch.content, ch.timestamp,
+                   ch.sender_id, ch.sender_display_name, ch.sender_type,
+                   ch.input_source, COALESCE(cs.kind, 'direct') AS session_kind
+            FROM chat_history ch
+            LEFT JOIN chat_sessions cs ON cs.session_id = ch.session_id
+            WHERE ch.excluded_from_context = 0
+            ORDER BY ch.id ASC
+            """
+        ).fetchall()
+
+        records = []
+        messages = {}
+        for row in rows:
+            item = dict(row)
+            sender = self.effective_sender(item)
+            session_kind = SessionKind(item["session_kind"])
+            messages[item["id"]] = (item, sender, session_kind)
+            records.append({
+                "id": self._message_vector_id(item["id"]),
+                "document": self._build_message_vector_doc(
+                    item["role"], item["content"], sender, session_kind
+                ),
+                "metadata": self._vector_metadata(item, sender, source="message"),
+            })
+
+        if not messages:
+            return records
+
+        attachments = self.db.conn.execute(
+            """
+            SELECT ca.id, ca.message_id, ca.name, ca.mime_type, ca.storage_path,
+                   ca.sha256, ca.size_bytes, ca.summary_text
+            FROM chat_attachments ca
+            JOIN chat_history ch ON ch.id = ca.message_id
+            WHERE ch.excluded_from_context = 0
+              AND ca.summary_text IS NOT NULL AND ca.summary_text != ''
+            ORDER BY ca.id ASC
+            """
+        ).fetchall()
+        for row in attachments:
+            attachment_row = dict(row)
+            item, sender, session_kind = messages[attachment_row["message_id"]]
+            attachment = attachment_from_stored_record(attachment_row)
+            records.append({
+                "id": self._attachment_vector_id(attachment.attachment_id),
+                "document": self._build_attachment_vector_doc(
+                    item["role"], item["content"], attachment, sender, session_kind
+                ),
+                "metadata": self._vector_metadata(
+                    item,
+                    sender,
+                    source="image_attachment",
+                    attachment_id=attachment.attachment_id,
+                ),
+            })
+        return records
+
+    @staticmethod
+    def _vector_metadata(
+        message: dict,
+        sender: SenderAttribution,
+        *,
+        source: str,
+        attachment_id: int | None = None,
+    ) -> dict:
+        metadata = {
+            "session_id": message["session_id"],
+            "role": message["role"],
+            "timestamp": str(message["timestamp"]),
+            "source": source,
+            "message_id": message["id"],
+            "sender_id": sender.sender_id,
+            "sender_display_name": sender.sender_display_name,
+            "sender_type": sender.sender_type.value,
+            "input_source": sender.input_source.value,
+        }
+        if attachment_id is not None:
+            metadata["attachment_id"] = attachment_id
+        return metadata
 
     def _build_message_vector_doc(
         self,
@@ -670,7 +817,7 @@ class ChatHistoryStore:
         )
         return cursor.fetchall()
 
-    def delete_session(self, session_id: str) -> int:
+    def delete_session(self, session_id: str) -> SessionDeletionResult:
         session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         session_exists = self.session_exists(session_id)
@@ -695,10 +842,23 @@ class ChatHistoryStore:
         deleted_count = cursor.rowcount
         self.db.conn.commit()
 
-        self.collection.delete(where={"session_id": session_id})
-        shutil.rmtree(self._session_upload_dir(session_id), ignore_errors=True)
+        cleanup_errors = []
+        try:
+            self.collection.delete(where={"session_id": session_id})
+        except Exception:
+            logger.exception("Failed to remove episodic index entries for session %s", session_id)
+            cleanup_errors.append("vector_index")
 
-        return deleted_count if deleted_count > 0 else int(session_exists)
+        upload_dir = self._session_upload_dir(session_id)
+        if upload_dir.exists():
+            try:
+                shutil.rmtree(upload_dir)
+            except OSError:
+                logger.exception("Failed to remove attachment files for session %s", session_id)
+                cleanup_errors.append("attachments")
+
+        canonical_count = deleted_count if deleted_count > 0 else int(session_exists)
+        return SessionDeletionResult(canonical_count, tuple(cleanup_errors))
 
     def _session_upload_dir(self, session_id: str) -> Path:
         session_id = validate_session_id(session_id)

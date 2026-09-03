@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
 from app.perception.state import ImageAttachment
@@ -25,6 +26,13 @@ class FakeCollection:
                 }
             )
 
+    def upsert(self, ids, documents, metadatas):
+        self.records = [record for record in self.records if record["id"] not in ids]
+        self.add(ids, documents, metadatas)
+
+    def get(self, include=None):
+        return {"ids": [record["id"] for record in self.records]}
+
     def query(self, query_texts, n_results, where=None):
         records = self.records
         if where and "session_id" in where and "$ne" in where["session_id"]:
@@ -39,7 +47,10 @@ class FakeCollection:
             "distances": [[record["metadata"].get("distance", 0.2) for record in records[:n_results]]],
         }
 
-    def delete(self, where=None):
+    def delete(self, ids=None, where=None):
+        if ids:
+            self.records = [record for record in self.records if record["id"] not in ids]
+            return
         self.deleted_wheres.append(where)
         if where and "session_id" in where:
             session_id = where["session_id"]
@@ -124,6 +135,10 @@ class ChatHistoryStoreTests(unittest.TestCase):
             if record["metadata"].get("source") == "image_attachment"
         ]
         self.assertEqual(len(image_docs), 1)
+        self.assertEqual(
+            {record["id"] for record in self.vector_store.episodic_collection.records},
+            {f"message:{message_id}", f"attachment:{history_rows[0]['attachments'][0].attachment_id}"},
+        )
         self.assertIn(
             "Image summary: Screenshot of the settings screen showing the speech toggle enabled.",
             image_docs[0]["document"],
@@ -159,7 +174,8 @@ class ChatHistoryStoreTests(unittest.TestCase):
 
         deleted_count = self.store.delete_session("session-1")
 
-        self.assertEqual(deleted_count, 1)
+        self.assertEqual(deleted_count.deleted_count, 1)
+        self.assertTrue(deleted_count.cleanup_complete)
         self.assertEqual(self.store.get_all("session-1"), [])
         self.assertFalse(attachment_dir.exists())
 
@@ -174,6 +190,88 @@ class ChatHistoryStoreTests(unittest.TestCase):
             [{"session_id": "session-1"}],
         )
         self.assertEqual(self.vector_store.episodic_collection.records, [])
+
+    def test_failed_index_write_preserves_canonical_message_for_reconciliation(self):
+        with self.assertLogs("chat_history", level="ERROR") as logs, patch.object(
+            self.store.collection, "upsert", side_effect=RuntimeError("offline")
+        ):
+            message_id = self.store.add("session-1", "user", "Saved canonically")
+
+        self.assertEqual(self.store.get_all("session-1")[0]["id"], message_id)
+        self.assertEqual(self.store.collection.records, [])
+        self.assertIn("saved canonically", logs.output[0])
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report, {
+            "canonical_count": 1,
+            "upserted_count": 1,
+            "removed_count": 0,
+        })
+        self.assertEqual(self.store.collection.records[0]["id"], f"message:{message_id}")
+
+    def test_reconciliation_rebuilds_attachments_and_removes_orphans(self):
+        message_id = self.store.add(
+            "session-1",
+            "user",
+            "Remember this",
+            attachments=[ImageAttachment(
+                name="settings.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )],
+        )
+        attachment_id = self.store.get_all("session-1")[0]["attachments"][0].attachment_id
+        self.store.collection.records = [{
+            "id": "legacy-random-id",
+            "document": "Stale copy",
+            "metadata": {"session_id": "session-1"},
+        }]
+
+        report = self.store.reconcile_index(batch_size=1)
+
+        self.assertEqual(report, {
+            "canonical_count": 2,
+            "upserted_count": 2,
+            "removed_count": 1,
+        })
+        self.assertEqual(
+            {record["id"] for record in self.store.collection.records},
+            {f"message:{message_id}", f"attachment:{attachment_id}"},
+        )
+
+    def test_delete_session_reports_partial_cleanup_and_attempts_every_target(self):
+        message_id = self.store.add(
+            "session-1",
+            "user",
+            "Has a file",
+            attachments=[ImageAttachment(
+                name="settings.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )],
+        )
+        attachment_dir = Path(self.temp_dir.name) / "session-1" / str(message_id)
+
+        with self.assertLogs("chat_history", level="ERROR"), patch.object(
+            self.store.collection, "delete", side_effect=RuntimeError("offline")
+        ), patch(
+            "app.memory.chat_history.shutil.rmtree", side_effect=OSError("busy")
+        ) as remove_tree:
+            result = self.store.delete_session("session-1")
+
+        self.assertEqual(result.deleted_count, 1)
+        self.assertEqual(result.cleanup_errors, ("vector_index", "attachments"))
+        self.assertEqual(self.store.get_all("session-1"), [])
+        self.assertTrue(attachment_dir.exists())
+        remove_tree.assert_called_once()
+
+        retry = self.store.delete_session("session-1")
+        self.assertFalse(retry.deleted)
+        self.assertTrue(retry.cleanup_complete)
+        self.assertFalse(attachment_dir.exists())
 
     def test_unsafe_session_id_cannot_escape_upload_root(self):
         outside_dir = tempfile.TemporaryDirectory(dir=Path(self.temp_dir.name).parent)
@@ -297,7 +395,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(record["metadata"]["sender_id"], sender.sender_id)
         self.assertEqual(record["metadata"]["input_source"], "manual_relay")
 
-        self.assertEqual(self.store.delete_session("group-1"), 1)
+        self.assertEqual(self.store.delete_session("group-1").deleted_count, 1)
         self.assertEqual(self.store.get_session_kind("group-1"), SessionKind.DIRECT)
 
     def test_add_can_create_authoritative_group_session_on_first_message(self):

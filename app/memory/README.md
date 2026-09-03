@@ -18,6 +18,8 @@ Memory should be treated as an *active system*, not just a database.
   - stores attachment metadata in SQLite and image bytes on disk under `static/uploads/`
   - stores embedded message copies in Chroma's `episodic_memory`
   - stores one retrieval-oriented summary per saved image in `episodic_memory`
+  - uses canonical message and attachment IDs for idempotent vector documents
+  - can reconcile missing, stale, and orphaned episodic vector entries from SQLite
   - retrieves recent turns from SQLite
   - retrieves semantically similar past-session messages and stored image summaries from Chroma
 - `MemoryStore`
@@ -68,6 +70,10 @@ Deleting a session removes:
 - attachment rows from SQLite
 - uploaded image files on disk
 - episodic vector entries for both text turns and image summaries
+
+The deletion result distinguishes the canonical SQLite deletion from secondary cleanup.
+Vector and filesystem cleanup are both attempted, and any failures are returned to the
+API and shown as a warning in the history UI.
 
 Long-term structured records in the global `memory` table are not session-owned and
 therefore survive chat-session deletion. Their current schema has no source session or

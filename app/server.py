@@ -1396,16 +1396,21 @@ async def get_belief_context_preview(session_id: SessionIdQuery, request: Reques
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: SessionIdPath, request: Request = None):
     orchestrator = _runtime_app(request).state.orchestrator
-    deleted_count = orchestrator.history.delete_session(session_id)
+    deletion = orchestrator.history.delete_session(session_id)
     orchestrator.summary_store.delete(session_id)
     belief_repository = getattr(orchestrator, "belief_repository", None)
     if belief_repository is not None:
         belief_repository.delete_session(orchestrator.agent_id, session_id)
 
-    if deleted_count == 0:
+    if not deletion.deleted:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    return {"deleted": True, "session_id": session_id}
+    return {
+        "deleted": True,
+        "session_id": session_id,
+        "cleanup_complete": deletion.cleanup_complete,
+        "cleanup_errors": list(deletion.cleanup_errors),
+    }
 
 
 @router.post("/api/admin/reflect")
