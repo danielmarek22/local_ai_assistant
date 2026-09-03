@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+from app.paths import DATA_DIR, resolve_app_path
+
 
 def _create_beliefs_table(conn: sqlite3.Connection, table_name: str = "beliefs") -> None:
     conn.execute(f"""
@@ -170,16 +172,17 @@ def _migrate_legacy_beliefs(
 class Database:
     def __init__(
         self,
-        path: str = "data/assistant.db",
+        path: str = str(DATA_DIR / "assistant.db"),
         *,
         legacy_local_human_id: str = "local-human",
         legacy_local_human_name: str = "You",
     ):
-        self.path = path
+        self.path = path if path == ":memory:" else str(resolve_app_path(path))
         self.legacy_local_human_id = legacy_local_human_id
         self.legacy_local_human_name = legacy_local_human_name
-        Path("data").mkdir(exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")

@@ -17,6 +17,7 @@ from app.core.conversation import (
     SessionKind,
 )
 from app.core.session_ids import validate_session_id
+from app.paths import STATIC_DIR, resolve_app_path
 
 
 logger = logging.getLogger("chat_history")
@@ -27,7 +28,7 @@ class ChatHistoryStore:
         self,
         db: Database,
         vector_store: VectorStore,
-        uploads_root: str = "static/uploads",
+        uploads_root: str = str(STATIC_DIR / "uploads"),
         image_summarizer=None,
         local_human_id: str = "local-human",
         local_human_name: str = "You",
@@ -37,7 +38,7 @@ class ChatHistoryStore:
         self.db = db
         self.vector_store = vector_store
         self.collection = self.vector_store.episodic_collection
-        self.uploads_root = Path(uploads_root)
+        self.uploads_root = resolve_app_path(uploads_root)
         self.uploads_root.mkdir(parents=True, exist_ok=True)
         self.image_summarizer = image_summarizer
         self.local_human_id = local_human_id
@@ -373,7 +374,11 @@ class ChatHistoryStore:
     def _public_url_for_storage_path(self, storage_path: str) -> str:
         path = Path(storage_path)
         try:
-            relative_path = path.relative_to(Path("static"))
+            relative_path = (
+                path.relative_to(STATIC_DIR)
+                if path.is_absolute()
+                else path.relative_to("static")
+            )
         except ValueError:
             relative_path = path
         return f"/static/{relative_path.as_posix()}"

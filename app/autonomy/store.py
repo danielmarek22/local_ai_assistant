@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.integrations import EventId, EventSpec, IntegrationEvent, ReplayPolicy
+from app.paths import DATA_DIR, resolve_app_path
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,12 @@ class OperationRecord:
 class AutonomyStore:
     """Thread-safe durable journal for integration events and tool operations."""
 
-    def __init__(self, path: str = "data/assistant.db"):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
+    def __init__(self, path: str = str(DATA_DIR / "assistant.db")):
+        self.path = path if path == ":memory:" else str(resolve_app_path(path))
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")

@@ -54,22 +54,17 @@ from app.knowledge import (
 from app.knowledge.models import BeliefFiltersDTO
 from app.beliefs.models import EpistemicStatus, VisibilityPolicy
 from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
+from app.paths import APP_ROOT, STATIC_DIR, resolve_app_path
 
 config = Config()
-setup_logging_from_config(config.logging)
 logger = logging.getLogger("server")
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Ensure audio directory exists
-AUDIO_DIR = Path("static/audio")
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
+AUDIO_DIR = STATIC_DIR / "audio"
 
 tts = None
-
-logger.info("Starting FastAPI server")
 
 _SENTINEL = object()
 _TTS_STOP = object()
@@ -678,7 +673,7 @@ def _dedupe_attachments_by_hash(attachments: list[Attachment]) -> list[Attachmen
 
 
 def _persist_event_attachment(event_id: str, attachment: ImageAttachment) -> EventAttachmentRef:
-    event_dir = Path("static/uploads/events") / event_id
+    event_dir = STATIC_DIR / "uploads" / "events" / event_id
     event_dir.mkdir(parents=True, exist_ok=True)
     suffix = {
         "image/png": ".png",
@@ -967,9 +962,16 @@ async def _autonomy_approval_provider(session_id: str, request: dict[str, object
 async def startup_event():
     global tts
 
+    logging_config = dict(config.logging)
+    logging_config["dir"] = str(resolve_app_path(logging_config.get("dir", "logs")))
+    setup_logging_from_config(logging_config)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    logger.debug("Audio directory ready at %s", AUDIO_DIR)
+    logger.info("Starting FastAPI server")
+
     app.state.server_instance_id = uuid.uuid4().hex[:8]
     app.state.connection_hub = SessionConnectionHub()
-    app.state.orchestrator = build_orchestrator()
+    app.state.orchestrator = build_orchestrator(config)
     app.state.memory_reflector = MemoryReflector(
         llm=app.state.orchestrator.llm,
         memory_store=app.state.orchestrator.memory_retriever.memory,
@@ -1762,4 +1764,4 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/")
 async def get_index():
     logger.debug("Serving index.html")
-    return FileResponse("static/index.html")
+    return FileResponse(STATIC_DIR / "index.html")

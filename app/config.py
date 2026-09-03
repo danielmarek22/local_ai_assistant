@@ -3,13 +3,16 @@ import logging
 from pathlib import Path
 import yaml
 
+from app.paths import DEFAULT_CONFIG_PATH
+
 
 logger = logging.getLogger("config")
 
 
 class Config:
-    def __init__(self, path: str = "./app/config/assistant.yaml"):
-        with open(Path(path), "r") as f:
+    def __init__(self, path: str | Path = DEFAULT_CONFIG_PATH):
+        self.path = Path(path).expanduser().resolve()
+        with self.path.open("r") as f:
             self.raw = yaml.safe_load(f) or {}
 
         # Core sections

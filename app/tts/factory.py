@@ -1,6 +1,5 @@
-from pathlib import Path
-
 from app.tts.base import TTS
+from app.paths import resolve_app_path
 
 
 def _resolve_engine_name(tts_config: dict) -> str:
@@ -20,7 +19,7 @@ def build_tts_engine(tts_config: dict) -> TTS:
 
         settings = tts_config.get("piper", tts_config)
         return PiperTTS(
-            model_path=Path(settings["model_path"]),
+            model_path=resolve_app_path(settings["model_path"]),
             use_cuda=settings.get("use_cuda", True),
         )
     

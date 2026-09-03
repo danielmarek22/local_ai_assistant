@@ -50,6 +50,7 @@ from app.beliefs import (
     BeliefTurnPreparer,
     REACT_TOOL_BELIEF_VERSION,
 )
+from app.paths import DATA_DIR, STATIC_DIR, resolve_app_path
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -149,14 +150,14 @@ def _build_belief_components(
     return repository, context_provider, observers, belief_integration, preparer
 
 
-def build_orchestrator() -> Orchestrator:
+def build_orchestrator(config: Config | None = None) -> Orchestrator:
     logger.info("Building orchestrator")
 
     # --------------------------------------------------
     # Configuration
     # --------------------------------------------------
     logger.info("Loading configuration")
-    config = Config()
+    config = config or Config()
 
     logger.debug(
         "Config summary: llm_model=%s, integrations=%s",
@@ -208,11 +209,12 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database(
+        path=str(DATA_DIR / "assistant.db"),
         legacy_local_human_id=config.local_human["id"],
         legacy_local_human_name=config.local_human["display_name"],
     )
     autonomy_store = AutonomyStore(db.path)
-    vector_store = VectorStore()
+    vector_store = VectorStore(path=str(DATA_DIR / "vectordb"))
 
     agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
     assistant_name = str(config.assistant.get("display_name", "Astra")).strip() or "Astra"
@@ -223,6 +225,7 @@ def build_orchestrator() -> Orchestrator:
         local_human_name=config.local_human["display_name"],
         local_assistant_id=agent_id,
         local_assistant_name=assistant_name,
+        uploads_root=str(STATIC_DIR / "uploads"),
     )
     memory_store = MemoryStore(db, vector_store)
     summary_store = SummaryStore(db)
@@ -365,7 +368,9 @@ def build_orchestrator() -> Orchestrator:
                 "critical_health", "died", "disconnected",
             ])),
             attachment_dir=str(
-                mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+                resolve_app_path(
+                    mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+                )
             ),
             operation_store=autonomy_store,
         ))
