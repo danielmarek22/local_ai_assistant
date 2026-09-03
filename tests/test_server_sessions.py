@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -115,6 +116,20 @@ class FakeMemoryReflector:
         return self.next_result
 
 
+class BlockingMemoryReflector(FakeMemoryReflector):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def reflect_and_prune(self, days_old):
+        self.calls.append(days_old)
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test did not release reflection")
+        return self.next_result
+
+
 class ServerLifecycleTests(unittest.TestCase):
     def _settings(self):
         return types.SimpleNamespace(
@@ -176,6 +191,8 @@ class ServerLifecycleTests(unittest.TestCase):
             server_module.asyncio.run(exercise_lifespan())
 
         self.assertTrue(orchestrator.closed)
+        with self.assertRaisesRegex(RuntimeError, "cannot schedule new futures"):
+            application.state.memory_reflection_executor.submit(lambda: None)
 
     def test_factory_rolls_back_resources_when_startup_fails(self):
         settings = self._settings()
@@ -206,6 +223,8 @@ class ServerLifecycleTests(unittest.TestCase):
 
         self.assertTrue(orchestrator.closed)
         self.assertTrue(application.state.tts_worker_task.done())
+        with self.assertRaisesRegex(RuntimeError, "cannot schedule new futures"):
+            application.state.memory_reflection_executor.submit(lambda: None)
 
     def test_startup_removes_only_generated_audio_files(self):
         settings = self._settings()
@@ -403,6 +422,15 @@ class ServerSessionTests(unittest.TestCase):
         server_module.app.state.orchestrator = self.fake_orchestrator
         server_module.app.state.server_instance_id = "server-1"
         server_module.app.state.memory_reflector = self.fake_reflector
+        server_module.app.state.memory_reflection_executor = server_module.ThreadPoolExecutor(
+            max_workers=1
+        )
+        server_module.app.state.memory_reflection_future = None
+        self.addCleanup(
+            server_module.app.state.memory_reflection_executor.shutdown,
+            wait=True,
+            cancel_futures=False,
+        )
 
     def test_list_sessions_returns_saved_sessions(self):
         response = server_module.asyncio.run(server_module.list_sessions())
@@ -556,6 +584,74 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(payload["stale_count"], 3)
         self.assertEqual(payload["deleted_count"], 1)
         self.assertEqual(payload["created_count"], 1)
+
+    def test_memory_reflection_runs_off_loop_and_rejects_concurrent_request(self):
+        reflector = BlockingMemoryReflector()
+        server_module.app.state.memory_reflector = reflector
+        async def exercise():
+            first = server_module.asyncio.create_task(
+                server_module.run_memory_reflection(
+                    server_module.ReflectRequest(days_old=7)
+                )
+            )
+            while not reflector.started.is_set():
+                await server_module.asyncio.sleep(0)
+
+            event_loop_progressed = False
+            await server_module.asyncio.sleep(0)
+            event_loop_progressed = True
+
+            with self.assertRaises(server_module.HTTPException) as raised:
+                await server_module.run_memory_reflection(
+                    server_module.ReflectRequest(days_old=7)
+                )
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertTrue(event_loop_progressed)
+
+            reflector.release.set()
+            return await server_module.asyncio.wait_for(first, timeout=2)
+
+        result = server_module.asyncio.run(exercise())
+
+        self.assertTrue(result["success"])
+        self.assertEqual(reflector.calls, [7])
+
+    def test_cancelled_reflection_request_keeps_worker_marked_running(self):
+        reflector = BlockingMemoryReflector()
+        server_module.app.state.memory_reflector = reflector
+
+        async def exercise():
+            request_task = server_module.asyncio.create_task(
+                server_module.run_memory_reflection(
+                    server_module.ReflectRequest(days_old=7)
+                )
+            )
+            while not reflector.started.is_set():
+                await server_module.asyncio.sleep(0)
+
+            request_task.cancel()
+            with self.assertRaises(server_module.asyncio.CancelledError):
+                await request_task
+
+            worker = server_module.app.state.memory_reflection_future
+            self.assertIsNotNone(worker)
+            self.assertFalse(worker.done())
+            with self.assertRaises(server_module.HTTPException) as raised:
+                await server_module.run_memory_reflection(
+                    server_module.ReflectRequest(days_old=7)
+                )
+            self.assertEqual(raised.exception.status_code, 409)
+
+            reflector.release.set()
+            while not worker.done():
+                await server_module.asyncio.sleep(0.01)
+
+        try:
+            server_module.asyncio.run(exercise())
+        finally:
+            reflector.release.set()
+
+        self.assertEqual(reflector.calls, [7])
 
     def test_resolve_session_id_uses_existing_session_when_server_matches(self):
         session_id = server_module.resolve_session_id(

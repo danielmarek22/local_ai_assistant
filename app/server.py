@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, Request, WebSocket, WebSocketDisconnect
 import asyncio
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Callable, Iterator, Any
 import hashlib
 import json
@@ -1174,6 +1175,11 @@ async def _startup_application(
         llm=application.state.orchestrator.llm,
         memory_store=application.state.orchestrator.memory_retriever.memory,
     )
+    application.state.memory_reflection_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="memory-reflection",
+    )
+    application.state.memory_reflection_future = None
     vision_config = settings.raw.get("vision_watchdog", {})
     application.state.vision_watchdog = VisionWatchdog(
         model=str(vision_config.get("model", "HuggingFaceTB/SmolVLM-256M-Instruct")),
@@ -1225,8 +1231,11 @@ async def _shutdown_application(application: FastAPI) -> None:
     worker_task = getattr(application.state, "tts_worker_task", None)
     orchestrator = getattr(application.state, "orchestrator", None)
     autonomy_runtime = getattr(application.state, "autonomy_runtime", None)
+    reflection_executor = getattr(application.state, "memory_reflection_executor", None)
 
     try:
+        if reflection_executor is not None:
+            reflection_executor.shutdown(wait=True, cancel_futures=False)
         if autonomy_runtime is not None:
             await autonomy_runtime.close()
         else:
@@ -1474,7 +1483,33 @@ async def run_memory_reflection(payload: ReflectRequest, request: Request = None
 
     logger.info("Manual memory reflection requested (days_old=%d)", payload.days_old)
 
-    result = reflector.reflect_and_prune(payload.days_old)
+    running_future = getattr(runtime_app.state, "memory_reflection_future", None)
+    if running_future is not None and not running_future.done():
+        raise HTTPException(status_code=409, detail="Memory reflection is already running")
+
+    reflection_executor = getattr(runtime_app.state, "memory_reflection_executor", None)
+    if reflection_executor is None:
+        reflection_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="memory-reflection",
+        )
+        runtime_app.state.memory_reflection_executor = reflection_executor
+
+    worker_future = reflection_executor.submit(
+        reflector.reflect_and_prune,
+        payload.days_old,
+    )
+    runtime_app.state.memory_reflection_future = worker_future
+    try:
+        while not worker_future.done():
+            await asyncio.sleep(0.05)
+        result = worker_future.result()
+    finally:
+        if (
+            worker_future.done()
+            and getattr(runtime_app.state, "memory_reflection_future", None) is worker_future
+        ):
+            runtime_app.state.memory_reflection_future = None
 
     if not result.get("success", True):
         raise HTTPException(
