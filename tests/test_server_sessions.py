@@ -18,6 +18,11 @@ from app.core.conversation import (
 )
 
 
+RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+BLUE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC"
+THREE_BY_TWO_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEUlEQVR4nGNk+M8AAUwMMAAAEioBAy0HqkIAAAAASUVORK5CYII="
+
+
 def _load_server_module():
     if "app.server" in sys.modules:
         return sys.modules["app.server"]
@@ -555,7 +560,16 @@ class ServerSessionTests(unittest.TestCase):
 
     def test_parse_user_message_parses_base64_image_attachments(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(
-            '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":1}]}'
+            json.dumps({
+                "type": "user_message",
+                "text": "look",
+                "attachments": [{
+                    "name": "cat.png",
+                    "mime_type": "image/png",
+                    "data": RED_PNG_BASE64,
+                    "size_bytes": 1,
+                }],
+            })
         )
 
         self.assertEqual(text, "look")
@@ -564,8 +578,8 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(len(attachments), 1)
         self.assertEqual(attachments[0].name, "cat.png")
         self.assertEqual(attachments[0].mime_type, "image/png")
-        self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
-        self.assertEqual(attachments[0].size_bytes, 5)
+        self.assertEqual(attachments[0].base64_data, RED_PNG_BASE64)
+        self.assertEqual(attachments[0].size_bytes, 69)
 
     def test_parse_user_message_rejects_attachment_count_before_decoding(self):
         payload = {
@@ -580,20 +594,19 @@ class ServerSessionTests(unittest.TestCase):
             )
 
     def test_parse_user_message_rejects_aggregate_decoded_size(self):
-        encoded = base64.b64encode(b"abc").decode("ascii")
         payload = {
             "type": "user_message",
             "text": "too large together",
             "attachments": [
-                {"name": "a.png", "mime_type": "image/png", "data": encoded},
-                {"name": "b.png", "mime_type": "image/png", "data": encoded},
+                {"name": "a.png", "mime_type": "image/png", "data": RED_PNG_BASE64},
+                {"name": "b.png", "mime_type": "image/png", "data": BLUE_PNG_BASE64},
             ],
         }
         with self.assertRaisesRegex(ValueError, "aggregate limit"):
             server_module.parse_user_message(
                 json.dumps(payload),
-                max_attachment_bytes=4,
-                max_total_attachment_bytes=5,
+                max_attachment_bytes=100,
+                max_total_attachment_bytes=137,
             )
 
     def test_attachment_rejects_oversized_base64_before_decoding(self):
@@ -634,22 +647,54 @@ class ServerSessionTests(unittest.TestCase):
                     "size_bytes": value,
                 })
 
+    def test_attachment_rejects_mime_and_content_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "PNG, not JPEG"):
+            server_module.attachment_from_payload({
+                "name": "pretend.jpg",
+                "mime_type": "image/jpeg",
+                "data": RED_PNG_BASE64,
+            })
+
+    def test_attachment_rejects_corrupt_image_content(self):
+        corrupt = base64.b64encode(b"\x89PNG\r\n\x1a\nnot-an-image").decode("ascii")
+        with self.assertRaisesRegex(ValueError, "invalid or corrupted"):
+            server_module.attachment_from_payload({
+                "name": "broken.png",
+                "mime_type": "image/png",
+                "data": corrupt,
+            })
+
+    def test_attachment_enforces_dimension_and_pixel_limits(self):
+        payload = {
+            "name": "wide.png",
+            "mime_type": "image/png",
+            "data": THREE_BY_TWO_PNG_BASE64,
+        }
+        with self.assertRaisesRegex(ValueError, "side limit"):
+            server_module.attachment_from_payload(payload, max_dimension=2)
+        with self.assertRaisesRegex(ValueError, "5-pixel limit"):
+            server_module.attachment_from_payload(
+                payload,
+                max_dimension=10,
+                max_pixels=5,
+            )
+
     def test_append_recent_vision_attachments_adds_screen_and_webcam_frames(self):
         perception = PerceptionState()
         perception.update(
             server_module.PerceptionKey.SCREEN_SCENE,
             {
-                "name": "screen.jpg",
-                "mime_type": "image/jpeg",
-                "base64_data": "aGVsbG8=",
+                "name": "screen.png",
+                "mime_type": "image/png",
+                "base64_data": RED_PNG_BASE64,
             },
         )
         perception.update(
             server_module.PerceptionKey.WEBCAM_SCENE,
             {
-                "name": "webcam.jpg",
-                "mime_type": "image/jpeg",
-                "base64_data": "d29ybGQ=",
+                "name": "webcam.png",
+                "mime_type": "image/png",
+                "base64_data": BLUE_PNG_BASE64,
             },
         )
         orchestrator = types.SimpleNamespace(perception=perception)
@@ -662,8 +707,11 @@ class ServerSessionTests(unittest.TestCase):
         )
 
         self.assertEqual(appended_count, 2)
-        self.assertEqual([attachment.name for attachment in attachments], ["screen.jpg", "webcam.jpg"])
-        self.assertEqual([attachment.base64_data for attachment in attachments], ["aGVsbG8=", "d29ybGQ="])
+        self.assertEqual([attachment.name for attachment in attachments], ["screen.png", "webcam.png"])
+        self.assertEqual(
+            [attachment.base64_data for attachment in attachments],
+            [RED_PNG_BASE64, BLUE_PNG_BASE64],
+        )
 
     def test_append_recent_vision_attachments_ignores_stale_frames(self):
         perception = PerceptionState()
@@ -689,19 +737,19 @@ class ServerSessionTests(unittest.TestCase):
 
     def test_dedupe_attachments_by_hash_keeps_first_copy(self):
         first = server_module.attachment_from_payload({
-            "name": "screen-a.jpg",
-            "mime_type": "image/jpeg",
-            "data": "aGVsbG8=",
+            "name": "screen-a.png",
+            "mime_type": "image/png",
+            "data": RED_PNG_BASE64,
         })
         duplicate = server_module.attachment_from_payload({
-            "name": "screen-b.jpg",
-            "mime_type": "image/jpeg",
-            "data": "aGVsbG8=",
+            "name": "screen-b.png",
+            "mime_type": "image/png",
+            "data": RED_PNG_BASE64,
         })
         different = server_module.attachment_from_payload({
-            "name": "screen-c.jpg",
-            "mime_type": "image/jpeg",
-            "data": "d29ybGQ=",
+            "name": "screen-c.png",
+            "mime_type": "image/png",
+            "data": BLUE_PNG_BASE64,
         })
 
         deduped = server_module._dedupe_attachments_by_hash([
@@ -712,11 +760,11 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(
             [attachment.name for attachment in deduped],
-            ["screen-a.jpg", "screen-c.jpg"],
+            ["screen-a.png", "screen-c.png"],
         )
 
     def test_parse_user_message_repairs_prefixed_png_clipboard_payload(self):
-        broken_png = b"\xbbK\xe0\x00" + b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        broken_png = b"\xbbK\xe0\x00" + base64.b64decode(RED_PNG_BASE64)
         broken_png_b64 = base64.b64encode(broken_png).decode("ascii")
 
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(

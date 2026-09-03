@@ -1,12 +1,23 @@
 import base64
 import binascii
 import hashlib
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
+
 
 MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_DIMENSION = 8192
+MAX_IMAGE_PIXELS = 16_000_000
+SUPPORTED_IMAGE_FORMATS = {
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/gif": "GIF",
+    "image/webp": "WEBP",
+}
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,8 @@ class ImageAttachment(Attachment):
         payload: dict[str, Any],
         *,
         max_bytes: int = MAX_IMAGE_ATTACHMENT_BYTES,
+        max_dimension: int = MAX_IMAGE_DIMENSION,
+        max_pixels: int = MAX_IMAGE_PIXELS,
     ) -> "ImageAttachment":
         if not isinstance(payload, dict):
             raise ValueError("Image attachment must be an object")
@@ -57,8 +70,19 @@ class ImageAttachment(Attachment):
             raise ValueError("Image attachment is missing a valid name")
 
         mime_type = payload.get("mime_type") or payload.get("mimeType")
-        if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
-            raise ValueError("Image attachment must include an image mime_type")
+        if not isinstance(mime_type, str):
+            raise ValueError("Image attachment must include a supported image mime_type")
+        mime_type = mime_type.strip().lower()
+        if mime_type not in SUPPORTED_IMAGE_FORMATS:
+            raise ValueError("Image attachment mime_type must be PNG, JPEG, GIF, or WebP")
+
+        size_bytes = payload.get("size_bytes")
+        if size_bytes is None:
+            size_bytes = payload.get("size")
+        if size_bytes is not None and (
+            type(size_bytes) is not int or size_bytes < 0
+        ):
+            raise ValueError("Image attachment size_bytes must be a non-negative integer")
 
         raw_data = payload.get("data") or payload.get("base64_data")
         if not isinstance(raw_data, str) or not raw_data.strip():
@@ -69,15 +93,9 @@ class ImageAttachment(Attachment):
             normalized_data,
             mime_type,
             max_bytes=max_bytes,
+            max_dimension=max_dimension,
+            max_pixels=max_pixels,
         )
-
-        size_bytes = payload.get("size_bytes")
-        if size_bytes is None:
-            size_bytes = payload.get("size")
-        if size_bytes is not None and (
-            type(size_bytes) is not int or size_bytes < 0
-        ):
-            raise ValueError("Image attachment size_bytes must be a non-negative integer")
 
         return cls(
             name=name.strip(),
@@ -145,11 +163,56 @@ class ImageAttachment(Attachment):
         mime_type: str,
         *,
         max_bytes: int,
+        max_dimension: int,
+        max_pixels: int,
     ) -> bytes:
         decoded = base64.b64decode(base64_value)
         if len(decoded) > max_bytes:
             raise ValueError(f"Image attachment exceeds the {max_bytes}-byte limit")
-        return cls._repair_image_bytes(decoded, mime_type)
+        repaired = cls._repair_image_bytes(decoded, mime_type)
+        cls._validate_image_bytes(
+            repaired,
+            mime_type,
+            max_dimension=max_dimension,
+            max_pixels=max_pixels,
+        )
+        return repaired
+
+    @staticmethod
+    def _validate_image_bytes(
+        payload: bytes,
+        mime_type: str,
+        *,
+        max_dimension: int,
+        max_pixels: int,
+    ) -> None:
+        expected_format = SUPPORTED_IMAGE_FORMATS[mime_type]
+        try:
+            with Image.open(io.BytesIO(payload)) as image:
+                detected_format = image.format
+                width, height = image.size
+                if detected_format != expected_format:
+                    raise ValueError(
+                        f"Image content is {detected_format or 'unknown'}, not {expected_format}"
+                    )
+                if width < 1 or height < 1:
+                    raise ValueError("Image dimensions must be positive")
+                if width > max_dimension or height > max_dimension:
+                    raise ValueError(
+                        f"Image dimensions exceed the {max_dimension}-pixel side limit"
+                    )
+                if width * height > max_pixels:
+                    raise ValueError(f"Image exceeds the {max_pixels}-pixel limit")
+                image.verify()
+        except ValueError:
+            raise
+        except (
+            Image.DecompressionBombError,
+            OSError,
+            SyntaxError,
+            UnidentifiedImageError,
+        ) as exc:
+            raise ValueError("Image attachment content is invalid or corrupted") from exc
 
     @staticmethod
     def _repair_image_bytes(payload: bytes, mime_type: str) -> bytes:
@@ -212,12 +275,19 @@ def attachment_from_payload(
     payload: dict[str, Any],
     *,
     max_bytes: int = MAX_IMAGE_ATTACHMENT_BYTES,
+    max_dimension: int = MAX_IMAGE_DIMENSION,
+    max_pixels: int = MAX_IMAGE_PIXELS,
 ) -> Attachment:
     if not isinstance(payload, dict):
         raise ValueError("Attachment must be an object")
     mime_type = payload.get("mime_type") or payload.get("mimeType")
     if isinstance(mime_type, str) and mime_type.startswith("image/"):
-        return ImageAttachment.from_payload(payload, max_bytes=max_bytes)
+        return ImageAttachment.from_payload(
+            payload,
+            max_bytes=max_bytes,
+            max_dimension=max_dimension,
+            max_pixels=max_pixels,
+        )
 
     raise ValueError("Unsupported attachment mime_type")
 

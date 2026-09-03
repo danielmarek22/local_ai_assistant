@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import unittest
 from datetime import datetime
@@ -276,8 +277,8 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(history.last_limit, 5)
 
     def test_build_deduplicates_current_user_message_against_stored_attachment_variant(self):
-        image_b64 = "aGVsbG8="
-        image_sha256 = hashlib.sha256(b"hello").hexdigest()
+        image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        image_sha256 = hashlib.sha256(base64.b64decode(image_b64)).hexdigest()
         history = FakeHistoryStore(
             [
                 {
@@ -288,7 +289,7 @@ class ContextBuilderTests(unittest.TestCase):
                             "id": 42,
                             "name": "cat.png",
                             "mime_type": "image/png",
-                            "size_bytes": 5,
+                            "size_bytes": 69,
                             "storage_path": "static/uploads/s1/1/cat.png",
                             "url": "/static/uploads/s1/1/cat.png",
                             "sha256": image_sha256,
@@ -311,7 +312,7 @@ class ContextBuilderTests(unittest.TestCase):
                 "name": "cat.png",
                 "mime_type": "image/png",
                 "data": image_b64,
-                "size_bytes": 5,
+                "size_bytes": 69,
             }
         )
 
