@@ -42,7 +42,7 @@ from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
 from app.services.vision_watchdog import VisionWatchdog
-from app.services.connection_hub import SessionConnectionHub
+from app.services.connection_hub import SessionConnectionHub, parse_approval_decision
 from app.knowledge import (
     BeliefDetailDTO,
     BeliefListResponse,
@@ -563,7 +563,15 @@ async def _request_tool_approval(
             logger.debug("[%s] Ignoring websocket message while awaiting tool approval", connection_id)
             continue
 
-        approved = bool(payload.get("approved"))
+        try:
+            approved = parse_approval_decision(payload)
+        except ValueError:
+            logger.warning(
+                "[%s] Denying malformed approval response for %s",
+                connection_id,
+                tool_name,
+            )
+            return False
         logger.info(
             "[%s] Human %s capability %s",
             connection_id,

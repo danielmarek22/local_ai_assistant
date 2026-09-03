@@ -4,7 +4,16 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+
+
+def parse_approval_decision(payload: Mapping[str, object]) -> bool:
+    """Return a decision only when the wire value is a JSON Boolean."""
+    approved = payload.get("approved")
+    if type(approved) is not bool:
+        raise ValueError("Approval response field 'approved' must be a Boolean")
+    return approved
 
 
 @dataclass
@@ -98,7 +107,7 @@ class SessionConnectionHub:
         }
         try:
             await self._send(connection, payload)
-            return bool(await asyncio.wait_for(future, timeout=timeout_seconds))
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
         except Exception:
             return False
         finally:
@@ -111,7 +120,11 @@ class SessionConnectionHub:
             return False
         future = pending[1]
         if not future.done():
-            future.set_result(bool(payload.get("approved")))
+            try:
+                decision = parse_approval_decision(payload)
+            except ValueError:
+                decision = False
+            future.set_result(decision)
         return True
 
     async def _send(self, connection: _Connection, payload: dict) -> None:

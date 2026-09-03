@@ -841,6 +841,33 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(ws.messages[0]["detail"], "printf hi")
         self.assertEqual(ws.messages[0]["reason"], "Command requires approval.")
 
+    def test_request_tool_approval_rejects_non_boolean_decisions(self):
+        for value in ("false", "true", 0, 1, None, [], {}):
+            with self.subTest(value=value):
+                ws = FakeApprovalWebSocket(approved=value)
+                with self.assertLogs("server", level="WARNING"):
+                    approved = server_module.asyncio.run(
+                        server_module._request_tool_approval(
+                            ws,
+                            {"tool": "shell__execute"},
+                            connection_id="conn-1",
+                            timeout_seconds=1.0,
+                        )
+                    )
+                self.assertFalse(approved)
+
+    def test_request_tool_approval_accepts_literal_false_as_denial(self):
+        ws = FakeApprovalWebSocket(approved=False)
+        approved = server_module.asyncio.run(
+            server_module._request_tool_approval(
+                ws,
+                {"tool": "shell__execute"},
+                connection_id="conn-1",
+                timeout_seconds=1.0,
+            )
+        )
+        self.assertFalse(approved)
+
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
         text = (
             "# Title\n"

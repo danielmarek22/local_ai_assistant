@@ -96,6 +96,24 @@ class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
             "missing", {"tool": "shell__execute"}, timeout_seconds=0.01,
         ))
 
+    async def test_non_boolean_approval_decisions_fail_closed(self):
+        for value in ("false", "true", 0, 1, None, [], {}):
+            with self.subTest(value=value):
+                hub = SessionConnectionHub()
+                ws = FakeWebSocket()
+                hub.register("session-1", "connection-1", ws)
+                task = asyncio.create_task(hub.request_approval(
+                    "session-1", {"tool": "shell__execute"}, timeout_seconds=1,
+                ))
+                await asyncio.sleep(0)
+                approval_id = ws.sent[0]["approval_id"]
+
+                self.assertTrue(hub.resolve_approval("connection-1", {
+                    "approval_id": approval_id,
+                    "approved": value,
+                }))
+                self.assertFalse(await task)
+
 
 if __name__ == "__main__":
     unittest.main()
