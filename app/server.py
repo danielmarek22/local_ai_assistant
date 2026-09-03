@@ -68,6 +68,7 @@ logger = logging.getLogger("server")
 router = APIRouter()
 
 AUDIO_DIR = STATIC_DIR / "audio"
+_GENERATED_AUDIO_NAME_RE = re.compile(r"^[0-9a-f]{32}\.wav$")
 
 _SENTINEL = object()
 _TTS_STOP = object()
@@ -1104,6 +1105,25 @@ async def _autonomy_approval_provider(
     )
 
 
+def _cleanup_generated_audio(audio_dir: Path) -> dict[str, int]:
+    """Delete only UUID-named audio artifacts owned by the TTS pipeline."""
+    deleted_count = 0
+    failed_count = 0
+    for path in audio_dir.iterdir():
+        if not _GENERATED_AUDIO_NAME_RE.fullmatch(path.name):
+            continue
+        if not path.is_file() and not path.is_symlink():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            failed_count += 1
+            logger.warning("Failed to remove generated audio file %s", path, exc_info=True)
+        else:
+            deleted_count += 1
+    return {"deleted_count": deleted_count, "failed_count": failed_count}
+
+
 async def _startup_application(
     application: FastAPI,
     settings: Config,
@@ -1117,7 +1137,12 @@ async def _startup_application(
     logging_config["dir"] = str(resolve_app_path(logging_config.get("dir", "logs")))
     setup_logging_from_config(logging_config)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    logger.debug("Audio directory ready at %s", AUDIO_DIR)
+    audio_cleanup = _cleanup_generated_audio(AUDIO_DIR)
+    logger.info(
+        "Generated audio startup cleanup completed: deleted=%d failed=%d",
+        audio_cleanup["deleted_count"],
+        audio_cleanup["failed_count"],
+    )
     logger.info("Starting FastAPI server")
 
     application.state.server_instance_id = uuid.uuid4().hex[:8]

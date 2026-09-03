@@ -207,6 +207,62 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertTrue(orchestrator.closed)
         self.assertTrue(application.state.tts_worker_task.done())
 
+    def test_startup_removes_only_generated_audio_files(self):
+        settings = self._settings()
+        orchestrator = self._orchestrator()
+        application = server_module.create_app(
+            settings,
+            orchestrator_builder=lambda _settings: orchestrator,
+            tts_builder=lambda _config: types.SimpleNamespace(synthesize=lambda *_args: None),
+            stt_builder=lambda _config: object(),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_dir = Path(temp_dir) / "audio"
+            audio_dir.mkdir()
+            generated = audio_dir / f"{'a' * 32}.wav"
+            unrelated = audio_dir / "reference.wav"
+            nested = audio_dir / f"{'b' * 32}.wav"
+            generated.write_bytes(b"generated")
+            unrelated.write_bytes(b"keep")
+            nested.mkdir()
+
+            async def exercise_lifespan():
+                async with application.router.lifespan_context(application):
+                    self.assertFalse(generated.exists())
+                    self.assertTrue(unrelated.exists())
+                    self.assertTrue(nested.is_dir())
+
+            with patch.object(server_module, "AUDIO_DIR", audio_dir), patch.object(
+                server_module, "setup_logging_from_config"
+            ):
+                server_module.asyncio.run(exercise_lifespan())
+
+        self.assertTrue(orchestrator.closed)
+
+    def test_audio_cleanup_continues_after_individual_delete_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_dir = Path(temp_dir)
+            first = audio_dir / f"{'a' * 32}.wav"
+            second = audio_dir / f"{'b' * 32}.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            original_unlink = Path.unlink
+
+            def selective_unlink(path):
+                if path == first:
+                    raise OSError("busy")
+                return original_unlink(path)
+
+            with self.assertLogs("server", level="WARNING"), patch.object(
+                Path, "unlink", selective_unlink
+            ):
+                report = server_module._cleanup_generated_audio(audio_dir)
+
+            self.assertEqual(report, {"deleted_count": 1, "failed_count": 1})
+            self.assertTrue(first.exists())
+            self.assertFalse(second.exists())
+
 
 class FakeCollection:
     def __init__(self):
