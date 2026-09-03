@@ -102,6 +102,9 @@ class OllamaClient(LLMClient):
         except Exception as exc:
             logger.warning("Failed to preload model: %s", exc)
 
+    def close(self) -> None:
+        self.session.close()
+
     # ------------------------------------------------------------------
     # LLMClient interface
     # ------------------------------------------------------------------

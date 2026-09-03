@@ -194,6 +194,45 @@ class ServerLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cannot schedule new futures"):
             application.state.memory_reflection_executor.submit(lambda: None)
 
+    def test_shutdown_closes_orchestrator_after_autonomy_runtime(self):
+        settings = self._settings()
+        orchestrator = self._orchestrator()
+        close_order = []
+
+        class FakeAutonomyRuntime:
+            async def start(self):
+                pass
+
+            async def close(self):
+                close_order.append("autonomy_runtime")
+
+        orchestrator.autonomy_runtime = FakeAutonomyRuntime()
+
+        def close_orchestrator():
+            close_order.append("orchestrator")
+            orchestrator.closed = True
+
+        orchestrator.close = close_orchestrator
+        application = server_module.create_app(
+            settings,
+            orchestrator_builder=lambda _settings: orchestrator,
+            tts_builder=lambda _config: types.SimpleNamespace(synthesize=lambda *_args: None),
+            stt_builder=lambda _config: object(),
+        )
+
+        async def exercise_lifespan():
+            async with application.router.lifespan_context(application):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            server_module,
+            "AUDIO_DIR",
+            Path(temp_dir) / "audio",
+        ), patch.object(server_module, "setup_logging_from_config"):
+            server_module.asyncio.run(exercise_lifespan())
+
+        self.assertEqual(close_order, ["autonomy_runtime", "orchestrator"])
+
     def test_factory_rolls_back_resources_when_startup_fails(self):
         settings = self._settings()
         orchestrator = self._orchestrator()

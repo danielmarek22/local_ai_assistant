@@ -59,9 +59,13 @@ class AutonomyRuntime:
         self.registry.start(self.broker.publish)
 
     async def close(self) -> None:
-        self.registry.close()
-        await self.broker.close()
-        self.store.close()
+        try:
+            self.registry.close()
+        finally:
+            try:
+                await self.broker.close()
+            finally:
+                self.store.close()
 
     async def publish(self, event: IntegrationEvent) -> str:
         return await self.broker.publish_async(event)

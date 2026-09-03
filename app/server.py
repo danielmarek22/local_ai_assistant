@@ -1234,20 +1234,23 @@ async def _shutdown_application(application: FastAPI) -> None:
     reflection_executor = getattr(application.state, "memory_reflection_executor", None)
 
     try:
-        if reflection_executor is not None:
-            reflection_executor.shutdown(wait=True, cancel_futures=False)
-        if autonomy_runtime is not None:
-            await autonomy_runtime.close()
-        else:
+        try:
+            if autonomy_runtime is not None:
+                await autonomy_runtime.close()
+        finally:
+            if reflection_executor is not None:
+                reflection_executor.shutdown(wait=True, cancel_futures=False)
+    finally:
+        try:
             close_orchestrator = getattr(orchestrator, "close", None)
             if callable(close_orchestrator):
                 close_orchestrator()
-    finally:
-        if queue is not None:
-            await queue.put(_TTS_STOP)
-        if worker_task is not None:
-            with suppress(asyncio.CancelledError):
-                await worker_task
+        finally:
+            if queue is not None:
+                await queue.put(_TTS_STOP)
+            if worker_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await worker_task
 
 
 def create_app(

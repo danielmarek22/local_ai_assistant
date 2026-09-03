@@ -183,10 +183,17 @@ class Database:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self._init_schema()
+        except Exception:
+            self.conn.close()
+            raise
+
+    def close(self) -> None:
+        self.conn.close()
 
     def _init_schema(self):
         cursor = self.conn.cursor()

@@ -100,6 +100,8 @@ class Orchestrator:
         generation_deadline_s: float = _DEFAULT_GENERATION_DEADLINE_S,
         recovery_deadline_s: float = _DEFAULT_RECOVERY_DEADLINE_S,
         recovery_num_predict: int = _DEFAULT_RECOVERY_NUM_PREDICT,
+        database=None,
+        vector_store=None,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -123,6 +125,8 @@ class Orchestrator:
         self.generation_deadline_s = max(1.0, float(generation_deadline_s))
         self.recovery_deadline_s = max(1.0, float(recovery_deadline_s))
         self.recovery_num_predict = max(1, int(recovery_num_predict))
+        self._owned_resources = (database, vector_store)
+        self._closed = False
         self.perception = PerceptionState()
         self.max_late_routing_steps = 5
 
@@ -132,8 +136,33 @@ class Orchestrator:
         )
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
         if getattr(self, "autonomy_runtime", None) is None:
-            self.tool_executor.close()
+            try:
+                self.tool_executor.close()
+            except Exception:
+                logger.exception("Tool executor failed during shutdown")
+
+        for resource in reversed(self._owned_resources):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                logger.exception(
+                    "%s failed during shutdown",
+                    type(resource).__name__,
+                )
+
+        close_llm = getattr(self.llm, "close", None)
+        if callable(close_llm):
+            try:
+                close_llm()
+            except Exception:
+                logger.exception("LLM client failed during shutdown")
 
     # ============================================================
     # Public entry point

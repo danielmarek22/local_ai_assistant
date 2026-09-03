@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.actions import Action, ActionType
@@ -14,6 +15,7 @@ from app.core.events import (
     AutonomyOutcomeEvent,
 )
 from app.core.orchestrator import Orchestrator
+from app.core import orchestrator_factory
 from app.core.conversation import InputSource, SenderAttribution, SenderType, SessionKind
 from app.core.turn_input import InputModality
 from app.core.plan import Plan
@@ -68,6 +70,10 @@ class FakeToolExecutor:
         self.calls = []
         self.native_contexts = []
         self.results = []
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
 
     def get_native_tools(self, allowed_capabilities=None, **kwargs):
         self.native_contexts.append(kwargs)
@@ -262,6 +268,8 @@ class OrchestratorTests(unittest.TestCase):
         belief_context_provider=None,
         belief_processing_mode="disabled",
         belief_turn_preparer=None,
+        database=None,
+        vector_store=None,
     ):
         llm = FakeLLM(
             llm_chunks or ["Hello", " world"],
@@ -300,8 +308,66 @@ class OrchestratorTests(unittest.TestCase):
             belief_context_provider=belief_context_provider,
             belief_processing_mode=belief_processing_mode,
             belief_turn_preparer=belief_turn_preparer,
+            database=database,
+            vector_store=vector_store,
         )
         return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
+
+    def test_close_releases_owned_storage_in_reverse_order_once(self):
+        close_order = []
+        database = SimpleNamespace(close=lambda: close_order.append("database"))
+        vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
+        built = self._build_orchestrator(
+            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
+            database=database,
+            vector_store=vector_store,
+        )
+        orchestrator, tool_executor = built[0], built[7]
+
+        orchestrator.close()
+        orchestrator.close()
+
+        self.assertEqual(tool_executor.close_calls, 1)
+        self.assertEqual(close_order, ["vector_store", "database"])
+
+    def test_factory_closes_constructed_storage_when_build_fails(self):
+        close_order = []
+        database = SimpleNamespace(
+            path=":memory:",
+            close=lambda: close_order.append("database"),
+        )
+        autonomy_store = SimpleNamespace(
+            close=lambda: close_order.append("autonomy_store"),
+        )
+        vector_store = SimpleNamespace(
+            close=lambda: close_order.append("vector_store"),
+        )
+        config = SimpleNamespace(
+            llm={"model": "test", "host": "http://localhost", "generation": {}},
+            integrations={},
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+        )
+
+        with patch.object(orchestrator_factory, "OllamaClient") as llm_type, patch.object(
+            orchestrator_factory, "Database", return_value=database
+        ), patch.object(
+            orchestrator_factory, "AutonomyStore", return_value=autonomy_store
+        ), patch.object(
+            orchestrator_factory, "VectorStore", return_value=vector_store
+        ), patch.object(
+            orchestrator_factory,
+            "ChatHistoryStore",
+            side_effect=RuntimeError("history failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "history failed"):
+                orchestrator_factory.build_orchestrator(config)
+
+        llm_type.return_value.preload.assert_called_once_with()
+        self.assertEqual(
+            close_order,
+            ["vector_store", "autonomy_store", "database"],
+        )
 
     def test_turn_flow_injects_memory_into_context(self):
         plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])

@@ -1,4 +1,5 @@
 import logging
+from contextlib import ExitStack
 
 from app.config import Config
 from app.llm.ollama_stream import OllamaClient
@@ -151,6 +152,16 @@ def _build_belief_components(
 
 
 def build_orchestrator(config: Config | None = None) -> Orchestrator:
+    with ExitStack() as startup_resources:
+        orchestrator = _build_orchestrator(config, startup_resources)
+        startup_resources.pop_all()
+        return orchestrator
+
+
+def _build_orchestrator(
+    config: Config | None,
+    startup_resources: ExitStack,
+) -> Orchestrator:
     logger.info("Building orchestrator")
 
     # --------------------------------------------------
@@ -191,6 +202,7 @@ def build_orchestrator(config: Config | None = None) -> Orchestrator:
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
     )
+    startup_resources.callback(llm.close)
 
     logger.debug(
         "LLM options: temperature=%.2f top_p=%.2f top_k=%s max_tokens=%d rep_pen=%s",
@@ -213,8 +225,11 @@ def build_orchestrator(config: Config | None = None) -> Orchestrator:
         legacy_local_human_id=config.local_human["id"],
         legacy_local_human_name=config.local_human["display_name"],
     )
+    startup_resources.callback(db.close)
     autonomy_store = AutonomyStore(db.path)
+    startup_resources.callback(autonomy_store.close)
     vector_store = VectorStore(path=str(DATA_DIR / "vectordb"))
+    startup_resources.callback(vector_store.close)
 
     agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
     assistant_name = str(config.assistant.get("display_name", "Astra")).strip() or "Astra"
@@ -377,6 +392,7 @@ def build_orchestrator(config: Config | None = None) -> Orchestrator:
         logger.info("Mindcraft integration registered (url=%s)", mindcraft_client.url)
 
     integration_registry = IntegrationRegistry(integrations)
+    startup_resources.callback(integration_registry.close)
     tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
 
     # --------------------------------------------------
@@ -438,6 +454,8 @@ def build_orchestrator(config: Config | None = None) -> Orchestrator:
         recovery_num_predict=int(
             config.orchestrator.get("recovery_num_predict", 192)
         ),
+        database=db,
+        vector_store=vector_store,
         belief_turn_preparer=(
             belief_turn_preparer
             if config.beliefs["processing_mode"] == "react_tool"

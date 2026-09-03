@@ -12,22 +12,28 @@ class VectorStore:
         
         # Persistent local storage
         self.client = chromadb.PersistentClient(path=str(resolve_app_path(path)))
-        
-        # This downloads (once) and runs a tiny, fast embedding model purely on your CPU
-        self.embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
-        )
+        try:
+            # This downloads (once) and runs a tiny, fast embedding model purely on your CPU
+            self.embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
 
-        # 1. Semantic Memory Collection (Facts & Rules)
-        self.semantic_collection = self.client.get_or_create_collection(
-            name="semantic_memory",
-            embedding_function=self.embedding_fn,
-            metadata={"hnsw:space": "cosine"} # Best for text similarity
-        )
+            # 1. Semantic Memory Collection (Facts & Rules)
+            self.semantic_collection = self.client.get_or_create_collection(
+                name="semantic_memory",
+                embedding_function=self.embedding_fn,
+                metadata={"hnsw:space": "cosine"} # Best for text similarity
+            )
 
-        # 2. Episodic Memory Collection (Conversations)
-        self.episodic_collection = self.client.get_or_create_collection(
-            name="episodic_memory",
-            embedding_function=self.embedding_fn,
-            metadata={"hnsw:space": "cosine"}
-        )
+            # 2. Episodic Memory Collection (Conversations)
+            self.episodic_collection = self.client.get_or_create_collection(
+                name="episodic_memory",
+                embedding_function=self.embedding_fn,
+                metadata={"hnsw:space": "cosine"}
+            )
+        except Exception:
+            self.client.close()
+            raise
+
+    def close(self) -> None:
+        self.client.close()
