@@ -35,7 +35,13 @@ from app.core.events import (
     AvatarOutfitEvent,
 )
 from app.logging import setup_logging_from_config
-from app.perception.attachments import Attachment, AudioAttachment, ImageAttachment, attachment_from_payload
+from app.perception.attachments import (
+    MAX_IMAGE_ATTACHMENT_BYTES,
+    Attachment,
+    AudioAttachment,
+    ImageAttachment,
+    attachment_from_payload,
+)
 from app.integrations import EventAttachmentRef, EventId, IntegrationEvent
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
@@ -71,6 +77,8 @@ TOOL_APPROVAL_TIMEOUT_SECONDS = 300.0
 BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
 VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
+MAX_ATTACHMENTS_PER_TURN = 8
+MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 VOICE_INPUT_STT = "stt"
 VOICE_INPUT_NATIVE_AUDIO = "native_audio"
 _PYAV_INVALID_DATA_ERRNO = "1094995529"
@@ -286,7 +294,28 @@ def resolve_session_id(
     return uuid.uuid4().hex[:8]
 
 
-def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Attachment]]:
+def _validate_attachment_batch(
+    attachments: list[Attachment],
+    *,
+    max_count: int = MAX_ATTACHMENTS_PER_TURN,
+    max_total_bytes: int = MAX_TOTAL_ATTACHMENT_BYTES,
+) -> None:
+    if len(attachments) > max_count:
+        raise ValueError(f"A message may include at most {max_count} attachments")
+    total_bytes = sum(attachment.size_bytes or 0 for attachment in attachments)
+    if total_bytes > max_total_bytes:
+        raise ValueError(
+            f"Message attachments exceed the {max_total_bytes}-byte aggregate limit"
+        )
+
+
+def parse_user_message(
+    raw_text: str,
+    *,
+    max_attachment_count: int = MAX_ATTACHMENTS_PER_TURN,
+    max_attachment_bytes: int = MAX_IMAGE_ATTACHMENT_BYTES,
+    max_total_attachment_bytes: int = MAX_TOTAL_ATTACHMENT_BYTES,
+) -> tuple[str, bool | None, bool, list[Attachment]]:
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
@@ -316,7 +345,19 @@ def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Atta
     if attachments_payload is None:
         attachments: list[Attachment] = []
     elif isinstance(attachments_payload, list):
-        attachments = [attachment_from_payload(item) for item in attachments_payload]
+        if len(attachments_payload) > max_attachment_count:
+            raise ValueError(
+                f"A message may include at most {max_attachment_count} attachments"
+            )
+        attachments = [
+            attachment_from_payload(item, max_bytes=max_attachment_bytes)
+            for item in attachments_payload
+        ]
+        _validate_attachment_batch(
+            attachments,
+            max_count=max_attachment_count,
+            max_total_bytes=max_total_attachment_bytes,
+        )
     else:
         raise ValueError("User message attachments must be a list")
 
@@ -1741,6 +1782,7 @@ async def websocket_endpoint(ws: WebSocket):
                             pending_voice_attachments = _dedupe_attachments_by_hash(
                                 pending_voice_attachments
                             )[-4:]
+                            _validate_attachment_batch(pending_voice_attachments)
                         continue
 
                     if (
@@ -1799,6 +1841,7 @@ async def websocket_endpoint(ws: WebSocket):
                             *attachments,
                         ]
                     )
+                    _validate_attachment_batch(attachments)
                     pending_voice_attachments = []
 
                 original_attachment_count = len(attachments)

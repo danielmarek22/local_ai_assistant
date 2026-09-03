@@ -555,7 +555,7 @@ class ServerSessionTests(unittest.TestCase):
 
     def test_parse_user_message_parses_base64_image_attachments(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(
-            '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":5}]}'
+            '{"type":"user_message","text":"look","attachments":[{"name":"cat.png","mime_type":"image/png","data":"aGVsbG8=","size_bytes":1}]}'
         )
 
         self.assertEqual(text, "look")
@@ -565,6 +565,74 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(attachments[0].name, "cat.png")
         self.assertEqual(attachments[0].mime_type, "image/png")
         self.assertEqual(attachments[0].base64_data, "aGVsbG8=")
+        self.assertEqual(attachments[0].size_bytes, 5)
+
+    def test_parse_user_message_rejects_attachment_count_before_decoding(self):
+        payload = {
+            "type": "user_message",
+            "text": "too many",
+            "attachments": [{"invalid": True} for _ in range(3)],
+        }
+        with self.assertRaisesRegex(ValueError, "at most 2 attachments"):
+            server_module.parse_user_message(
+                json.dumps(payload),
+                max_attachment_count=2,
+            )
+
+    def test_parse_user_message_rejects_aggregate_decoded_size(self):
+        encoded = base64.b64encode(b"abc").decode("ascii")
+        payload = {
+            "type": "user_message",
+            "text": "too large together",
+            "attachments": [
+                {"name": "a.png", "mime_type": "image/png", "data": encoded},
+                {"name": "b.png", "mime_type": "image/png", "data": encoded},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "aggregate limit"):
+            server_module.parse_user_message(
+                json.dumps(payload),
+                max_attachment_bytes=4,
+                max_total_attachment_bytes=5,
+            )
+
+    def test_attachment_rejects_oversized_base64_before_decoding(self):
+        with patch("app.perception.attachments.base64.b64decode") as decode:
+            with self.assertRaisesRegex(ValueError, "3-byte limit"):
+                server_module.attachment_from_payload(
+                    {
+                        "name": "large.png",
+                        "mime_type": "image/png",
+                        "data": "A" * 8,
+                    },
+                    max_bytes=3,
+                )
+        decode.assert_not_called()
+
+    def test_attachment_checks_decoded_size_at_base64_boundary(self):
+        encoded = base64.b64encode(b"12345").decode("ascii")
+        with self.assertRaisesRegex(ValueError, "4-byte limit"):
+            server_module.attachment_from_payload(
+                {
+                    "name": "large.png",
+                    "mime_type": "image/png",
+                    "data": encoded,
+                },
+                max_bytes=4,
+            )
+
+    def test_attachment_rejects_invalid_client_reported_size(self):
+        for value in (True, -1, "5"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "non-negative integer",
+            ):
+                server_module.attachment_from_payload({
+                    "name": "image.png",
+                    "mime_type": "image/png",
+                    "data": "aGVsbG8=",
+                    "size_bytes": value,
+                })
 
     def test_append_recent_vision_attachments_adds_screen_and_webcam_frames(self):
         perception = PerceptionState()
