@@ -30,8 +30,8 @@ class ServerImportTests(unittest.TestCase):
 
             import app.server as server
 
-            assert server.AUDIO_DIR == server.APP_ROOT / "static" / "audio"
-            assert server.config.path == server.APP_ROOT / "app" / "config" / "assistant.yaml"
+            assert server.AUDIO_DIR == server.STATIC_DIR / "audio"
+            assert not hasattr(server.app.state, "settings")
             """
         )
         env = dict(os.environ)

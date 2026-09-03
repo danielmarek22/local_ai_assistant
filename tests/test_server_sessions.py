@@ -110,6 +110,99 @@ class FakeMemoryReflector:
         return self.next_result
 
 
+class ServerLifecycleTests(unittest.TestCase):
+    def _settings(self):
+        return types.SimpleNamespace(
+            logging={"dir": "logs"},
+            raw={},
+            tts={"engine": "fake"},
+            stt={"enabled": True},
+            voice_input={"path": "stt"},
+            autonomy={"approval_timeout_s": 10},
+        )
+
+    def _orchestrator(self):
+        history = types.SimpleNamespace(list_sessions=lambda: [])
+
+        class FakeRuntimeOrchestrator:
+            def __init__(self):
+                self.llm = object()
+                self.memory_retriever = types.SimpleNamespace(memory=object())
+                self.history = history
+                self.autonomy_runtime = None
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        return FakeRuntimeOrchestrator()
+
+    def test_factory_owns_injected_runtime_for_its_lifespan(self):
+        settings = self._settings()
+        orchestrator = self._orchestrator()
+        fake_tts = types.SimpleNamespace(synthesize=lambda *_args: None)
+        fake_stt = object()
+        application = server_module.create_app(
+            settings,
+            orchestrator_builder=lambda received: (
+                orchestrator if received is settings else self.fail("wrong settings")
+            ),
+            tts_builder=lambda _config: fake_tts,
+            stt_builder=lambda _config: fake_stt,
+        )
+
+        async def exercise_lifespan():
+            async with application.router.lifespan_context(application):
+                self.assertIs(application.state.settings, settings)
+                self.assertIs(application.state.orchestrator, orchestrator)
+                self.assertIs(application.state.tts, fake_tts)
+                self.assertIs(application.state.stt, fake_stt)
+                request = server_module.Request({"type": "http", "app": application})
+                self.assertEqual(
+                    await server_module.list_sessions(request),
+                    {"sessions": []},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            server_module,
+            "AUDIO_DIR",
+            Path(temp_dir) / "audio",
+        ), patch.object(server_module, "setup_logging_from_config"):
+            server_module.asyncio.run(exercise_lifespan())
+
+        self.assertTrue(orchestrator.closed)
+
+    def test_factory_rolls_back_resources_when_startup_fails(self):
+        settings = self._settings()
+        orchestrator = self._orchestrator()
+        fake_tts = types.SimpleNamespace(synthesize=lambda *_args: None)
+
+        def fail_stt(_config):
+            raise RuntimeError("stt failed")
+
+        application = server_module.create_app(
+            settings,
+            orchestrator_builder=lambda _settings: orchestrator,
+            tts_builder=lambda _config: fake_tts,
+            stt_builder=fail_stt,
+        )
+
+        async def exercise_lifespan():
+            async with application.router.lifespan_context(application):
+                self.fail("startup failure should prevent lifespan entry")
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            server_module,
+            "AUDIO_DIR",
+            Path(temp_dir) / "audio",
+        ), patch.object(server_module, "setup_logging_from_config"):
+            with self.assertRaisesRegex(RuntimeError, "stt failed"):
+                server_module.asyncio.run(exercise_lifespan())
+
+        self.assertTrue(orchestrator.closed)
+        self.assertTrue(application.state.tts_worker_task.done())
+
+
 class FakeCollection:
     def __init__(self):
         self.docs = []
