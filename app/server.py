@@ -21,6 +21,7 @@ from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
+from app.core.session_ids import SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN, validate_session_id
 from app.core.events import (
     AssistantSpeechEvent,
     UserMessageAcceptedEvent,
@@ -98,6 +99,23 @@ _MARKDOWN_ITALIC_RE = re.compile(r"(?<!\w)(\*|_)(.+?)\1(?!\w)")
 _MARKDOWN_STRIKE_RE = re.compile(r"~~(.+?)~~")
 _MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+SessionIdPath = Annotated[
+    str,
+    ApiPath(
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        pattern=SESSION_ID_PATTERN,
+    ),
+]
+SessionIdQuery = Annotated[
+    str,
+    Query(
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        pattern=SESSION_ID_PATTERN,
+    ),
+]
 
 
 def _voice_input_path() -> str:
@@ -240,6 +258,9 @@ def resolve_session_id(
     server_instance_id: str,
     requested_session_exists: bool = False,
 ) -> str:
+    if requested_session_id is not None:
+        requested_session_id = validate_session_id(requested_session_id)
+
     if session_mode == "open" and requested_session_id:
         return requested_session_id
 
@@ -1032,7 +1053,7 @@ async def list_sessions():
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: SessionIdPath):
     history_store = app.state.orchestrator.history
     rows = history_store.get_all(session_id)
 
@@ -1091,16 +1112,6 @@ def _knowledge_service(
         history_store=orchestrator.history,
         memory_store=memory_store,
     )
-
-
-SessionIdQuery = Annotated[
-    str,
-    Query(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[^\x00-\x1f\x7f]+$",
-    ),
-]
 
 
 def _require_known_session(service: KnowledgeService, session_id: str) -> None:
@@ -1183,7 +1194,7 @@ async def get_belief_context_preview(session_id: SessionIdQuery):
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: SessionIdPath):
     orchestrator = app.state.orchestrator
     deleted_count = orchestrator.history.delete_session(session_id)
     orchestrator.summary_store.delete(session_id)
@@ -1261,16 +1272,26 @@ async def websocket_endpoint(ws: WebSocket):
 
     orchestrator = app.state.orchestrator
     history_store = orchestrator.history
-    session_id = resolve_session_id(
-        session_mode=session_mode,
-        requested_session_id=requested_session_id,
-        known_server_instance_id=known_server_instance_id,
-        server_instance_id=server_instance_id,
-        requested_session_exists=bool(
-            requested_session_id
-            and history_store.session_exists(requested_session_id)
-        ),
-    )
+    try:
+        validated_requested_session_id = (
+            validate_session_id(requested_session_id)
+            if requested_session_id is not None
+            else None
+        )
+        session_id = resolve_session_id(
+            session_mode=session_mode,
+            requested_session_id=validated_requested_session_id,
+            known_server_instance_id=known_server_instance_id,
+            server_instance_id=server_instance_id,
+            requested_session_exists=bool(
+                validated_requested_session_id
+                and history_store.session_exists(validated_requested_session_id)
+            ),
+        )
+    except ValueError as exc:
+        logger.warning("[%s] Rejected WebSocket session ID: %s", connection_id, exc)
+        await ws.close(code=1008, reason=str(exc))
+        return
 
     if requested_session_id and session_id == requested_session_id:
         session_kind = history_store.get_session_kind(session_id)

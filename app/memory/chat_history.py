@@ -16,6 +16,7 @@ from app.core.conversation import (
     SenderType,
     SessionKind,
 )
+from app.core.session_ids import validate_session_id
 
 
 logger = logging.getLogger("chat_history")
@@ -45,6 +46,7 @@ class ChatHistoryStore:
         self.local_assistant_name = local_assistant_name
 
     def ensure_session(self, session_id: str, kind: SessionKind | str = SessionKind.DIRECT) -> SessionKind:
+        session_id = validate_session_id(session_id)
         requested_kind = SessionKind(kind)
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
@@ -60,12 +62,14 @@ class ChatHistoryStore:
         return SessionKind(cursor.fetchone()["kind"])
 
     def get_session_kind(self, session_id: str) -> SessionKind:
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
         row = cursor.fetchone()
         return SessionKind(row["kind"]) if row is not None else SessionKind.DIRECT
 
     def session_exists(self, session_id: str) -> bool:
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -242,7 +246,7 @@ class ChatHistoryStore:
         content: str,
         attachments: list[Attachment],
     ) -> list[ImageAttachment]:
-        message_dir = self.uploads_root / session_id / str(message_id)
+        message_dir = self._session_upload_dir(session_id) / str(message_id)
         message_dir.mkdir(parents=True, exist_ok=True)
         stored_attachments: list[ImageAttachment] = []
 
@@ -434,6 +438,7 @@ class ChatHistoryStore:
         return hydrated_rows
 
     def search_past_conversations(self, query: str, current_session: str, limit: int = 4, max_distance: float = 0.65) -> list[str]:
+        current_session = validate_session_id(current_session)
         results = self.collection.query(
             query_texts=[query],
             n_results=limit,
@@ -473,6 +478,7 @@ class ChatHistoryStore:
         return filtered_docs
 
     def get_recent(self, session_id: str, limit: int = 10):
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -496,6 +502,7 @@ class ChatHistoryStore:
         return hydrated
 
     def count_messages(self, session_id: str) -> int:
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) AS message_count FROM chat_history
@@ -505,6 +512,7 @@ class ChatHistoryStore:
         return int(cursor.fetchone()["message_count"])
 
     def get_before(self, session_id: str, message_id: int, limit: int = 2):
+        session_id = validate_session_id(session_id)
         if limit <= 0:
             return []
         cursor = self.db.conn.cursor()
@@ -537,6 +545,7 @@ class ChatHistoryStore:
         limit: int = 32,
     ) -> list[dict]:
         """Return the latest authoritative row for each prior participant sender."""
+        session_id = validate_session_id(session_id)
         if limit <= 0:
             return []
         cursor = self.db.conn.cursor()
@@ -561,6 +570,7 @@ class ChatHistoryStore:
         return [dict(row) for row in cursor.fetchall()]
 
     def get_all(self, session_id: str):
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -575,6 +585,7 @@ class ChatHistoryStore:
         return self._rows_with_attachments(cursor.fetchall())
 
     def mark_turn_failed(self, session_id: str, user_message_id: int, message: str) -> int:
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -594,6 +605,7 @@ class ChatHistoryStore:
         return int(row["retry_attempts"])
 
     def resolve_turn_failure(self, session_id: str, user_message_id: int) -> None:
+        session_id = validate_session_id(session_id)
         self.db.conn.execute(
             """
             UPDATE chat_history SET retry_error = NULL
@@ -604,6 +616,7 @@ class ChatHistoryStore:
         self.db.conn.commit()
 
     def get_retryable_user_message(self, session_id: str, user_message_id: int):
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         cursor.execute(
             """
@@ -653,6 +666,7 @@ class ChatHistoryStore:
         return cursor.fetchall()
 
     def delete_session(self, session_id: str) -> int:
+        session_id = validate_session_id(session_id)
         cursor = self.db.conn.cursor()
         session_exists = self.session_exists(session_id)
         cursor.execute(
@@ -677,6 +691,14 @@ class ChatHistoryStore:
         self.db.conn.commit()
 
         self.collection.delete(where={"session_id": session_id})
-        shutil.rmtree(self.uploads_root / session_id, ignore_errors=True)
+        shutil.rmtree(self._session_upload_dir(session_id), ignore_errors=True)
 
         return deleted_count if deleted_count > 0 else int(session_exists)
+
+    def _session_upload_dir(self, session_id: str) -> Path:
+        session_id = validate_session_id(session_id)
+        upload_root = self.uploads_root.resolve()
+        session_dir = (upload_root / session_id).resolve()
+        if session_dir.parent != upload_root:
+            raise ValueError("Invalid session ID: attachment path escapes upload root")
+        return session_dir

@@ -154,6 +154,15 @@ class FakeApprovalWebSocket(FakeWebSocket):
         }
 
 
+class FakeHandshakeWebSocket:
+    def __init__(self, query_params):
+        self.query_params = query_params
+        self.close_payload = None
+
+    async def close(self, *, code, reason):
+        self.close_payload = {"code": code, "reason": reason}
+
+
 class InvalidSttAudioErrorTests(unittest.TestCase):
     def test_pyav_invalid_data_error_is_expected_stt_silence(self):
         invalid_data_error_type = type(
@@ -365,6 +374,37 @@ class ServerSessionTests(unittest.TestCase):
         )
 
         self.assertEqual(session_id, "session-a")
+
+    def test_resolve_session_id_rejects_unsafe_requested_ids(self):
+        unsafe_ids = (
+            "../outside",
+            "/tmp/outside",
+            r"..\outside",
+            ".",
+            "session with spaces",
+            "x" * 129,
+        )
+
+        for requested_session_id in unsafe_ids:
+            with self.subTest(requested_session_id=requested_session_id):
+                with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+                    server_module.resolve_session_id(
+                        session_mode="open",
+                        requested_session_id=requested_session_id,
+                        known_server_instance_id="server-1",
+                        server_instance_id="server-1",
+                    )
+
+    def test_websocket_rejects_unsafe_session_id_before_accepting(self):
+        ws = FakeHandshakeWebSocket({
+            "session_mode": "open",
+            "session_id": "../outside",
+        })
+
+        server_module.asyncio.run(server_module.websocket_endpoint(ws))
+
+        self.assertEqual(ws.close_payload["code"], 1008)
+        self.assertIn("Invalid session ID", ws.close_payload["reason"])
 
     def test_parse_user_message_supports_structured_reasoning_override(self):
         text, reasoning, instant_mode, attachments = server_module.parse_user_message(

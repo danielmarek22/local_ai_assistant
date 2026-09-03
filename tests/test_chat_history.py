@@ -175,6 +175,38 @@ class ChatHistoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.vector_store.episodic_collection.records, [])
 
+    def test_unsafe_session_id_cannot_escape_upload_root(self):
+        outside_dir = tempfile.TemporaryDirectory(dir=Path(self.temp_dir.name).parent)
+        self.addCleanup(outside_dir.cleanup)
+        outside_path = Path(outside_dir.name)
+        marker = outside_path / "keep.txt"
+        marker.write_text("keep")
+        unsafe_session_id = f"../{outside_path.name}"
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+            self.store.add(
+                unsafe_session_id,
+                "user",
+                "Do not persist this",
+                attachments=[attachment],
+            )
+
+        with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+            self.store.delete_session(unsafe_session_id)
+
+        self.assertEqual(marker.read_text(), "keep")
+        stored_count = self.db.conn.execute(
+            "SELECT COUNT(*) AS count FROM chat_sessions WHERE session_id = ?",
+            (unsafe_session_id,),
+        ).fetchone()["count"]
+        self.assertEqual(stored_count, 0)
+
     def test_additive_migration_and_legacy_sender_defaults(self):
         db_path = Path(self.temp_dir.name) / "legacy.db"
         connection = sqlite3.connect(db_path)
