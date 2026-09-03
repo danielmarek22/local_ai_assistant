@@ -270,6 +270,18 @@ class FakeInterleavedApprovalWebSocket(FakeWebSocket):
         }
 
 
+class FakeFrameWebSocket:
+    def __init__(self, message):
+        self.message = message
+        self.close_payload = None
+
+    async def receive(self):
+        return self.message
+
+    async def close(self, *, code, reason):
+        self.close_payload = {"code": code, "reason": reason}
+
+
 class FakeHandshakeWebSocket:
     def __init__(self, query_params):
         self.query_params = query_params
@@ -1028,6 +1040,33 @@ class ServerSessionTests(unittest.TestCase):
             server_module.asyncio.run(inbox.receive()),
             interleaved_messages[1],
         )
+
+    def test_websocket_inbox_accepts_frames_at_byte_limits(self):
+        for message, limits in (
+            ({"text": "é"}, {"max_text_bytes": 2}),
+            ({"bytes": b"12"}, {"max_binary_bytes": 2}),
+        ):
+            with self.subTest(message=message):
+                ws = FakeFrameWebSocket(message)
+                inbox = server_module.WebSocketMessageInbox(ws, **limits)
+                self.assertEqual(server_module.asyncio.run(inbox.receive()), message)
+                self.assertIsNone(ws.close_payload)
+
+    def test_websocket_inbox_closes_oversized_text_and_binary_frames(self):
+        for message, limits, expected_kind in (
+            ({"text": "éé"}, {"max_text_bytes": 3}, "Text"),
+            ({"bytes": b"123"}, {"max_binary_bytes": 2}, "Binary"),
+        ):
+            with self.subTest(message=message):
+                ws = FakeFrameWebSocket(message)
+                inbox = server_module.WebSocketMessageInbox(ws, **limits)
+                with self.assertRaisesRegex(
+                    server_module.WebSocketMessageTooLarge,
+                    f"{expected_kind} frame exceeds",
+                ):
+                    server_module.asyncio.run(inbox.receive())
+                self.assertEqual(ws.close_payload["code"], 1009)
+                self.assertIn("byte limit", ws.close_payload["reason"])
 
     def test_prepare_tts_text_removes_markdown_blocks_and_markers(self):
         text = (

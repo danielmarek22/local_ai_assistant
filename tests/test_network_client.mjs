@@ -42,6 +42,26 @@ test('session kind is sent on connection and restored from session init', () => 
 });
 
 
+test('oversized websocket closure reports the server reason before reconnecting', () => {
+    let notice = null;
+    let reconnectScheduled = false;
+    const client = new NetworkClient({
+        onUserNotice: (payload) => { notice = payload; },
+    });
+    client.scheduleReconnect = () => { reconnectScheduled = true; };
+    client.connect();
+
+    client.ws.onclose({ code: 1009, reason: 'Binary frame exceeds the limit' });
+
+    assert.deepEqual(notice, {
+        scope: 'last_user_message',
+        tone: 'warning',
+        message: 'Binary frame exceeds the limit',
+    });
+    assert.equal(reconnectScheduled, true);
+});
+
+
 test('relay payload contains only the accepted v1 fields', () => {
     const client = new NetworkClient({});
     client.ws = new FakeWebSocket('ws://localhost/ws');

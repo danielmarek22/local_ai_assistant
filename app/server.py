@@ -79,6 +79,8 @@ VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
 MAX_ATTACHMENTS_PER_TURN = 8
 MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_WEBSOCKET_TEXT_BYTES = 15 * 1024 * 1024
+MAX_WEBSOCKET_BINARY_BYTES = 10 * 1024 * 1024
 VOICE_INPUT_STT = "stt"
 VOICE_INPUT_NATIVE_AUDIO = "native_audio"
 _PYAV_INVALID_DATA_ERRNO = "1094995529"
@@ -550,23 +552,60 @@ async def _send_turn_error(ws: WebSocket, message: str) -> None:
         })
 
 
+class WebSocketMessageTooLarge(ValueError):
+    pass
+
+
 class WebSocketMessageInbox:
     """Own WebSocket reads and replay messages deferred by nested protocol waits."""
 
-    def __init__(self, websocket: WebSocket):
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        max_text_bytes: int = MAX_WEBSOCKET_TEXT_BYTES,
+        max_binary_bytes: int = MAX_WEBSOCKET_BINARY_BYTES,
+    ):
         self.websocket = websocket
+        self.max_text_bytes = max_text_bytes
+        self.max_binary_bytes = max_binary_bytes
         self._deferred: deque[dict[str, Any]] = deque()
 
     async def receive(self) -> dict[str, Any]:
         if self._deferred:
             return self._deferred.popleft()
-        return await self.websocket.receive()
+        return await self._receive_live()
 
     async def receive_live(self) -> dict[str, Any]:
-        return await self.websocket.receive()
+        return await self._receive_live()
 
     def defer(self, message: dict[str, Any]) -> None:
         self._deferred.append(message)
+
+    async def _receive_live(self) -> dict[str, Any]:
+        message = await self.websocket.receive()
+        try:
+            self._validate_size(message)
+        except WebSocketMessageTooLarge as exc:
+            with suppress(Exception):
+                await self.websocket.close(code=1009, reason=str(exc))
+            raise
+        return message
+
+    def _validate_size(self, message: dict[str, Any]) -> None:
+        text_payload = message.get("text")
+        if text_payload is not None:
+            text_bytes = len(text_payload.encode("utf-8"))
+            if text_bytes > self.max_text_bytes:
+                raise WebSocketMessageTooLarge(
+                    f"Text frame exceeds the {self.max_text_bytes}-byte limit"
+                )
+
+        binary_payload = message.get("bytes")
+        if binary_payload is not None and len(binary_payload) > self.max_binary_bytes:
+            raise WebSocketMessageTooLarge(
+                f"Binary frame exceeds the {self.max_binary_bytes}-byte limit"
+            )
 
 
 async def _request_tool_approval(
@@ -1916,6 +1955,9 @@ async def websocket_endpoint(ws: WebSocket):
                     "Sorry, something went wrong while processing that message. Please try again.",
                 )
                 assistant_state_tracker["state"] = AssistantState.IDLE
+
+    except WebSocketMessageTooLarge as exc:
+        logger.warning("[%s] Closed oversized WebSocket message: %s", connection_id, exc)
 
     except WebSocketDisconnect:
         logger.info(

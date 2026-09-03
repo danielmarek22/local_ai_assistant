@@ -54,6 +54,13 @@ export class NetworkClient {
                 if (this.ws !== socket) return;
                 if (this.isExplicitlyClosed) return;
 
+                if (event.code === 1009 && this.handlers.onUserNotice) {
+                    this.handlers.onUserNotice({
+                        scope: 'last_user_message',
+                        tone: 'warning',
+                        message: event.reason || 'That message was too large to process.',
+                    });
+                }
                 console.warn(`WS Closed (Code: ${event.code}). Reconnecting in ${CONFIG.SYSTEM.RECONNECT_INTERVAL_MS}ms...`);
                 this.scheduleReconnect();
             };
