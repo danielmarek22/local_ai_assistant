@@ -298,6 +298,11 @@ class FakeWebSocket:
         self.messages.append(json.loads(payload))
 
 
+class FailingSendWebSocket(FakeWebSocket):
+    async def send_text(self, payload: str):
+        raise RuntimeError("send failed")
+
+
 class FakeApprovalWebSocket(FakeWebSocket):
     def __init__(self, approved=True):
         super().__init__()
@@ -408,6 +413,32 @@ class ServerSessionTests(unittest.TestCase):
         session_b = next(session for session in sessions if session["session_id"] == "session-b")
         self.assertEqual(session_b["message_count"], 2)
         self.assertEqual(session_b["preview"], "Second chat")
+
+    def test_stream_failure_always_clears_active_turn_metadata(self):
+        hub = server_module.SessionConnectionHub()
+        ws = FailingSendWebSocket()
+        ws.app = types.SimpleNamespace(
+            state=types.SimpleNamespace(connection_hub=hub)
+        )
+        hub.register("session-a", "connection-a", ws)
+
+        async def async_events(_iterator):
+            yield server_module.AssistantThinkingEvent(text="thinking")
+
+        with patch.object(server_module, "run_generator", async_events):
+            with self.assertRaisesRegex(RuntimeError, "send failed"):
+                server_module.asyncio.run(server_module._stream_orchestrator_events(
+                    ws,
+                    self.fake_orchestrator,
+                    iter(()),
+                    "connection-a",
+                    0,
+                    {"state": "idle"},
+                ))
+
+        connection = hub._connections["connection-a"]
+        self.assertIsNone(connection.turn_id)
+        self.assertIsNone(connection.turn_origin)
 
     def test_list_sessions_excludes_repeatedly_created_empty_sessions(self):
         for index in range(3):

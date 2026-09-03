@@ -835,6 +835,31 @@ async def _stream_orchestrator_events(
     turn_id = uuid.uuid4().hex
     if hub is not None:
         hub.set_turn(connection_id, turn_id, "user")
+    try:
+        await _forward_orchestrator_events(
+            ws,
+            orchestrator,
+            event_iterator,
+            connection_id,
+            original_attachment_count,
+            state_tracker,
+            application=application,
+        )
+    finally:
+        if hub is not None:
+            hub.set_turn(connection_id, None, None)
+
+
+async def _forward_orchestrator_events(
+    ws: WebSocket,
+    orchestrator,
+    event_iterator: Iterator[Any],
+    connection_id: str,
+    original_attachment_count: int,
+    state_tracker: dict[str, str],
+    *,
+    application: FastAPI,
+) -> None:
     text_buffer = ""
     thinking_filter = ThinkingBlockFilter()
     pending_chunks: list[str] = []
@@ -1021,9 +1046,6 @@ async def _stream_orchestrator_events(
                 })
 
                 logger.info("[%s] Assistant turn completed", connection_id)
-
-    if hub is not None:
-        hub.set_turn(connection_id, None, None)
 
 
 async def _autonomy_output_sink(
