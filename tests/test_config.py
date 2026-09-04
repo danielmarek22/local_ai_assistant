@@ -225,6 +225,60 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
                 self._load(payload)
 
+    def test_logging_contract_normalizes_levels_and_preserves_paths(self):
+        config = self._load({
+            "logging": {
+                "level": " warning ",
+                "console_level": "warn",
+                "file_level": "error",
+                "dir": " runtime-logs ",
+                "file_name": "astra.log",
+                "trace_level": "fatal",
+                "trace_file_name": "astra-trace.log",
+            }
+        })
+
+        self.assertEqual(config.logging["level"], "WARNING")
+        self.assertEqual(config.logging["console_level"], "WARNING")
+        self.assertEqual(config.logging["file_level"], "ERROR")
+        self.assertEqual(config.logging["trace_level"], "CRITICAL")
+        self.assertEqual(config.logging["dir"], "runtime-logs")
+        self.assertEqual(config.logging["file_name"], "astra.log")
+
+    def test_logging_fields_types_and_ranges_are_strict(self):
+        invalid = (
+            ({"logging": {"console_level": 20}}, "logging.console_level"),
+            ({"logging": {"level": "verbose"}}, "logging.level"),
+            ({"logging": {"trace_enabled": "false"}}, "logging.trace_enabled"),
+            ({"logging": {"max_bytes": 0}}, "logging.max_bytes"),
+            ({"logging": {"backup_count": -1}}, "logging.backup_count"),
+            ({"logging": {"trace_max_bytes": True}}, "logging.trace_max_bytes"),
+            ({"logging": {"typo": True}}, "logging.typo"),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_logging_file_names_cannot_escape_the_log_directory(self):
+        invalid = (
+            ({"logging": {"file_name": "../assistant.log"}}, "plain file name"),
+            ({"logging": {"trace_file_name": "nested/trace.log"}}, "plain file name"),
+            ({"logging": {"file_name": " "}}, "must not be empty"),
+            ({"logging": {"dir": " "}}, "logging.dir must not be empty"),
+            (
+                {
+                    "logging": {
+                        "file_name": "same.log",
+                        "trace_file_name": "same.log",
+                    }
+                },
+                "must be different",
+            ),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
     def test_belief_timezone_must_be_valid(self):
         with self.assertRaisesRegex(ValueError, "valid IANA timezone"):
             self._load({"beliefs": {"timezone": "Mars/Olympus"}})

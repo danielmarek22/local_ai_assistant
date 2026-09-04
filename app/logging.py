@@ -309,17 +309,13 @@ def setup_logging_from_config(config: dict | None = None) -> None:
         file_level=config.get("file_level", logging.INFO),
         log_dir=config.get("dir", "logs"),
         file_name=config.get("file_name", "assistant.log"),
-        max_bytes=int(config.get("max_bytes", 10_000_000)),
-        backup_count=int(config.get("backup_count", 5)),
-        trace_enabled=bool(config.get("trace_enabled", True)),
+        max_bytes=config.get("max_bytes", 10_000_000),
+        backup_count=config.get("backup_count", 5),
+        trace_enabled=config.get("trace_enabled", True),
         trace_level=config.get("trace_level", logging.DEBUG),
         trace_file_name=config.get("trace_file_name", "trace.log"),
-        trace_max_bytes=(
-            int(config["trace_max_bytes"]) if config.get("trace_max_bytes") is not None else None
-        ),
-        trace_backup_count=(
-            int(config["trace_backup_count"]) if config.get("trace_backup_count") is not None else None
-        ),
+        trace_max_bytes=config.get("trace_max_bytes"),
+        trace_backup_count=config.get("trace_backup_count"),
     )
 
 

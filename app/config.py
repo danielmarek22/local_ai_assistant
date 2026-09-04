@@ -335,6 +335,68 @@ class _STTConfig(_StrictConfigModel):
         return value
 
 
+_LOG_LEVEL_ALIASES = {
+    "WARN": "WARNING",
+    "FATAL": "CRITICAL",
+}
+_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+
+
+class _LoggingConfig(_StrictConfigModel):
+    level: str = "INFO"
+    console_level: str = "INFO"
+    file_level: str = "INFO"
+    dir: str = "logs"
+    file_name: str = "assistant.log"
+    max_bytes: int = Field(default=10_000_000, gt=0, le=10_000_000_000)
+    backup_count: int = Field(default=5, ge=0, le=1000)
+    trace_enabled: bool = True
+    trace_level: str = "DEBUG"
+    trace_file_name: str = "trace.log"
+    trace_max_bytes: int = Field(default=10_000_000, gt=0, le=10_000_000_000)
+    trace_backup_count: int = Field(default=5, ge=0, le=1000)
+
+    @field_validator("level", "console_level", "file_level", "trace_level")
+    @classmethod
+    def validate_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        normalized = _LOG_LEVEL_ALIASES.get(normalized, normalized)
+        if normalized not in _LOG_LEVELS:
+            raise ValueError(
+                "must be one of: CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET"
+            )
+        return normalized
+
+    @field_validator("dir")
+    @classmethod
+    def validate_log_dir(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="logging.dir")
+        if "\x00" in value or len(value) > 4096:
+            raise ValueError("logging.dir must be a valid path of at most 4096 characters")
+        return value
+
+    @field_validator("file_name", "trace_file_name")
+    @classmethod
+    def validate_file_name(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="logging file name")
+        if (
+            value in {".", ".."}
+            or Path(value).name != value
+            or any(ord(character) < 32 for character in value)
+            or len(value) > 255
+        ):
+            raise ValueError("must be a plain file name without directories")
+        return value
+
+    @model_validator(mode="after")
+    def validate_distinct_files(self):
+        if self.trace_enabled and self.file_name == self.trace_file_name:
+            raise ValueError(
+                "logging.file_name and logging.trace_file_name must be different"
+            )
+        return self
+
+
 class _OrchestratorConfig(_StrictConfigModel):
     summary_trigger: int = Field(default=10, gt=0)
     generation_deadline_s: float = Field(default=600.0, gt=0)
@@ -417,6 +479,7 @@ class _RuntimeConfigSections(_StrictConfigModel):
     local_human: _LocalHumanConfig
     tts: _TTSConfig
     stt: _STTConfig
+    logging: _LoggingConfig
     orchestrator: _OrchestratorConfig
     context: _ContextConfig
     beliefs: _BeliefsConfig
@@ -485,23 +548,7 @@ class Config:
         self.voice_input = self.raw.get("voice_input", {})
 
         # Logging
-        self.logging = self.raw.get(
-            "logging",
-            {
-                "level": "INFO",
-                "console_level": "INFO",
-                "file_level": "INFO",
-                "dir": "logs",
-                "file_name": "assistant.log",
-                "max_bytes": 10_000_000,
-                "backup_count": 5,
-                "trace_enabled": True,
-                "trace_level": "DEBUG",
-                "trace_file_name": "trace.log",
-                "trace_max_bytes": 10_000_000,
-                "trace_backup_count": 5,
-            },
-        )
+        self.logging = self.raw.get("logging", {})
 
         runtime_sections = {
             "llm": self.llm,
@@ -509,6 +556,7 @@ class Config:
             "local_human": self.local_human,
             "tts": self.tts,
             "stt": self.stt,
+            "logging": self.logging,
             "orchestrator": self.orchestrator,
             "context": self.context,
             "beliefs": self.beliefs,
