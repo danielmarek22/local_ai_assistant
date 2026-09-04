@@ -66,6 +66,10 @@ Tests currently focus on deterministic core behavior that can be validated witho
 - `test_http_retries.py`
   - LLM retry behavior
   - Web search retry behavior
+
+- `test_image_fallback.py`
+  - Image-capability error classification and retry selection
+  - Ordered, non-mutating fallback message generation
   - Thinking-mode handling for Ollama
 
 - `test_sentence_splitter.py`
