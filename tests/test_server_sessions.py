@@ -138,6 +138,7 @@ class ServerLifecycleTests(unittest.TestCase):
             tts={"engine": "fake"},
             stt={"enabled": True},
             voice_input={"path": "stt"},
+            vision_watchdog={},
             autonomy={"approval_timeout_s": 10},
         )
 

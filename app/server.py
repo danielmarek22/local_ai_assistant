@@ -1164,7 +1164,7 @@ async def _startup_application(
         thread_name_prefix="memory-reflection",
     )
     application.state.memory_reflection_future = None
-    vision_config = settings.raw.get("vision_watchdog", {})
+    vision_config = settings.vision_watchdog
     application.state.vision_watchdog = VisionWatchdog(
         model=str(vision_config.get("model", "HuggingFaceTB/SmolVLM-256M-Instruct")),
         device=str(vision_config.get("device", "auto")),

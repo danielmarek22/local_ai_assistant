@@ -8,6 +8,44 @@ from app.config import Config
 
 
 class ConfigTests(unittest.TestCase):
+    def _load(self, payload):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+            yaml.safe_dump(payload, config_file)
+            config_file.flush()
+            return Config(config_file.name)
+
+    def test_document_root_and_sections_must_be_mappings(self):
+        for payload, expected in (
+            (["not", "a", "mapping"], "document root must be a mapping"),
+            ({"context": []}, "context must be a mapping"),
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_unknown_top_level_and_runtime_fields_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported top-level.*contex"):
+            self._load({"contex": {"history_limit": 5}})
+        with self.assertRaisesRegex(ValueError, "context.typo.*extra_forbidden"):
+            self._load({"context": {"typo": 5}})
+        with self.assertRaisesRegex(ValueError, "voice_input.typo.*extra_forbidden"):
+            self._load({"voice_input": {"typo": True}})
+
+    def test_runtime_scalar_types_and_bounds_are_strict(self):
+        invalid = (
+            ({"autonomy": {"enabled": "false"}}, "autonomy.enabled"),
+            ({"context": {"history_limit": 0}}, "context.history_limit"),
+            ({"orchestrator": {"recovery_num_predict": True}}, "recovery_num_predict"),
+            ({"voice_input": {"path": "native"}}, "voice_input.path"),
+            ({"vision_watchdog": {"max_new_tokens": -1}}, "max_new_tokens"),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_belief_timezone_must_be_valid(self):
+        with self.assertRaisesRegex(ValueError, "valid IANA timezone"):
+            self._load({"beliefs": {"timezone": "Mars/Olympus"}})
+
     def test_local_human_has_stable_defaults(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
             yaml.safe_dump({}, config_file)
