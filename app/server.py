@@ -25,6 +25,16 @@ from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
 from app.core.session_ids import SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN, validate_session_id
+from app.services.websocket_protocol import (
+    RelayMessageFrame,
+    RetryMessageFrame,
+    ToolApprovalResponseFrame,
+    UserConfigFrame,
+    UserMessageFrame,
+    VisionFrame,
+    decode_client_frame,
+    validate_client_frame,
+)
 from app.core.events import (
     AssistantSpeechEvent,
     UserMessageAcceptedEvent,
@@ -76,9 +86,7 @@ _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
 TOOL_APPROVAL_TIMEOUT_SECONDS = 300.0
-BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
 VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
-VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
 MAX_ATTACHMENTS_PER_TURN = 8
 MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_WEBSOCKET_TEXT_BYTES = 15 * 1024 * 1024
@@ -320,102 +328,63 @@ def parse_user_message(
     max_attachment_bytes: int = MAX_IMAGE_ATTACHMENT_BYTES,
     max_total_attachment_bytes: int = MAX_TOTAL_ATTACHMENT_BYTES,
 ) -> tuple[str, bool | None, bool, list[Attachment]]:
-    try:
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError:
+    frame = decode_client_frame(raw_text)
+    if frame is None:
         return raw_text, None, False, []
+    if not isinstance(frame, UserMessageFrame):
+        raise ValueError(f"Expected user_message frame, received {frame.type}")
 
-    if not isinstance(payload, dict):
-        return raw_text, None, False, []
-
-    if payload.get("type") != "user_message":
-        return raw_text, None, False, []
-
-    forbidden_fields = {
-        "role", "sender_id", "sender_display_name", "sender_type", "input_source",
-        "target", "system", "tool", "tool_name", "tool_calls",
-    }
-    supplied_forbidden = sorted(forbidden_fields.intersection(payload))
-    if supplied_forbidden:
+    text = frame.text
+    if len(frame.attachments) > max_attachment_count:
         raise ValueError(
-            "User message contains server-controlled fields: " + ", ".join(supplied_forbidden)
+            f"A message may include at most {max_attachment_count} attachments"
         )
-
-    text = payload.get("text")
-    if not isinstance(text, str):
-        raise ValueError("User message payload is missing text")
-
-    attachments_payload = payload.get("attachments")
-    if attachments_payload is None:
-        attachments: list[Attachment] = []
-    elif isinstance(attachments_payload, list):
-        if len(attachments_payload) > max_attachment_count:
-            raise ValueError(
-                f"A message may include at most {max_attachment_count} attachments"
-            )
-        attachments = [
-            attachment_from_payload(item, max_bytes=max_attachment_bytes)
-            for item in attachments_payload
-        ]
-        _validate_attachment_batch(
-            attachments,
-            max_count=max_attachment_count,
-            max_total_bytes=max_total_attachment_bytes,
-        )
-    else:
-        raise ValueError("User message attachments must be a list")
+    attachments = [
+        attachment_from_payload(item, max_bytes=max_attachment_bytes)
+        for item in frame.attachments
+    ]
+    _validate_attachment_batch(
+        attachments,
+        max_count=max_attachment_count,
+        max_total_bytes=max_total_attachment_bytes,
+    )
 
     if not text.strip() and not attachments:
         raise ValueError("User message must include text or at least one image attachment")
 
-    reasoning = payload.get("reasoning")
-    if reasoning is None:
-        reasoning_override = None
-    elif isinstance(reasoning, bool):
-        reasoning_override = reasoning
-    else:
-        raise ValueError("User message reasoning flag must be boolean")
-
-    instant_mode = payload.get("instant_mode", False)
-    if not isinstance(instant_mode, bool):
-        raise ValueError("User message instant_mode flag must be boolean")
-
-    return text, reasoning_override, instant_mode, attachments
+    return text, frame.reasoning, frame.instant_mode, attachments
 
 
-def parse_retry_message(payload: dict) -> tuple[int, bool | None, bool]:
-    if payload.get("type") != "retry_message":
-        raise ValueError("Invalid retry message type")
-    allowed_fields = {"type", "message_id", "reasoning", "instant_mode"}
-    unexpected = sorted(set(payload) - allowed_fields)
-    if unexpected:
-        raise ValueError("Retry message contains unsupported fields: " + ", ".join(unexpected))
-    message_id = payload.get("message_id")
-    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
-        raise ValueError("Retry message ID must be a positive integer")
-    reasoning = payload.get("reasoning")
-    if reasoning is not None and not isinstance(reasoning, bool):
-        raise ValueError("Retry reasoning flag must be boolean or null")
-    instant_mode = payload.get("instant_mode", False)
-    if not isinstance(instant_mode, bool):
-        raise ValueError("Retry instant_mode flag must be boolean")
-    return message_id, reasoning, instant_mode
+def parse_retry_message(
+    payload: dict | RetryMessageFrame,
+) -> tuple[int, bool | None, bool]:
+    frame = (
+        payload
+        if isinstance(payload, RetryMessageFrame)
+        else validate_client_frame(payload)
+    )
+    if not isinstance(frame, RetryMessageFrame):
+        raise ValueError(f"Expected retry_message frame, received {frame.type}")
+    return frame.message_id, frame.reasoning, frame.instant_mode
 
 
-def parse_relay_message(payload: dict, session_kind: SessionKind | str):
+def parse_relay_message(
+    payload: dict | RelayMessageFrame,
+    session_kind: SessionKind | str,
+):
     if SessionKind(session_kind) != SessionKind.MANUAL_GROUP:
         raise ValueError("Relay messages are only allowed in manual_group sessions")
-    allowed_fields = {"type", "sender_display_name", "sender_type", "text"}
-    unexpected = sorted(set(payload) - allowed_fields)
-    if unexpected:
-        raise ValueError("Relay message contains unsupported fields: " + ", ".join(unexpected))
-    if payload.get("type") != "relay_message":
-        raise ValueError("Invalid relay message type")
-    text = payload.get("text")
-    if not isinstance(text, str) or not text.strip():
+    frame = (
+        payload
+        if isinstance(payload, RelayMessageFrame)
+        else validate_client_frame(payload)
+    )
+    if not isinstance(frame, RelayMessageFrame):
+        raise ValueError(f"Expected relay_message frame, received {frame.type}")
+    if not frame.text.strip():
         raise ValueError("Relay message text must not be empty")
-    sender = relay_sender(payload.get("sender_type"), payload.get("sender_display_name"))
-    return text, sender
+    sender = relay_sender(frame.sender_type, frame.sender_display_name)
+    return frame.text, sender
 
 
 @dataclass
@@ -651,13 +620,27 @@ async def _request_tool_approval(
         text_payload = raw_message.get("text")
         if text_payload is not None:
             try:
-                candidate = json.loads(text_payload)
-            except json.JSONDecodeError:
+                candidate = decode_client_frame(text_payload)
+            except ValueError:
+                try:
+                    malformed = json.loads(text_payload)
+                except json.JSONDecodeError:
+                    malformed = None
+                if (
+                    isinstance(malformed, dict)
+                    and malformed.get("type") == "tool_approval_response"
+                    and malformed.get("approval_id") == approval_id
+                ):
+                    logger.warning(
+                        "[%s] Denying malformed approval response for %s",
+                        connection_id,
+                        tool_name,
+                    )
+                    return False
                 candidate = None
             if (
-                isinstance(candidate, dict)
-                and candidate.get("type") == "tool_approval_response"
-                and candidate.get("approval_id") == approval_id
+                isinstance(candidate, ToolApprovalResponseFrame)
+                and candidate.approval_id == approval_id
             ):
                 payload = candidate
 
@@ -1642,13 +1625,13 @@ async def websocket_endpoint(ws: WebSocket):
             logger.exception("[%s] Tool approval failed; denying request", connection_id)
             return False
 
-    async def handle_vision_payload(payload: dict) -> Attachment | None:
+    async def handle_vision_payload(payload: VisionFrame) -> Attachment | None:
         nonlocal last_screen_detection
         nonlocal last_webcam_detection
         nonlocal last_screen_hash
         nonlocal last_webcam_hash
 
-        frame_type = payload.get("type")
+        frame_type = payload.type
         if frame_type == "screen_frame":
             key = PerceptionKey.SCREEN_SCENE
             source = "screen"
@@ -1661,9 +1644,7 @@ async def websocket_endpoint(ws: WebSocket):
         else:
             return None
 
-        attachment_payload = payload.get("attachment")
-        if not isinstance(attachment_payload, dict):
-            raise ValueError(f"{frame_type} payload is missing attachment")
+        attachment_payload = payload.attachment
 
         attachment = attachment_from_payload(attachment_payload)
         base64_data = getattr(attachment, "base64_data", None)
@@ -1889,23 +1870,16 @@ async def websocket_endpoint(ws: WebSocket):
                 # ── TEXT PATH ─────────────────────────────────────────────
                 else:
                     text_payload = raw_message["text"]
-                    try:
-                        parsed_payload = json.loads(text_payload)
-                    except json.JSONDecodeError:
-                        parsed_payload = None
+                    client_frame = decode_client_frame(text_payload)
 
                     if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "tool_approval_response"
-                        and hub.resolve_approval(connection_id, parsed_payload)
+                        isinstance(client_frame, ToolApprovalResponseFrame)
+                        and hub.resolve_approval(connection_id, client_frame)
                     ):
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") in VISION_FRAME_TYPES
-                    ):
-                        attachment = await handle_vision_payload(parsed_payload)
+                    if isinstance(client_frame, VisionFrame):
+                        attachment = await handle_vision_payload(client_frame)
                         if attachment is not None:
                             pending_voice_attachments.append(attachment)
                             pending_voice_attachments = _dedupe_attachments_by_hash(
@@ -1914,38 +1888,20 @@ async def websocket_endpoint(ws: WebSocket):
                             _validate_attachment_batch(pending_voice_attachments)
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "user_config"
-                    ):
-                        instant_value = parsed_payload.get("instant_mode")
-                        if not isinstance(instant_value, bool):
-                            raise ValueError("User config instant_mode flag must be boolean")
-                        connection_instant_mode = instant_value
-                        if "reasoning" in parsed_payload:
-                            reasoning_value = parsed_payload.get("reasoning")
-                            if reasoning_value is None:
-                                connection_reasoning_override = None
-                            elif isinstance(reasoning_value, bool):
-                                connection_reasoning_override = reasoning_value
-                            else:
-                                raise ValueError("User config reasoning flag must be boolean or null")
+                    if isinstance(client_frame, UserConfigFrame):
+                        connection_instant_mode = client_frame.instant_mode
+                        if "reasoning" in client_frame.model_fields_set:
+                            connection_reasoning_override = client_frame.reasoning
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "relay_message"
-                    ):
-                        user_text, turn_sender = parse_relay_message(parsed_payload, session_kind)
+                    if isinstance(client_frame, RelayMessageFrame):
+                        user_text, turn_sender = parse_relay_message(client_frame, session_kind)
                         reasoning_override = connection_reasoning_override
                         instant_mode = connection_instant_mode
                         attachments = []
-                    elif (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "retry_message"
-                    ):
+                    elif isinstance(client_frame, RetryMessageFrame):
                         existing_user_message_id, reasoning_override, instant_mode = (
-                            parse_retry_message(parsed_payload)
+                            parse_retry_message(client_frame)
                         )
                         retry_row = orchestrator.history.get_retryable_user_message(
                             session_id, existing_user_message_id

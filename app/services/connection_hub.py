@@ -7,9 +7,15 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from app.services.websocket_protocol import ToolApprovalResponseFrame
 
-def parse_approval_decision(payload: Mapping[str, object]) -> bool:
+
+def parse_approval_decision(
+    payload: Mapping[str, object] | ToolApprovalResponseFrame,
+) -> bool:
     """Return a decision only when the wire value is a JSON Boolean."""
+    if isinstance(payload, ToolApprovalResponseFrame):
+        return payload.approved
     approved = payload.get("approved")
     if type(approved) is not bool:
         raise ValueError("Approval response field 'approved' must be a Boolean")
@@ -113,8 +119,16 @@ class SessionConnectionHub:
         finally:
             self._approvals.pop(approval_id, None)
 
-    def resolve_approval(self, connection_id: str, payload: dict) -> bool:
-        approval_id = payload.get("approval_id")
+    def resolve_approval(
+        self,
+        connection_id: str,
+        payload: Mapping[str, object] | ToolApprovalResponseFrame,
+    ) -> bool:
+        approval_id = (
+            payload.approval_id
+            if isinstance(payload, ToolApprovalResponseFrame)
+            else payload.get("approval_id")
+        )
         pending = self._approvals.get(str(approval_id))
         if pending is None or pending[0] != connection_id:
             return False
