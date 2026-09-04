@@ -30,6 +30,8 @@ Support utilities and long-lived helper services used by the orchestrator.
 - `tool_executor.py` adds assistant events and tracing around validated integration calls.
 - `websocket_connection.py` owns bounded frame reads, deferred-message replay, outbound
   frame encoding, and approval waits for each WebSocket connection.
+- `perception_frames.py` owns per-connection screen/webcam frame state, watchdog
+  evaluation, autonomous vision events, and voice-adjacent image validation.
 
 Some files in this directory are classic "services", while others are prompt and
 execution helpers. In practice, this folder currently groups assistant support

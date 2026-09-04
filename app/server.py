@@ -4,7 +4,6 @@ from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, R
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Callable, Iterator, Any
-import hashlib
 import logging
 import re
 import subprocess
@@ -48,16 +47,15 @@ from app.perception.attachments import (
     MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
     AudioAttachment,
-    ImageAttachment,
     attachment_from_payload,
 )
-from app.integrations import EventAttachmentRef, EventId, IntegrationEvent
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
 from app.services.sentence_splitter import split_sentences
 from app.services.memory_reflector import MemoryReflector
 from app.services.vision_watchdog import VisionWatchdog
+from app.services.perception_frames import PerceptionFrameController
 from app.services.connection_hub import SessionConnectionHub
 from app.services.websocket_connection import (
     TOOL_APPROVAL_TIMEOUT_SECONDS,
@@ -92,7 +90,6 @@ _SENTINEL = object()
 _TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
-VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
 MAX_ATTACHMENTS_PER_TURN = 8
 MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 VOICE_INPUT_STT = "stt"
@@ -611,28 +608,6 @@ def _dedupe_attachments_by_hash(attachments: list[Attachment]) -> list[Attachmen
         deduped.append(attachment)
 
     return deduped
-
-
-def _persist_event_attachment(event_id: str, attachment: ImageAttachment) -> EventAttachmentRef:
-    event_dir = STATIC_DIR / "uploads" / "events" / event_id
-    event_dir.mkdir(parents=True, exist_ok=True)
-    suffix = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-    }.get(attachment.mime_type, ".bin")
-    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(attachment.name).stem) or "attachment"
-    path = event_dir / f"{safe_stem}{suffix}"
-    payload = attachment.as_bytes()
-    path.write_bytes(payload)
-    return EventAttachmentRef(
-        name=attachment.name,
-        mime_type=attachment.mime_type,
-        storage_path=str(path),
-        sha256=attachment.sha256 or hashlib.sha256(payload).hexdigest(),
-        size_bytes=len(payload),
-    )
 
 
 async def _stream_orchestrator_events(
@@ -1429,10 +1404,12 @@ async def websocket_endpoint(ws: WebSocket):
     watchdog = getattr(runtime_app.state, "vision_watchdog", None)
     event_loop = asyncio.get_running_loop()
     assistant_state_tracker = {"state": AssistantState.IDLE}
-    last_screen_detection = 0.0
-    last_webcam_detection = 0.0
-    last_screen_hash: str | None = None
-    last_webcam_hash: str | None = None
+    perception_frames = PerceptionFrameController(
+        orchestrator=orchestrator,
+        watchdog=watchdog,
+        session_id=session_id,
+        connection_id=connection_id,
+    )
     pending_voice_attachments: list[Attachment] = []
     connection_instant_mode = False
     connection_reasoning_override: bool | None = None
@@ -1453,116 +1430,6 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception:
             logger.exception("[%s] Tool approval failed; denying request", connection_id)
             return False
-
-    async def handle_vision_payload(payload: VisionFrame) -> Attachment | None:
-        nonlocal last_screen_detection
-        nonlocal last_webcam_detection
-        nonlocal last_screen_hash
-        nonlocal last_webcam_hash
-
-        frame_type = payload.type
-        if frame_type == "screen_frame":
-            key = PerceptionKey.SCREEN_SCENE
-            source = "screen"
-        elif frame_type == "webcam_frame":
-            key = PerceptionKey.WEBCAM_SCENE
-            source = "webcam"
-        elif frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
-            key = None
-            source = "voice_attachment"
-        else:
-            return None
-
-        attachment_payload = payload.attachment
-
-        attachment = attachment_from_payload(attachment_payload)
-        base64_data = getattr(attachment, "base64_data", None)
-        image_hash = attachment.sha256
-        if image_hash is None:
-            raw_base64 = attachment_payload.get("base64_data") or attachment_payload.get("data") or ""
-            image_hash = hashlib.sha256(str(raw_base64).encode("utf-8")).hexdigest()
-
-        perception_payload = {
-            **attachment.to_perception_payload(),
-            "sha256": image_hash,
-            "source": source,
-        }
-        if base64_data:
-            perception_payload["base64_data"] = base64_data
-
-        if key is not None:
-            orchestrator.perception.update(
-                key,
-                perception_payload,
-            )
-
-        if frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
-            return attachment
-
-        if frame_type == "screen_frame":
-            if image_hash == last_screen_hash:
-                return None
-            last_screen_hash = image_hash
-            last_detection = last_screen_detection
-            evaluate = watchdog.evaluate_screen if watchdog else None
-        else:
-            if image_hash == last_webcam_hash:
-                return None
-            last_webcam_hash = image_hash
-            last_detection = last_webcam_detection
-            evaluate = watchdog.evaluate_webcam if watchdog else None
-
-        now = time.monotonic()
-        if now - last_detection < 5.0:
-            return None
-
-        if evaluate is None:
-            logger.debug("[%s] Vision watchdog unavailable; stored %s perception only", connection_id, source)
-            return None
-
-        if not base64_data:
-            return None
-
-        if frame_type == "screen_frame":
-            last_screen_detection = now
-        else:
-            last_webcam_detection = now
-
-        should_react = await evaluate(base64_data)
-        if not should_react:
-            return None
-
-        if frame_type == "screen_frame":
-            event_text = (
-                "The local screen watchdog detected a clear visual event in the "
-                "latest screenshot. Proactively help the user, briefly and concretely."
-            )
-        else:
-            event_text = (
-                "The local webcam watchdog detected that the user may need attention. "
-                "Proactively check in briefly and helpfully."
-            )
-
-        runtime = getattr(orchestrator, "autonomy_runtime", None)
-        if runtime is None:
-            logger.warning("[%s] Vision event ignored because autonomy is unavailable", connection_id)
-            return None
-        event_id = str(uuid.uuid4())
-        event_attachment = _persist_event_attachment(event_id, attachment)
-        await runtime.publish(IntegrationEvent(
-            event=EventId("vision", "attention_detected"),
-            event_id=event_id,
-            session_id=session_id,
-            payload={
-                "source": source,
-                "description": event_text,
-                "sha256": image_hash,
-            },
-            deduplication_key=f"{source}:{image_hash}",
-            attachments=(event_attachment,),
-        ))
-        logger.info("[%s] Vision watchdog published autonomous %s event", connection_id, source)
-        return None
 
     try:
         while True:
@@ -1708,7 +1575,7 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
 
                     if isinstance(client_frame, VisionFrame):
-                        attachment = await handle_vision_payload(client_frame)
+                        attachment = await perception_frames.handle(client_frame)
                         if attachment is not None:
                             pending_voice_attachments.append(attachment)
                             pending_voice_attachments = _dedupe_attachments_by_hash(
