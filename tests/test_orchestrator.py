@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.core.actions import Action, ActionType
 from app.core.assistant_state import AssistantState
 from app.core.events import (
     AssistantSpeechEvent,
@@ -18,7 +17,6 @@ from app.core.orchestrator import Orchestrator
 from app.core import orchestrator_factory
 from app.core.conversation import InputSource, SenderAttribution, SenderType, SessionKind
 from app.core.turn_input import InputModality
-from app.core.plan import Plan
 from app.integrations import (
     CapabilityId,
     EventId,
@@ -51,16 +49,6 @@ def consume_generator(gen):
             events.append(next(gen))
     except StopIteration as stop:
         return events, stop.value
-
-
-class FakePlanner:
-    def __init__(self, plan: Plan):
-        self.plan = plan
-        self.calls = []
-
-    def decide(self, user_text: str, perception: dict) -> Plan:
-        self.calls.append((user_text, perception))
-        return self.plan
 
 
 class FakeToolExecutor:
@@ -257,7 +245,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def _build_orchestrator(
         self,
-        plan: Plan,
         llm_chunks=None,
         summary_existing=None,
         summary_trigger=10,
@@ -280,7 +267,6 @@ class OrchestratorTests(unittest.TestCase):
         memory = FakeMemoryStore()
         summary_store = FakeSummaryStore(existing=summary_existing)
         summarizer = FakeSummarizer()
-        planner = FakePlanner(plan=plan)
         tool_executor = FakeToolExecutor(
             context="tool info",
             integration_context=integration_context,
@@ -311,18 +297,17 @@ class OrchestratorTests(unittest.TestCase):
             database=database,
             vector_store=vector_store,
         )
-        return orch, llm, history, memory, summary_store, summarizer, planner, tool_executor, context_builder
+        return orch, llm, history, memory, summary_store, summarizer, tool_executor, context_builder
 
     def test_close_releases_owned_storage_in_reverse_order_once(self):
         close_order = []
         database = SimpleNamespace(close=lambda: close_order.append("database"))
         vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             database=database,
             vector_store=vector_store,
         )
-        orchestrator, tool_executor = built[0], built[7]
+        orchestrator, tool_executor = built[0], built[6]
 
         orchestrator.close()
         orchestrator.close()
@@ -370,8 +355,7 @@ class OrchestratorTests(unittest.TestCase):
         )
 
     def test_turn_flow_injects_memory_into_context(self):
-        plan = Plan(actions=[Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}), Action(type=ActionType.RESPOND)])
-        orch, _llm, history, memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
+        orch, _llm, history, memory, _summary, _summarizer, tool_executor, context_builder = self._build_orchestrator(summary_trigger=999)
 
         list(orch.handle_user_input(self.SESSION_ID, "hello"))
 
@@ -387,21 +371,15 @@ class OrchestratorTests(unittest.TestCase):
         
         self.assertIsNone(tool_ctx)
 
-    def test_instant_mode_skips_planner_and_responds_directly(self):
-        plan = Plan(actions=[
-            Action(type=ActionType.WEB_SEARCH, payload={"query": "python"}),
-            Action(type=ActionType.RESPOND),
-        ])
-        orch, _llm, _history, _memory, _summary, _summarizer, planner, tool_executor, context_builder = self._build_orchestrator(plan=plan, summary_trigger=999)
+    def test_instant_mode_skips_tool_routing_and_responds_directly(self):
+        orch, _llm, _history, _memory, _summary, _summarizer, tool_executor, context_builder = self._build_orchestrator(summary_trigger=999)
 
         list(orch.handle_user_input(self.SESSION_ID, "hello", instant_mode=True))
 
-        self.assertEqual(planner.calls, [])
         self.assertEqual(tool_executor.calls, [])
         self.assertEqual(context_builder.calls[0]["integration_context"], None)
 
     def test_agent_mode_uses_late_routing_chat_instead_of_streaming(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             llm,
@@ -409,11 +387,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["streaming response"],
             summary_trigger=999,
             late_routing_enabled=True,
@@ -443,7 +419,6 @@ class OrchestratorTests(unittest.TestCase):
 
         preparer = Preparer()
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[{"content": "Done"}],
             summary_trigger=999,
@@ -460,7 +435,7 @@ class OrchestratorTests(unittest.TestCase):
         ))
 
         turn = preparer.turns[0]
-        forwarded = built[7].native_contexts[0]
+        forwarded = built[6].native_contexts[0]
         self.assertIs(forwarded["authoritative_turn"], turn)
         self.assertIs(forwarded["prepared_belief_turn"].authoritative_turn, turn)
         self.assertEqual(turn.session_id, "group-a")
@@ -486,7 +461,6 @@ class OrchestratorTests(unittest.TestCase):
 
         preparer = Preparer()
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             summary_trigger=999,
             belief_processing_mode="react_tool",
@@ -495,12 +469,11 @@ class OrchestratorTests(unittest.TestCase):
         list(built[0].handle_user_input("instant", "I am busy", instant_mode=True))
 
         self.assertEqual(preparer.calls, [])
-        self.assertEqual(built[7].native_contexts, [])
+        self.assertEqual(built[6].native_contexts, [])
         self.assertEqual(len(built[1].calls), 1)
 
     def test_late_routing_prompt_calibrates_memory_and_beliefs_without_forcing_calls(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[{"content": "No tool needed"}],
             summary_trigger=999,
@@ -518,9 +491,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("at most one native tool call per inference step", system_text)
 
     def test_integration_context_is_injected_in_direct_and_agent_modes(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         direct = self._build_orchestrator(
-            plan=plan,
             integration_context="connected state",
             summary_trigger=999,
         )
@@ -531,7 +502,6 @@ class OrchestratorTests(unittest.TestCase):
         )
 
         agent = self._build_orchestrator(
-            plan=plan,
             integration_context="connected state",
             late_routing_enabled=True,
             chat_responses=[{"content": "Ready"}],
@@ -543,7 +513,6 @@ class OrchestratorTests(unittest.TestCase):
     def test_orchestrator_collects_belief_context_for_normal_turn(self):
         provider = FakeBeliefContextProvider()
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
             belief_context_provider=provider,
         )
@@ -555,7 +524,6 @@ class OrchestratorTests(unittest.TestCase):
     def test_background_and_integration_turns_collect_belief_context(self):
         provider = FakeBeliefContextProvider()
         proactive = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
             belief_context_provider=provider,
         )
@@ -564,7 +532,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIsNone(proactive[-1].calls[0]["current_sender"])
 
         integration = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
             belief_context_provider=provider,
             chat_responses=[{"content": "done"}],
@@ -581,7 +548,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_group_internal_turns_never_use_local_human_attribution(self):
         proactive = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
         )
         proactive[2].session_kinds[self.SESSION_ID] = SessionKind.MANUAL_GROUP
@@ -593,7 +559,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertNotEqual(proactive_sender.sender_id, proactive[0].local_human_id)
 
         integration = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
             chat_responses=[{"content": "done"}],
         )
@@ -613,7 +578,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_handle_user_input_persists_requested_group_kind_before_first_message(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             summary_trigger=999,
         )
         list(built[0].handle_user_input(
@@ -629,7 +593,6 @@ class OrchestratorTests(unittest.TestCase):
     def test_late_routing_loop_uses_one_frozen_belief_snapshot(self):
         provider = FakeBeliefContextProvider()
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             summary_trigger=999,
             belief_context_provider=provider,
@@ -668,7 +631,6 @@ class OrchestratorTests(unittest.TestCase):
         for extraction_llm in cases:
             with self.subTest(error=extraction_llm.error):
                 built = self._build_orchestrator(
-                    plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
                     summary_trigger=999,
                 )
                 belief_db = Database(":memory:")
@@ -697,10 +659,8 @@ class OrchestratorTests(unittest.TestCase):
                 belief_db.conn.close()
 
     def test_agent_mode_executes_namespaced_tool_call_and_continues(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
-        orch, llm, _history, _memory, _summary, _summarizer, _planner, executor, _context = (
+        orch, llm, _history, _memory, _summary, _summarizer, executor, _context = (
             self._build_orchestrator(
-                plan=plan,
                 late_routing_enabled=True,
                 chat_responses=[
                     {
@@ -726,7 +686,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_successful_belief_continuation_preserves_enabled_reasoning(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             summary_trigger=999,
         )
@@ -752,7 +711,6 @@ class OrchestratorTests(unittest.TestCase):
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
                 built = self._build_orchestrator(
-                    plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
                     late_routing_enabled=True,
                     summary_trigger=999,
                 )
@@ -770,7 +728,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_unrelated_tool_then_belief_update_remain_sequential(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[
                 {"content": "", "tool_calls": [{"function": {
@@ -787,13 +744,12 @@ class OrchestratorTests(unittest.TestCase):
         list(built[0].handle_user_input("sequential", "run and remember"))
         self.assertEqual(len(built[1].chat_calls), 3)
         self.assertEqual(
-            [str(item[0].capability) for item in built[7].calls],
+            [str(item[0].capability) for item in built[6].calls],
             ["shell__execute", "beliefs__update"],
         )
 
     def test_step_exhaustion_keeps_forced_safe_final_response(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[
                 {"content": "", "tool_calls": [{"function": {
@@ -841,13 +797,12 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_belief_error_followed_by_empty_generation_forces_tool_free_response(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[self._belief_tool_response(), {"content": "   "}],
             llm_chunks=["Safe recovery"],
             summary_trigger=999,
         )
-        built[7].results = [ToolResult.error(
+        built[6].results = [ToolResult.error(
             "assertions.0.subject_reference must be copied exactly",
             diagnostics={
                 "category": "subject_reference_grounding",
@@ -858,7 +813,7 @@ class OrchestratorTests(unittest.TestCase):
         events = list(built[0].handle_user_input(
             "belief-empty", "my current activity is testing"
         ))
-        self.assertEqual(len(built[7].calls), 1)
+        self.assertEqual(len(built[6].calls), 1)
         self.assertEqual(len(built[1].chat_calls), 2)
         self.assertEqual(len(built[1].calls), 1)
         self.assertTrue(any(
@@ -875,7 +830,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_two_rejected_belief_attempts_force_response_and_bound_calls(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[
                 self._belief_tool_response("You"),
@@ -885,14 +839,14 @@ class OrchestratorTests(unittest.TestCase):
             llm_chunks=["Beliefs aside, let's continue."],
             summary_trigger=999,
         )
-        built[7].results = [
+        built[6].results = [
             ToolResult.error("first rejection"),
             ToolResult.error("second rejection"),
         ]
         events = list(built[0].handle_user_input(
             "belief-bound", "my current activity is testing"
         ))
-        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(built[6].calls), 2)
         self.assertEqual(len(built[1].chat_calls), 2)
         self.assertEqual(len(built[1].calls), 1)
         recovery_messages = built[1].calls[0][0]
@@ -928,7 +882,6 @@ class OrchestratorTests(unittest.TestCase):
                 raise TimeoutError("instant recovery timed out before first chunk")
 
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             summary_trigger=999,
         )
@@ -937,7 +890,7 @@ class OrchestratorTests(unittest.TestCase):
             self._belief_tool_response("my"),
         ])
         built[0].llm = client
-        built[7].results = [
+        built[6].results = [
             ToolResult.error("first rejection", diagnostics={
                 "category": "native_schema_validation",
                 "error_code": "NATIVE_SCHEMA_VALIDATION",
@@ -960,7 +913,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(failure.user_message_id, 1)
         assistant_rows = [row for row in built[2].records if row[1] == "assistant"]
         self.assertEqual(assistant_rows, [])
-        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(built[6].calls), 2)
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(len(client.stream_calls), 1)
         self.assertTrue(client.calls[0]["think_override"])
@@ -985,7 +938,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_late_routing_uses_extended_generation_budget(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             summary_trigger=999,
         )
@@ -999,7 +951,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_forced_recovery_empty_emits_retryable_failure_without_assistant_history(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[{"content": ""}],
             llm_chunks=["   "],
@@ -1016,7 +967,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_retry_reuses_existing_user_message_without_duplicate_history(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             llm_chunks=["Recovered answer"],
             summary_trigger=999,
         )
@@ -1043,7 +993,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_successful_corrected_belief_call_continues_to_final_response(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[
                 self._belief_tool_response("You"),
@@ -1052,14 +1001,14 @@ class OrchestratorTests(unittest.TestCase):
             ],
             summary_trigger=999,
         )
-        built[7].results = [
+        built[6].results = [
             ToolResult.error("use a grounded reference"),
             ToolResult.success("Belief changes applied successfully."),
         ]
         events = list(built[0].handle_user_input(
             "belief-corrected", "my current activity is testing"
         ))
-        self.assertEqual(len(built[7].calls), 2)
+        self.assertEqual(len(built[6].calls), 2)
         self.assertEqual(len(built[1].chat_calls), 3)
         self.assertEqual(
             [call[1] for call in built[1].chat_calls],
@@ -1074,7 +1023,6 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_initial_empty_no_tool_generation_forces_recovery(self):
         built = self._build_orchestrator(
-            plan=Plan(actions=[Action(type=ActionType.RESPOND)]),
             late_routing_enabled=True,
             chat_responses=[{"content": "\n\t"}],
             llm_chunks=["Recovered initial response"],
@@ -1091,10 +1039,8 @@ class OrchestratorTests(unittest.TestCase):
         ))
 
     def test_malformed_tool_name_becomes_observation_without_execution(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
-        orch, llm, history, _memory, _summary, _summarizer, _planner, executor, _context = (
+        orch, llm, history, _memory, _summary, _summarizer, executor, _context = (
             self._build_orchestrator(
-                plan=plan,
                 late_routing_enabled=True,
                 chat_responses=[
                     {
@@ -1119,7 +1065,6 @@ class OrchestratorTests(unittest.TestCase):
         ))
 
     def test_late_tool_execution_forwards_approval_callback(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1127,10 +1072,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary,
             _summarizer,
-            _planner,
             tool_executor,
             _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
         call = ToolCall(
             capability=CapabilityId("shell", "execute"),
             arguments={"command": "printf hi"},
@@ -1156,7 +1100,6 @@ class OrchestratorTests(unittest.TestCase):
         )
 
     def test_summarization_runs_when_threshold_reached(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1164,10 +1107,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             summary_store,
             summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=2)
+        ) = self._build_orchestrator(summary_trigger=2)
 
         history.recent_rows = [
             {"role": "user", "content": "u1"},
@@ -1181,7 +1123,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(summary_store.saved[0][1], "summary")
 
     def test_summarization_updates_when_summary_exists(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1189,11 +1130,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             summary_store,
             summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             summary_existing="already summarized",
             summary_trigger=1,
         )
@@ -1209,7 +1148,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(summary_store.saved), 1)
 
     def test_response_expression_tag_is_extracted_from_stream(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1217,11 +1155,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["[st", "ate:happy]Hello", " there"],
             summary_trigger=999,
         )
@@ -1239,7 +1175,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_can_switch_expressions_multiple_times(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1247,11 +1182,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=[
                 "[state:happy]That worked. ",
                 "[sta",
@@ -1277,7 +1210,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "That worked. Wait, even better. All set.")
 
     def test_response_expression_tag_allows_internal_spacing(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1285,11 +1217,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["[state ", ": surprised ]Hello there"],
             summary_trigger=999,
         )
@@ -1307,7 +1237,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there")
 
     def test_response_expression_alias_tag_is_supported(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1315,11 +1244,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["[expression:happy]Nice."],
             summary_trigger=999,
         )
@@ -1337,7 +1264,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Nice.")
 
     def test_thinking_tags_do_not_trigger_expression_or_animation_events(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1345,11 +1271,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=[
                 "<think>\n[state:happy][animation:greeting]secret\n</think>\n\n",
                 "Hello there.",
@@ -1375,7 +1299,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there.")
 
     def test_thinking_text_is_streamed_as_separate_events(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1383,11 +1306,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=[
                 "<thi",
                 "nk>\nStep 1",
@@ -1410,7 +1331,6 @@ class OrchestratorTests(unittest.TestCase):
 
     @patch("app.core.orchestrator.trace_event")
     def test_trace_logs_reasoning_response_alongside_visible_response(self, trace_event_mock):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1418,11 +1338,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=[
                 "<think>\nReasoning bit 1",
                 "\nReasoning bit 2\n</think>\n\n",
@@ -1443,7 +1361,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_response"], "\nReasoning bit 1\nReasoning bit 2\n")
 
     def test_response_animation_tag_is_extracted_from_stream(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1451,11 +1368,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["Hello [animation:greeting]there."],
             summary_trigger=999,
         )
@@ -1473,7 +1388,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hello there.")
 
     def test_response_animation_alias_tag_is_supported(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1481,11 +1395,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["[gesture:greeting]Hi."],
             summary_trigger=999,
         )
@@ -1503,7 +1415,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hi.")
 
     def test_response_bare_animation_name_in_brackets_is_supported(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1511,11 +1422,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["[greeting]Hi."],
             summary_trigger=999,
         )
@@ -1533,7 +1442,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hi.")
 
     def test_unknown_animation_tag_is_stripped_without_event(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1541,11 +1449,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["Hi [animation:unknown]there."],
             summary_trigger=999,
         )
@@ -1563,7 +1469,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[1][2], "Hi there.")
 
     def test_image_only_turn_updates_perception_history_and_context(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1571,10 +1476,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            planner,
             _tool_executor,
             context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         attachment = ImageAttachment(
             name="clipboard.png",
@@ -1597,7 +1501,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
 
     def test_turn_can_override_reasoning_for_single_message(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             llm,
@@ -1605,10 +1508,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         list(orch.handle_user_input(self.SESSION_ID, "hello", think_override=True))
 
@@ -1616,7 +1518,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIs(llm.calls[0][1], True)
 
     def test_proactive_event_is_hidden_system_context_not_user_history(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             llm,
@@ -1624,10 +1525,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            planner,
             _tool_executor,
             context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         attachment = ImageAttachment(
             name="screen.jpg",
@@ -1643,7 +1543,6 @@ class OrchestratorTests(unittest.TestCase):
             attachments=[attachment],
         ))
 
-        self.assertEqual(planner.calls, [])
         self.assertEqual(context_builder.calls[0]["user_text"], "")
         self.assertEqual(context_builder.calls[0]["attachments"], [attachment])
         self.assertEqual(len(llm.calls), 1)
@@ -1667,12 +1566,10 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(history.records[0][2], "Hello world")
 
     def test_integration_event_is_silent_and_does_not_create_user_history(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
-            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            orch, llm, history, _memory, _summary, _summarizer,
             _tool_executor, context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             summary_trigger=999,
             chat_responses=[{"content": "Internal event summary."}],
         )
@@ -1698,12 +1595,10 @@ class OrchestratorTests(unittest.TestCase):
         )
 
     def test_integration_event_can_request_text_notification(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
-            orch, llm, history, _memory, _summary, _summarizer, _planner,
+            orch, llm, history, _memory, _summary, _summarizer,
             _fake_executor, _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             summary_trigger=999,
             chat_responses=[
                 {
@@ -1737,7 +1632,6 @@ class OrchestratorTests(unittest.TestCase):
         )
 
     def test_turn_emits_idle_when_llm_stream_raises(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1745,11 +1639,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
         ) = self._build_orchestrator(
-            plan=plan,
             llm_chunks=["partial"],
             llm_error=RuntimeError("stream failed"),
             summary_trigger=999,
@@ -1765,7 +1657,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(failure.user_message_id, 1)
 
     def test_user_input_generator_close_does_not_yield_during_generatorexit(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1773,17 +1664,15 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         gen = orch.handle_user_input(self.SESSION_ID, "hello")
         self.assertEqual(next(gen).state, AssistantState.THINKING)
         gen.close()
 
     def test_proactive_generator_close_does_not_yield_during_generatorexit(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1791,17 +1680,15 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            _planner,
             _tool_executor,
             _context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         gen = orch.handle_proactive_event(self.SESSION_ID)
         self.assertEqual(next(gen).state, AssistantState.THINKING)
         gen.close()
 
     def test_shared_orchestrator_does_not_leak_session_between_turns(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
         (
             orch,
             _llm,
@@ -1809,10 +1696,9 @@ class OrchestratorTests(unittest.TestCase):
             _memory,
             _summary_store,
             _summarizer,
-            planner,
             _tool_executor,
             context_builder,
-        ) = self._build_orchestrator(plan=plan, summary_trigger=999)
+        ) = self._build_orchestrator(summary_trigger=999)
 
         list(orch.handle_user_input("session-a", "hello"))
         list(orch.handle_user_input("session-b", "hello"))
@@ -1833,8 +1719,7 @@ class OrchestratorTests(unittest.TestCase):
         )
 
     def test_normal_text_and_voice_use_authoritative_local_identity(self):
-        plan = Plan(actions=[Action(type=ActionType.RESPOND)])
-        built = self._build_orchestrator(plan=plan, summary_trigger=999)
+        built = self._build_orchestrator(summary_trigger=999)
         orch, history = built[0], built[2]
         orch.local_human_id = "person-1"
         orch.local_human_name = "Local Person"

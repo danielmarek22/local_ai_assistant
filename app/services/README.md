@@ -23,7 +23,7 @@ Support utilities and long-lived helper services used by the orchestrator.
   - session summary
   - recent chat history
 - `memory_retriever.py` combines semantic memory and episodic history retrieval into one reusable turn helper.
-- `memory_action_handler.py` applies structured memory writes from planner actions or the `memory__write` integration.
+- `memory_action_handler.py` applies structured memory writes from the `memory__write` integration.
 - `turn_finalizer.py` owns rolling-summary updates after a turn completes.
 - `stream_processor.py` lives under `app/core` because it is turn-stream parsing logic, but it serves the same “small helper around orchestration” role.
 - `image_summarizer.py` generates one concise factual summary per stored image so attachments can be found again through episodic vector search without resending every old image to the model.

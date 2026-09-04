@@ -29,7 +29,6 @@ _CONFIG_SECTIONS = {
     "local_human",
     "logging",
     "orchestrator",
-    "planner",
     "stt",
     "tools",
     "tts",
@@ -161,16 +160,6 @@ class Config:
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
         self.local_human = self._load_local_human_config(self.raw.get("local_human"))
-
-        # Planner
-        self.planner = self.raw.get(
-            "planner",
-            {
-                "mode": "rule",
-                "llm_enabled": False,
-                "timeout_ms": 4000,
-            },
-        )
 
         # Integrations and temporary legacy tool configuration
         self.tools = self.raw.get("tools", {})

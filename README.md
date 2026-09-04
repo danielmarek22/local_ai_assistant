@@ -14,9 +14,8 @@ The system is composed of several loosely-coupled subsystems:
 
 - **Core orchestration** – per-turn coordination, action routing, logging
 - **LLM interface** – model loading, prompting, and inference
-- **Planners** – decide *what* the assistant should do next
 - **Memory & storage** – conversation history, attachments, semantic memory, summaries, and persistence
-- **Tools & services** – external capabilities exposed to the planner
+- **Tools & services** – validated external capabilities exposed to the orchestrator
 - **UI & server** – user interaction layer
 
 Each major subsystem lives in its own directory under `app/` and is documented individually.
@@ -65,7 +64,7 @@ It is a research playground for:
 
 - Agent architectures
 - Memory policies
-- Planner / tool separation
+- Capability routing and tool isolation
 - Running LLMs efficiently on consumer hardware
 
 Expect iteration, forks, and refactors.
@@ -106,7 +105,7 @@ notes are available in the [documentation guide](docs/guides/documentation.md).
 
 ## Running Tests
 
-The project includes a unit test suite under `tests/` covering planner logic, context construction, orchestrator turn flow, image attachment persistence, session management, tool execution, and vector-backed memory behavior.  
+The project includes a unit test suite under `tests/` covering context construction, orchestrator turn flow, image attachment persistence, session management, tool execution, and vector-backed memory behavior.
 From the project root, run:
 
 ```bash

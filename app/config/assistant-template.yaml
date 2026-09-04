@@ -45,11 +45,6 @@ assistant:
       - surprised
       - neutral
 
-planner:
-  mode: llm   # options: rule | llm | hybrid
-  llm_enabled: true
-  timeout_ms: 4000
-  
 orchestrator:
   summary_trigger: 10
   # Slow local models may spend a significant part of this budget evaluating context.

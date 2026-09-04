@@ -34,6 +34,7 @@ Core orchestration logic of the assistant.
   belief correction and tool-free recovery disable thinking and use bounded budgets.
 - User and integration-event turns share a coordinator, so a local model is never used by overlapping turns.
 - Autonomous final text is journaled internally; only `runtime__notify` produces a visible notification.
-- The dormant planner remains available for future repurposing but is not part of the active turn path.
+- The roadmap's high-level planner will be designed around validated capabilities and
+  bounded observe-act-revise loops; no legacy turn planner sits on the active path.
 
 Think of this as the *spinal cord* of the system.

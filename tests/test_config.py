@@ -25,6 +25,8 @@ class ConfigTests(unittest.TestCase):
     def test_unknown_top_level_and_runtime_fields_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported top-level.*contex"):
             self._load({"contex": {"history_limit": 5}})
+        with self.assertRaisesRegex(ValueError, "unsupported top-level.*planner"):
+            self._load({"planner": {"mode": "rule"}})
         with self.assertRaisesRegex(ValueError, "context.typo.*extra_forbidden"):
             self._load({"context": {"typo": 5}})
         with self.assertRaisesRegex(ValueError, "voice_input.typo.*extra_forbidden"):
@@ -141,6 +143,7 @@ class ConfigTests(unittest.TestCase):
         template = yaml.safe_load(Path("app/config/assistant-template.yaml").read_text())
         self.assertEqual(template["beliefs"]["processing_mode"], "disabled")
         self.assertNotIn("extraction_enabled", template["beliefs"])
+        self.assertNotIn("planner", template)
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

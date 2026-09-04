@@ -18,7 +18,7 @@ Start with the narrowest row matching your goal. Paths are relative to the repos
 | The system prompt or assistant name | `assistant` | Loaded through `app/config.py` | `tests/test_config.py` |
 | Speech recognition | `stt` | `app/stt/factory.py`, `app/stt/whisper_engine.py` | Exercise a short microphone recording |
 | Astra's voice | `tts` | `app/tts/factory.py` and the selected engine | See [PocketTTS](../services/pocket-tts.md) |
-| Tool routing and execution | `planner`, `integrations` | `app/services/tool_executor.py`, `app/integrations/registry.py`, `app/core/orchestrator.py` | `tests/test_tool_executor.py`, `tests/test_integration_registry.py` |
+| Tool routing and execution | `integrations` | `app/services/tool_executor.py`, `app/integrations/registry.py`, `app/core/orchestrator.py` | `tests/test_tool_executor.py`, `tests/test_integration_registry.py` |
 | Web search | `integrations.web` | `app/tools/web_search.py`, `app/integrations/builtins.py` | `tests/test_builtin_integrations.py` |
 | Shell command behavior | `integrations.shell` | `app/tools/bash_execution.py` | `tests/test_bash_execution.py` |
 | Belief extraction or display | `beliefs` | `app/beliefs/`, `app/knowledge/` | `tests/test_beliefs.py`, `tests/test_belief_react.py`, `tests/test_knowledge.py` |

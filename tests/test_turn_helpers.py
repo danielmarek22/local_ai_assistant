@@ -1,6 +1,5 @@
 import unittest
 
-from app.core.actions import Action, ActionType
 from app.services.memory_action_handler import MemoryActionHandler
 from app.services.memory_retriever import MemoryRetriever
 
@@ -80,11 +79,9 @@ class MemoryActionHandlerTests(unittest.TestCase):
             ),
         )
 
-        handler.handle(
-            "session-1",
-            Action(type=ActionType.WRITE_MEMORY, payload={"content": "remember this"}),
-        )
+        applied = handler.handle_payload("session-1", {"content": "remember this"})
 
+        self.assertTrue(applied)
         self.assertEqual(memory.writes, [("remember this", "prefs", 3)])
 
     def test_handle_ignores_action_when_policy_returns_none(self):
@@ -94,11 +91,9 @@ class MemoryActionHandlerTests(unittest.TestCase):
             memory_policy=FakeMemoryPolicy(decision=None),
         )
 
-        handler.handle(
-            "session-1",
-            Action(type=ActionType.WRITE_MEMORY, payload={"content": "remember this"}),
-        )
+        applied = handler.handle_payload("session-1", {"content": "remember this"})
 
+        self.assertFalse(applied)
         self.assertEqual(memory.writes, [])
 
 

@@ -1,6 +1,5 @@
 import logging
 
-from app.core.actions import Action
 from app.logging import trace_event
 
 
@@ -11,9 +10,6 @@ class MemoryActionHandler:
     def __init__(self, memory_store, memory_policy):
         self.memory = memory_store
         self.memory_policy = memory_policy
-
-    def handle(self, session_id: str, action: Action) -> None:
-        self.handle_payload(session_id, action.payload or {})
 
     def handle_payload(self, session_id: str, payload: dict) -> bool:
         logger.debug("[%s] Processing memory action", session_id)
