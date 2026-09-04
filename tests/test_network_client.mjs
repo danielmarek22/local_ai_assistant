@@ -62,6 +62,20 @@ test('oversized websocket closure reports the server reason before reconnecting'
 });
 
 
+test('undeclared server frames are ignored', () => {
+    let state = null;
+    const client = new NetworkClient({ onState: (value) => { state = value; } });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'assistant_state_v2',
+        state: 'thinking',
+    }) });
+
+    assert.equal(state, null);
+});
+
+
 test('relay payload contains only the accepted v1 fields', () => {
     const client = new NetworkClient({});
     client.ws = new FakeWebSocket('ws://localhost/ws');

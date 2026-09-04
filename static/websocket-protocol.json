@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "client_frame_types": [
+    "relay_message",
+    "retry_message",
+    "screen_frame",
+    "tool_approval_response",
+    "user_attached_frame",
+    "user_config",
+    "user_message",
+    "webcam_frame"
+  ],
+  "server_frame_types": [
+    "assistant_animation",
+    "assistant_audio",
+    "assistant_chunk",
+    "assistant_end",
+    "assistant_expression",
+    "assistant_outfit",
+    "assistant_retryable_error",
+    "assistant_state",
+    "assistant_thinking_chunk",
+    "session_init",
+    "stt_silence",
+    "stt_transcript",
+    "tool_approval_request",
+    "user_message_accepted",
+    "user_notice"
+  ]
+}

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from app.services.websocket_protocol import ToolApprovalResponseFrame
+from app.services.websocket_protocol import ToolApprovalResponseFrame, encode_server_frame
 
 
 def parse_approval_decision(
@@ -71,7 +70,7 @@ class SessionConnectionHub:
     async def send_websocket(self, websocket, payload: dict) -> None:
         connection_id = self._by_websocket.get(id(websocket))
         if connection_id is None:
-            await websocket.send_text(json.dumps(payload))
+            await websocket.send_text(encode_server_frame(payload))
             return
         await self._send(self._connections[connection_id], payload)
 
@@ -149,4 +148,4 @@ class SessionConnectionHub:
             if connection.turn_origin:
                 payload.setdefault("origin", connection.turn_origin)
         async with connection.send_lock:
-            await connection.websocket.send_text(json.dumps(payload))
+            await connection.websocket.send_text(encode_server_frame(payload))

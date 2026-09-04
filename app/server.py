@@ -33,6 +33,7 @@ from app.services.websocket_protocol import (
     UserMessageFrame,
     VisionFrame,
     decode_client_frame,
+    encode_server_frame,
     validate_client_frame,
 )
 from app.core.events import (
@@ -497,7 +498,7 @@ async def _send_ws_payload(ws: WebSocket, payload: dict) -> None:
     if hub is not None:
         await hub.send_websocket(ws, payload)
     else:
-        await ws.send_text(json.dumps(payload))
+        await ws.send_text(encode_server_frame(payload))
 
 
 async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> None:

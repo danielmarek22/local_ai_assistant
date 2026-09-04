@@ -1,5 +1,36 @@
 import { CONFIG } from './config.js';
 
+export const CLIENT_FRAME_TYPES = Object.freeze([
+    'relay_message',
+    'retry_message',
+    'screen_frame',
+    'tool_approval_response',
+    'user_attached_frame',
+    'user_config',
+    'user_message',
+    'webcam_frame',
+]);
+
+export const SERVER_FRAME_TYPES = Object.freeze([
+    'assistant_animation',
+    'assistant_audio',
+    'assistant_chunk',
+    'assistant_end',
+    'assistant_expression',
+    'assistant_outfit',
+    'assistant_retryable_error',
+    'assistant_state',
+    'assistant_thinking_chunk',
+    'session_init',
+    'stt_silence',
+    'stt_transcript',
+    'tool_approval_request',
+    'user_message_accepted',
+    'user_notice',
+]);
+
+const SERVER_FRAME_TYPE_SET = new Set(SERVER_FRAME_TYPES);
+
 export function buildKnowledgeBeliefsUrl(filters = {}) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(filters)) {
@@ -74,6 +105,10 @@ export class NetworkClient {
             socket.onmessage = (event) => {
                 if (this.ws !== socket) return;
                 const data = JSON.parse(event.data);
+                if (!data || typeof data !== 'object' || !SERVER_FRAME_TYPE_SET.has(data.type)) {
+                    console.warn('Ignored undeclared server frame.');
+                    return;
+                }
 
                 if (data.type === 'session_init' && this.handlers.onSessionInit) {
                     this.handlers.onSessionInit({
