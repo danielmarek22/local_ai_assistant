@@ -23,7 +23,8 @@ This layer should remain *dumb*: no business logic, only structured data.
 
 ## Integrations
 
-- `integrations.web` configures the optional SearXNG-backed search capability.
+- `integrations.web` configures the optional SearXNG-backed search capability;
+  `max_results` bounds the result set passed to summarization.
 - `integrations.memory` enables structured long-term memory writes.
 - `integrations.shell` enables local shell execution and its approval policy.
 - `integrations.mindcraft` attaches to a running Mindcraft mindserver. It can
@@ -48,7 +49,9 @@ verified first-person captures received from the enhanced fork.
 Autonomy is globally pausable through `/api/autonomy` and the Web UI. Pausing leaves queued
 events durable and does not cancel an already-running external action.
 
-Legacy `tools.web` configuration is accepted temporarily when `integrations.web` is absent.
+The legacy `tools.web` section has been removed. Move those settings to
+`integrations.web`; keeping `tools` in the YAML is a startup error with migration
+guidance.
 
 ## Beliefs
 

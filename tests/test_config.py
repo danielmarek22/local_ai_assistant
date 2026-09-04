@@ -393,29 +393,119 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(config.integrations["memory"]["enabled"])
         self.assertTrue(config.integrations["shell"]["enabled"])
+        self.assertFalse(config.integrations["web"]["enabled"])
+        self.assertEqual(config.integrations["web"]["max_results"], 5)
         self.assertFalse(config.integrations["mindcraft"]["enabled"])
         self.assertEqual(config.integrations["mindcraft"]["url"], "http://localhost:8081")
         self.assertEqual(config.integrations["mindcraft"]["reconnect_max_delay_s"], 30.0)
 
-    def test_legacy_web_config_is_used_only_without_new_config(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({"tools": {"web": {"enabled": True, "base_url": "legacy"}}}, config_file)
-            config_file.flush()
-            with self.assertLogs("config", level="WARNING"):
-                config = Config(config_file.name)
+    def test_removed_tools_web_config_fails_with_migration_guidance(self):
+        for payload in (
+            {"tools": {"web": {"enabled": True}}},
+            {
+                "tools": {"web": {"enabled": True}},
+                "integrations": {"web": {"enabled": False}},
+            },
+            {"tools": {}},
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                ValueError,
+                "tools.web was removed.*integrations.web",
+            ):
+                self._load(payload)
 
-        self.assertEqual(config.integrations["web"]["base_url"], "legacy")
+    def test_web_integration_contract_is_strict_and_normalized(self):
+        config = self._load({
+            "integrations": {
+                "web": {
+                    "enabled": True,
+                    "base_url": " http://localhost:8080/searx/ ",
+                    "timeout": 12.0,
+                    "max_retries": 3,
+                    "retry_backoff_s": 0.5,
+                    "max_results": 7,
+                }
+            }
+        })
 
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({
-                "tools": {"web": {"enabled": True, "base_url": "legacy"}},
-                "integrations": {"web": {"enabled": False, "base_url": "new"}},
-            }, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        self.assertEqual(config.integrations["web"]["base_url"], "http://localhost:8080/searx")
+        self.assertEqual(config.integrations["web"]["max_results"], 7)
 
-        self.assertEqual(config.integrations["web"]["base_url"], "new")
-        self.assertFalse(config.integrations["web"]["enabled"])
+        invalid = (
+            ({"web": {"enabled": "true"}}, "web.enabled"),
+            ({"web": {"base_url": "file:///tmp/search"}}, "web.base_url"),
+            ({"web": {"base_url": "http://user:secret@localhost"}}, "web.base_url"),
+            ({"web": {"timeout": 0}}, "web.timeout"),
+            ({"web": {"max_retries": True}}, "web.max_retries"),
+            ({"web": {"max_results": 0}}, "web.max_results"),
+            ({"web": {"typo": True}}, "web.typo"),
+        )
+        for integrations, expected in invalid:
+            with self.subTest(integrations=integrations), self.assertRaisesRegex(
+                ValueError,
+                expected,
+            ):
+                self._load({"integrations": integrations})
+
+    def test_memory_shell_and_integration_names_are_strict(self):
+        invalid = (
+            ({"memory": {"enabled": 1}}, "memory.enabled"),
+            ({"memory": {"mode": "write"}}, "memory.mode"),
+            ({"shell": {"timeout": "15"}}, "shell.timeout"),
+            ({"shell": {"timeout": 0}}, "shell.timeout"),
+            ({"unknown": {"enabled": True}}, "integrations.unknown"),
+        )
+        for integrations, expected in invalid:
+            with self.subTest(integrations=integrations), self.assertRaisesRegex(
+                ValueError,
+                expected,
+            ):
+                self._load({"integrations": integrations})
+
+    def test_mindcraft_integration_contract_normalizes_optional_names(self):
+        config = self._load({
+            "integrations": {
+                "mindcraft": {
+                    "enabled": True,
+                    "url": " http://localhost:8081/ ",
+                    "agent_name": " Astra ",
+                    "ambient_session_id": " session-1 ",
+                    "autonomous_events": ["critical_health", "died"],
+                    "attachment_dir": " runtime/mindcraft ",
+                }
+            }
+        })
+
+        mindcraft = config.integrations["mindcraft"]
+        self.assertEqual(mindcraft["url"], "http://localhost:8081")
+        self.assertEqual(mindcraft["agent_name"], "Astra")
+        self.assertEqual(mindcraft["ambient_session_id"], "session-1")
+        self.assertEqual(mindcraft["attachment_dir"], "runtime/mindcraft")
+
+    def test_mindcraft_types_ranges_and_events_are_strict(self):
+        invalid = (
+            ({"context_enabled": "true"}, "context_enabled"),
+            ({"connect_timeout": 0}, "connect_timeout"),
+            ({"recent_output_limit": 0}, "recent_output_limit"),
+            ({"ambient_session_id": "../session"}, "Invalid session ID"),
+            ({"autonomous_events": ["unknown"]}, "autonomous_events.0"),
+            (
+                {"autonomous_events": ["died", "died"]},
+                "must not contain duplicates",
+            ),
+            (
+                {"reconnect_delay_s": 10.0, "reconnect_max_delay_s": 5.0},
+                "must be at least reconnect_delay_s",
+            ),
+            ({"attachment_dir": " "}, "attachment_dir must not be empty"),
+            ({"unknown": True}, "mindcraft.unknown"),
+        )
+        for mindcraft, expected in invalid:
+            with self.subTest(mindcraft=mindcraft), self.assertRaisesRegex(
+                ValueError,
+                expected,
+            ):
+                self._load({"integrations": {"mindcraft": mindcraft}})
 
     def test_voice_input_defaults_to_stt(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

@@ -10,6 +10,7 @@ from app.integrations import (
     WebIntegration,
 )
 from app.tools.bash_execution import BashExecutionTool
+from app.tools.web_search import WebSearchTool
 
 
 class FakeWebTool:
@@ -36,6 +37,27 @@ class FakeMemoryHandler:
 
 
 class BuiltinIntegrationTests(unittest.TestCase):
+    def test_web_search_tool_uses_configured_result_limit(self):
+        class FakeClient:
+            is_available = True
+
+            def __init__(self):
+                self.calls = []
+
+            def search(self, query, limit):
+                self.calls.append((query, limit))
+                return []
+
+        class FakeSummarizer:
+            def summarize(self, _results):
+                return None
+
+        client = FakeClient()
+        tool = WebSearchTool(client, FakeSummarizer(), max_results=7)
+
+        self.assertIsNone(tool.run("current news"))
+        self.assertEqual(client.calls, [("current news", 7)])
+
     def test_web_integration_exposes_only_reachable_search(self):
         unavailable = IntegrationRegistry([WebIntegration(FakeWebTool(available=False))])
         self.assertEqual(unavailable.get_native_tools(), [])

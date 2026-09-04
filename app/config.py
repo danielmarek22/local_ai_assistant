@@ -1,5 +1,3 @@
-from copy import deepcopy
-import logging
 from pathlib import Path
 import re
 from typing import Literal
@@ -16,10 +14,9 @@ from pydantic import (
 )
 import yaml
 
+from app.core.session_ids import validate_session_id
 from app.paths import DEFAULT_CONFIG_PATH
 
-
-logger = logging.getLogger("config")
 
 _CONFIG_SECTIONS = {
     "assistant",
@@ -32,7 +29,6 @@ _CONFIG_SECTIONS = {
     "logging",
     "orchestrator",
     "stt",
-    "tools",
     "tts",
     "vision_watchdog",
     "voice_input",
@@ -397,6 +393,155 @@ class _LoggingConfig(_StrictConfigModel):
         return self
 
 
+class _EnabledIntegrationConfig(_StrictConfigModel):
+    enabled: bool
+
+
+class _WebIntegrationConfig(_EnabledIntegrationConfig):
+    enabled: bool = False
+    base_url: str = "http://localhost:8080"
+    timeout: float = Field(default=10.0, gt=0.0, le=300.0)
+    max_retries: int = Field(default=2, ge=0, le=20)
+    retry_backoff_s: float = Field(default=0.25, ge=0.0, le=60.0)
+    max_results: int = Field(default=5, gt=0, le=50)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="integrations.web.base_url")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "integrations.web.base_url must be an HTTP(S) URL without credentials, "
+                "a query, or a fragment"
+            )
+        return value.rstrip("/")
+
+
+class _MemoryIntegrationConfig(_EnabledIntegrationConfig):
+    enabled: bool = True
+
+
+class _ShellIntegrationConfig(_EnabledIntegrationConfig):
+    enabled: bool = True
+    timeout: int = Field(default=15, gt=0, le=3600)
+
+
+_MindcraftAutonomousEvent = Literal[
+    "spawned",
+    "disconnected",
+    "damage_taken",
+    "critical_health",
+    "died",
+    "respawned",
+    "player_joined",
+    "player_left",
+    "player_spoke",
+    "delegation_rejected",
+]
+
+
+class _MindcraftIntegrationConfig(_EnabledIntegrationConfig):
+    enabled: bool = False
+    url: str = "http://localhost:8081"
+    agent_name: str | None = None
+    connect_timeout: float = Field(default=3.0, gt=0.0, le=300.0)
+    reconnect_delay_s: float = Field(default=2.0, gt=0.0, le=3600.0)
+    reconnect_max_delay_s: float = Field(default=30.0, gt=0.0, le=3600.0)
+    context_enabled: bool = True
+    recent_output_limit: int = Field(default=3, gt=0, le=1000)
+    events_enabled: bool = True
+    ambient_session_id: str | None = None
+    autonomous_events: list[_MindcraftAutonomousEvent] = Field(
+        default_factory=lambda: ["critical_health", "died", "disconnected"]
+    )
+    attachment_dir: str = "static/uploads/events/mindcraft"
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="integrations.mindcraft.url")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "integrations.mindcraft.url must be an HTTP(S) URL without credentials, "
+                "a query, or a fragment"
+            )
+        return value.rstrip("/")
+
+    @field_validator("agent_name")
+    @classmethod
+    def normalize_agent_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if len(value) > 128:
+            raise ValueError("agent_name must be at most 128 characters")
+        return value
+
+    @field_validator("ambient_session_id")
+    @classmethod
+    def validate_ambient_session_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        return validate_session_id(value)
+
+    @field_validator("autonomous_events")
+    @classmethod
+    def validate_autonomous_events(
+        cls,
+        value: list[_MindcraftAutonomousEvent],
+    ) -> list[_MindcraftAutonomousEvent]:
+        if len(value) != len(set(value)):
+            raise ValueError("autonomous_events must not contain duplicates")
+        return value
+
+    @field_validator("attachment_dir")
+    @classmethod
+    def validate_attachment_dir(cls, value: str) -> str:
+        value = _stripped_nonempty(
+            value,
+            field_name="integrations.mindcraft.attachment_dir",
+        )
+        if "\x00" in value or len(value) > 4096:
+            raise ValueError("attachment_dir must be a valid path of at most 4096 characters")
+        return value
+
+    @model_validator(mode="after")
+    def validate_reconnect_delays(self):
+        if self.reconnect_max_delay_s < self.reconnect_delay_s:
+            raise ValueError("reconnect_max_delay_s must be at least reconnect_delay_s")
+        return self
+
+
+class _IntegrationsConfig(_StrictConfigModel):
+    web: _WebIntegrationConfig = Field(default_factory=_WebIntegrationConfig)
+    memory: _MemoryIntegrationConfig = Field(default_factory=_MemoryIntegrationConfig)
+    shell: _ShellIntegrationConfig = Field(default_factory=_ShellIntegrationConfig)
+    mindcraft: _MindcraftIntegrationConfig = Field(
+        default_factory=_MindcraftIntegrationConfig
+    )
+
+
 class _OrchestratorConfig(_StrictConfigModel):
     summary_trigger: int = Field(default=10, gt=0)
     generation_deadline_s: float = Field(default=600.0, gt=0)
@@ -480,6 +625,7 @@ class _RuntimeConfigSections(_StrictConfigModel):
     tts: _TTSConfig
     stt: _STTConfig
     logging: _LoggingConfig
+    integrations: _IntegrationsConfig
     orchestrator: _OrchestratorConfig
     context: _ContextConfig
     beliefs: _BeliefsConfig
@@ -505,6 +651,11 @@ class Config:
             raw = {}
         if not isinstance(raw, dict):
             raise ValueError("Invalid configuration: document root must be a mapping")
+        if "tools" in raw:
+            raise ValueError(
+                "Invalid configuration: tools.web was removed; move web search settings "
+                "to integrations.web and remove the tools section"
+            )
         unknown_sections = sorted(set(raw) - _CONFIG_SECTIONS, key=repr)
         if unknown_sections:
             raise ValueError(
@@ -523,12 +674,8 @@ class Config:
         self.assistant = self.raw.get("assistant", {})
         self.local_human = self.raw.get("local_human", {})
 
-        # Integrations and temporary legacy tool configuration
-        self.tools = self.raw.get("tools", {})
-        self.integrations = self._load_integrations_config(
-            self.raw.get("integrations"),
-            self.tools,
-        )
+        # Integrations
+        self.integrations = self.raw.get("integrations", {})
 
         # Orchestrator
         self.orchestrator = self.raw.get("orchestrator", {})
@@ -557,6 +704,7 @@ class Config:
             "tts": self.tts,
             "stt": self.stt,
             "logging": self.logging,
+            "integrations": self.integrations,
             "orchestrator": self.orchestrator,
             "context": self.context,
             "beliefs": self.beliefs,
@@ -591,37 +739,3 @@ class Config:
                 "beliefs.processing_mode must be one of: disabled, observer, react_tool"
             )
         return config
-
-    @staticmethod
-    def _load_integrations_config(
-        raw_integrations: dict | None,
-        legacy_tools: dict | None,
-    ) -> dict:
-        integrations = deepcopy(raw_integrations) if isinstance(raw_integrations, dict) else {}
-        integrations.setdefault("memory", {"enabled": True})
-        integrations.setdefault("shell", {"enabled": True, "timeout": 15})
-        integrations.setdefault("mindcraft", {
-            "enabled": False,
-            "url": "http://localhost:8081",
-            "agent_name": "",
-            "connect_timeout": 3.0,
-            "reconnect_delay_s": 2.0,
-            "reconnect_max_delay_s": 30.0,
-            "context_enabled": True,
-            "recent_output_limit": 3,
-            "events_enabled": True,
-            "ambient_session_id": "",
-        })
-
-        legacy_web = legacy_tools.get("web") if isinstance(legacy_tools, dict) else None
-        if "web" not in integrations and isinstance(legacy_web, dict):
-            logger.warning(
-                "Configuration key 'tools.web' is deprecated; use 'integrations.web'"
-            )
-            integrations["web"] = deepcopy(legacy_web)
-
-        for name, integration_config in integrations.items():
-            if not isinstance(name, str) or not isinstance(integration_config, dict):
-                raise ValueError(f"Invalid integration configuration: {name!r}")
-
-        return integrations

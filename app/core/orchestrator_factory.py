@@ -344,6 +344,7 @@ def _build_orchestrator(
         web_tool = WebSearchTool(
             client=web_client,
             summarizer=search_summarizer,
+            max_results=web_cfg["max_results"],
         )
 
         integrations.append(WebIntegration(web_tool))
@@ -355,7 +356,7 @@ def _build_orchestrator(
     shell_cfg = config.integrations.get("shell", {})
     if shell_cfg.get("enabled", True):
         integrations.append(ShellIntegration(
-            BashExecutionTool(timeout=int(shell_cfg.get("timeout", 15)))
+            BashExecutionTool(timeout=shell_cfg.get("timeout", 15))
         ))
         logger.info("Shell integration registered")
 
@@ -367,24 +368,22 @@ def _build_orchestrator(
     mindcraft_cfg = config.integrations.get("mindcraft", {})
     if mindcraft_cfg.get("enabled", False):
         mindcraft_client = MindcraftClient(
-            url=str(mindcraft_cfg.get("url", "http://localhost:8081")),
+            url=mindcraft_cfg.get("url", "http://localhost:8081"),
             agent_name=mindcraft_cfg.get("agent_name"),
-            connect_timeout=float(mindcraft_cfg.get("connect_timeout", 3.0)),
-            reconnect_delay_s=float(mindcraft_cfg.get("reconnect_delay_s", 2.0)),
-            reconnect_max_delay_s=float(mindcraft_cfg.get("reconnect_max_delay_s", 30.0)),
-            recent_output_limit=int(mindcraft_cfg.get("recent_output_limit", 3)),
+            connect_timeout=mindcraft_cfg.get("connect_timeout", 3.0),
+            reconnect_delay_s=mindcraft_cfg.get("reconnect_delay_s", 2.0),
+            reconnect_max_delay_s=mindcraft_cfg.get("reconnect_max_delay_s", 30.0),
+            recent_output_limit=mindcraft_cfg.get("recent_output_limit", 3),
         )
         integrations.append(MindcraftIntegration(
             mindcraft_client,
-            context_enabled=bool(mindcraft_cfg.get("context_enabled", True)),
-            events_enabled=bool(mindcraft_cfg.get("events_enabled", True)),
-            ambient_session_id=str(mindcraft_cfg.get("ambient_session_id", "")).strip() or None,
-            autonomous_events=tuple(mindcraft_cfg.get("autonomous_events", [
-                "critical_health", "died", "disconnected",
-            ])),
+            context_enabled=mindcraft_cfg.get("context_enabled", True),
+            events_enabled=mindcraft_cfg.get("events_enabled", True),
+            ambient_session_id=mindcraft_cfg.get("ambient_session_id"),
+            autonomous_events=tuple(mindcraft_cfg["autonomous_events"]),
             attachment_dir=str(
                 resolve_app_path(
-                    mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+                    mindcraft_cfg["attachment_dir"]
                 )
             ),
             operation_store=autonomy_store,
