@@ -28,6 +28,8 @@ Support utilities and long-lived helper services used by the orchestrator.
 - `stream_processor.py` lives under `app/core` because it is turn-stream parsing logic, but it serves the same “small helper around orchestration” role.
 - `image_summarizer.py` generates one concise factual summary per stored image so attachments can be found again through episodic vector search without resending every old image to the model.
 - `tool_executor.py` adds assistant events and tracing around validated integration calls.
+- `websocket_connection.py` owns bounded frame reads, deferred-message replay, outbound
+  frame encoding, and approval waits for each WebSocket connection.
 
 Some files in this directory are classic "services", while others are prompt and
 execution helpers. In practice, this folder currently groups assistant support

@@ -19,6 +19,7 @@ Start with the narrowest row matching your goal. Paths are relative to the repos
 | Speech recognition | `stt` | `app/stt/factory.py`, `app/stt/whisper_engine.py` | Exercise a short microphone recording |
 | Astra's voice | `tts` | `app/tts/factory.py` and the selected engine | See [PocketTTS](../services/pocket-tts.md) |
 | Tool routing and execution | `integrations` | `app/services/tool_executor.py`, `app/integrations/registry.py`, `app/core/orchestrator.py` | `tests/test_tool_executor.py`, `tests/test_integration_registry.py` |
+| WebSocket framing, size limits, or approval waits | — | `app/services/websocket_protocol.py`, `app/services/websocket_connection.py` | `tests/test_websocket_protocol.py`, `tests/test_server_sessions.py` |
 | Web search | `integrations.web` | `app/tools/web_search.py`, `app/integrations/builtins.py` | `tests/test_builtin_integrations.py` |
 | Shell command behavior | `integrations.shell` | `app/tools/bash_execution.py` | `tests/test_bash_execution.py` |
 | Belief extraction or display | `beliefs` | `app/beliefs/`, `app/knowledge/` | `tests/test_beliefs.py`, `tests/test_belief_react.py`, `tests/test_knowledge.py` |
