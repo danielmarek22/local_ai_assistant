@@ -44,6 +44,97 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
                 self._load(payload)
 
+    def test_llm_and_identity_unknown_fields_are_rejected(self):
+        invalid = (
+            ({"llm": {"typo": True}}, "llm.typo"),
+            ({"llm": {"generation": {"frequency_penalty": 1.0}}}, "frequency_penalty"),
+            ({"llm": {"thinking": {"mode": "high"}}}, "thinking.mode"),
+            ({"assistant": {"nickname": "Star"}}, "assistant.nickname"),
+            ({"assistant": {"personality": {"tone": "warm"}}}, "personality.tone"),
+            ({"local_human": {"name": "User"}}, "local_human.name"),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_llm_types_ranges_and_aliases_are_strict(self):
+        invalid = (
+            ({"llm": {"backend": "openai"}}, "llm.backend"),
+            ({"llm": {"timeout_s": "30"}}, "llm.timeout_s"),
+            ({"llm": {"max_retries": -1}}, "llm.max_retries"),
+            ({"llm": {"thinking": {"enabled": "yes"}}}, "thinking.enabled"),
+            ({"llm": {"thinking": {"level": "maximum"}}}, "thinking.level"),
+            ({"llm": {"generation": {"temperature": 2.1}}}, "temperature"),
+            ({"llm": {"generation": {"top_p": 1.1}}}, "top_p"),
+            ({"llm": {"generation": {"max_tokens": 0}}}, "max_tokens"),
+            (
+                {"llm": {"generation": {"max_tokens": 128, "num_predict": 128}}},
+                "configure only one",
+            ),
+            (
+                {"llm": {"generation": {"rep_pen": 1.1, "repeat_penalty": 1.1}}},
+                "configure only one",
+            ),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_llm_host_is_a_normalized_http_origin(self):
+        config = self._load({"llm": {"host": " https://ollama.example.test/ "}})
+        self.assertEqual(config.llm["host"], "https://ollama.example.test")
+
+        for host in (
+            "ollama.example.test",
+            "ftp://ollama.example.test",
+            "http://user:secret@ollama.example.test",
+            "http://ollama.example.test/api",
+            "http://ollama.example.test?model=test",
+        ):
+            with self.subTest(host=host), self.assertRaisesRegex(ValueError, "HTTP.*origin"):
+                self._load({"llm": {"host": host}})
+
+    def test_identity_values_are_normalized_and_bounded(self):
+        config = self._load({
+            "local_human": {"id": " user-1 ", "display_name": " User One "},
+            "assistant": {
+                "id": " agent:astra ",
+                "display_name": " Astra ",
+                "system_prompt": " Be helpful. ",
+                "avatar_controls": {
+                    "default_outfit": " default ",
+                    "expressions": [" Happy ", "neutral"],
+                },
+            },
+        })
+
+        self.assertEqual(config.local_human, {"id": "user-1", "display_name": "User One"})
+        self.assertEqual(config.assistant["id"], "agent:astra")
+        self.assertEqual(config.assistant["display_name"], "Astra")
+        self.assertEqual(config.assistant["system_prompt"], "Be helpful.")
+        self.assertEqual(
+            config.assistant["avatar_controls"]["expressions"],
+            ["happy", "neutral"],
+        )
+
+    def test_invalid_identity_and_avatar_values_are_rejected(self):
+        invalid = (
+            ({"local_human": {"id": "../user"}}, "local_human.id"),
+            ({"local_human": {"display_name": 123}}, "local_human.display_name"),
+            ({"assistant": {"system_prompt": "  "}}, "system_prompt"),
+            (
+                {"assistant": {"avatar_controls": {"expressions": []}}},
+                "expressions must not be empty",
+            ),
+            (
+                {"assistant": {"avatar_controls": {"expressions": ["happy", "HAPPY"]}}},
+                "duplicate avatar expression",
+            ),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
     def test_belief_timezone_must_be_valid(self):
         with self.assertRaisesRegex(ValueError, "valid IANA timezone"):
             self._load({"beliefs": {"timezone": "Mars/Olympus"}})
@@ -140,10 +231,15 @@ class ConfigTests(unittest.TestCase):
                     Config(config_file.name)
 
     def test_tracked_template_uses_processing_mode_without_legacy_key(self):
-        template = yaml.safe_load(Path("app/config/assistant-template.yaml").read_text())
+        template_path = Path("app/config/assistant-template.yaml")
+        template = yaml.safe_load(template_path.read_text())
         self.assertEqual(template["beliefs"]["processing_mode"], "disabled")
         self.assertNotIn("extraction_enabled", template["beliefs"])
         self.assertNotIn("planner", template)
+
+        config = Config(template_path)
+        self.assertEqual(config.llm["backend"], "ollama")
+        self.assertEqual(config.assistant["display_name"], "Astra")
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

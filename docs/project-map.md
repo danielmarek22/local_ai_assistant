@@ -50,6 +50,10 @@ The browser and server own transport. The orchestrator owns a turn. Context cons
 
 The committed reference is `app/config/assistant-template.yaml`. Your machine-specific configuration is `app/config/assistant.yaml` and is intentionally ignored.
 
+Configuration is validated at startup. Unknown keys, coercive scalar types, invalid
+ranges, malformed identity values, and unsupported LLM endpoints fail with a field-level
+error instead of being silently ignored.
+
 | Configuration section | Controls |
 | --- | --- |
 | `llm` | Ollama endpoint, model, timeout, retries, generation settings |

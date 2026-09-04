@@ -1,7 +1,9 @@
 from copy import deepcopy
 import logging
 from pathlib import Path
+import re
 from typing import Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -39,6 +41,163 @@ _CONFIG_SECTIONS = {
 
 class _StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+_IDENTITY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _stripped_nonempty(value: str, *, field_name: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} must not be empty")
+    return stripped
+
+
+class _LLMGenerationConfig(_StrictConfigModel):
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_tokens: int | None = Field(default=None, gt=0)
+    num_predict: int | None = Field(default=None, gt=0)
+    rep_pen: float | None = Field(default=None, gt=0.0)
+    repeat_penalty: float | None = Field(default=None, gt=0.0)
+    num_ctx: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_aliases(self):
+        if self.max_tokens is not None and self.num_predict is not None:
+            raise ValueError("max_tokens and num_predict are aliases; configure only one")
+        if self.rep_pen is not None and self.repeat_penalty is not None:
+            raise ValueError("rep_pen and repeat_penalty are aliases; configure only one")
+        return self
+
+
+class _LLMThinkingConfig(_StrictConfigModel):
+    enabled: bool = False
+    level: Literal["low", "medium", "high"] | None = None
+    generation: _LLMGenerationConfig = Field(default_factory=_LLMGenerationConfig)
+
+
+class _LLMConfig(_StrictConfigModel):
+    backend: Literal["ollama"] = "ollama"
+    host: str = "http://localhost:11434"
+    model: str = "gemma4:12b-it-qat"
+    timeout_s: float = Field(default=30.0, gt=0.0, le=3600.0)
+    max_retries: int = Field(default=2, ge=0, le=20)
+    retry_backoff_s: float = Field(default=0.25, ge=0.0, le=60.0)
+    generation: _LLMGenerationConfig = Field(default_factory=_LLMGenerationConfig)
+    thinking: _LLMThinkingConfig = Field(default_factory=_LLMThinkingConfig)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="llm.host")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("llm.host must be an HTTP(S) origin without credentials or a path")
+        return value.rstrip("/")
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _stripped_nonempty(value, field_name="llm.model")
+
+
+class _IdentityConfig(_StrictConfigModel):
+    id: str
+    display_name: str
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        value = value.strip()
+        if not _IDENTITY_ID_RE.fullmatch(value):
+            raise ValueError(
+                "must be 1-128 characters using letters, digits, '.', '_', ':', or '-', "
+                "and must begin with a letter or digit"
+            )
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="display_name")
+        if len(value) > 128:
+            raise ValueError("display_name must be at most 128 characters")
+        return value
+
+
+class _LocalHumanConfig(_IdentityConfig):
+    id: str = "local-human"
+    display_name: str = "You"
+
+
+class _AssistantPersonalityConfig(_StrictConfigModel):
+    default_emotion: str = "neutral"
+
+    @field_validator("default_emotion")
+    @classmethod
+    def validate_default_emotion(cls, value: str) -> str:
+        return _stripped_nonempty(value, field_name="assistant.personality.default_emotion")
+
+
+class _AvatarControlsConfig(_StrictConfigModel):
+    default_outfit: str = "default"
+    expressions: list[str] | None = None
+
+    @field_validator("default_outfit")
+    @classmethod
+    def validate_default_outfit(cls, value: str) -> str:
+        return _stripped_nonempty(value, field_name="assistant.avatar_controls.default_outfit")
+
+    @field_validator("expressions")
+    @classmethod
+    def validate_expressions(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("assistant.avatar_controls.expressions must not be empty")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for expression in value:
+            expression = _stripped_nonempty(
+                expression,
+                field_name="assistant.avatar_controls.expressions item",
+            ).lower()
+            if len(expression) > 64:
+                raise ValueError("avatar expression names must be at most 64 characters")
+            if expression in seen:
+                raise ValueError(f"duplicate avatar expression: {expression!r}")
+            seen.add(expression)
+            normalized.append(expression)
+        return normalized
+
+
+class _AssistantConfig(_IdentityConfig):
+    id: str = "default-agent"
+    display_name: str = "Astra"
+    system_prompt: str = "You are Astra, a local personal assistant."
+    personality: _AssistantPersonalityConfig = Field(
+        default_factory=_AssistantPersonalityConfig
+    )
+    avatar_controls: _AvatarControlsConfig = Field(default_factory=_AvatarControlsConfig)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def validate_system_prompt(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="assistant.system_prompt")
+        if len(value) > 100_000:
+            raise ValueError("assistant.system_prompt must be at most 100000 characters")
+        return value
 
 
 class _OrchestratorConfig(_StrictConfigModel):
@@ -118,6 +277,9 @@ class _VisionWatchdogConfig(_StrictConfigModel):
 
 
 class _RuntimeConfigSections(_StrictConfigModel):
+    llm: _LLMConfig
+    assistant: _AssistantConfig
+    local_human: _LocalHumanConfig
     orchestrator: _OrchestratorConfig
     context: _ContextConfig
     beliefs: _BeliefsConfig
@@ -159,7 +321,7 @@ class Config:
         # Core sections
         self.llm = self.raw.get("llm", {})
         self.assistant = self.raw.get("assistant", {})
-        self.local_human = self._load_local_human_config(self.raw.get("local_human"))
+        self.local_human = self.raw.get("local_human", {})
 
         # Integrations and temporary legacy tool configuration
         self.tools = self.raw.get("tools", {})
@@ -217,6 +379,9 @@ class Config:
         )
 
         runtime_sections = {
+            "llm": self.llm,
+            "assistant": self.assistant,
+            "local_human": self.local_human,
             "orchestrator": self.orchestrator,
             "context": self.context,
             "beliefs": self.beliefs,
@@ -229,19 +394,10 @@ class Config:
         except ValidationError as exc:
             raise _format_config_error(exc) from exc
 
-        normalized = validated.model_dump(mode="python")
+        normalized = validated.model_dump(mode="python", exclude_none=True)
         for section_name, section_value in normalized.items():
             setattr(self, section_name, section_value)
             self.raw[section_name] = section_value
-
-    @staticmethod
-    def _load_local_human_config(raw_local_human: dict | None) -> dict:
-        config = {"id": "local-human", "display_name": "You"}
-        if isinstance(raw_local_human, dict):
-            config.update(raw_local_human)
-        config["id"] = str(config.get("id") or "local-human").strip() or "local-human"
-        config["display_name"] = str(config.get("display_name") or "You").strip() or "You"
-        return config
 
     @staticmethod
     def _default_tts_config() -> dict:
