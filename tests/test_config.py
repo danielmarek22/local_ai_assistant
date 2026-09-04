@@ -5,6 +5,7 @@ import yaml
 from pathlib import Path
 
 from app.config import Config
+from app.tts.factory import _resolve_engine_name, build_tts_engine
 
 
 class ConfigTests(unittest.TestCase):
@@ -129,6 +130,95 @@ class ConfigTests(unittest.TestCase):
             (
                 {"assistant": {"avatar_controls": {"expressions": ["happy", "HAPPY"]}}},
                 "duplicate avatar expression",
+            ),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_tts_engine_aliases_are_normalized(self):
+        for alias, canonical in (
+            ("pocket-tts", "pocket_tts"),
+            ("pocket", "pocket_tts"),
+            ("gpt-sovits", "gpt_sovits"),
+            ("sovits", "gpt_sovits"),
+        ):
+            payload = {"tts": {"engine": alias}}
+            if canonical == "gpt_sovits":
+                payload["tts"]["gpt_sovits"] = {"ref_audio_path": "voice.wav"}
+            with self.subTest(alias=alias):
+                config = self._load(payload)
+                self.assertEqual(config.tts["engine"], canonical)
+                self.assertEqual(_resolve_engine_name({"engine": alias}), canonical)
+
+    def test_removed_tts_layouts_fail_with_migration_guidance(self):
+        invalid = (
+            ({"tts": {"engine": "qwen3"}}, "no Qwen TTS engine is implemented"),
+            ({"tts": {"qwen3": {"model_id": "old"}}}, "no Qwen TTS engine"),
+            ({"tts": {"provider": "piper"}}, "provider.*replaced by tts.engine"),
+            ({"tts": {"backend": "piper"}}, "backend.*replaced by tts.engine"),
+            ({"tts": {"model_path": "voice.onnx"}}, "flat TTS settings.*tts.piper"),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+        with self.assertRaisesRegex(ValueError, "Supported engines: pocket_tts"):
+            build_tts_engine({"engine": "qwen3"})
+
+    def test_tts_selected_engine_contracts_are_strict(self):
+        invalid = (
+            ({"tts": {"engine": "gpt_sovits"}}, "requires.*ref_audio_path"),
+            (
+                {
+                    "tts": {
+                        "engine": "gpt_sovits",
+                        "gpt_sovits": {
+                            "ref_audio_path": "voice.wav",
+                            "api_url": "file:///tmp/tts",
+                        },
+                    }
+                },
+                "HTTP.*URL",
+            ),
+            ({"tts": {"piper": {"use_cuda": "false"}}}, "piper.use_cuda"),
+            ({"tts": {"piper": {"model": "voice.onnx"}}}, "piper.model"),
+        )
+        for payload, expected in invalid:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
+                self._load(payload)
+
+    def test_stt_contract_normalizes_names_and_vad_defaults(self):
+        config = self._load({
+            "stt": {
+                "model_size": " small ",
+                "device": " cpu ",
+                "compute_type": " int8 ",
+                "vad_parameters": {"threshold": 0.6},
+            }
+        })
+
+        self.assertEqual(config.stt["model_size"], "small")
+        self.assertEqual(config.stt["device"], "cpu")
+        self.assertEqual(config.stt["compute_type"], "int8")
+        self.assertEqual(config.stt["vad_parameters"]["threshold"], 0.6)
+        self.assertEqual(config.stt["vad_parameters"]["min_silence_duration_ms"], 300)
+
+    def test_stt_types_ranges_and_nested_fields_are_strict(self):
+        invalid = (
+            ({"stt": {"enabled": "true"}}, "stt.enabled"),
+            ({"stt": {"vad_filter": 1}}, "stt.vad_filter"),
+            ({"stt": {"model_size": " "}}, "stt.model_size"),
+            ({"stt": {"vad_parameters": {"threshold": 1.1}}}, "threshold"),
+            ({"stt": {"vad_parameters": {"min_silence_duration_ms": -1}}}, "min_silence"),
+            ({"stt": {"vad_parameters": {"unknown": 1}}}, "vad_parameters.unknown"),
+            (
+                {
+                    "stt": {
+                        "vad_parameters": {"threshold": 0.4, "neg_threshold": 0.5}
+                    }
+                },
+                "neg_threshold must not exceed threshold",
             ),
         )
         for payload, expected in invalid:

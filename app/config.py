@@ -200,6 +200,141 @@ class _AssistantConfig(_IdentityConfig):
         return value
 
 
+class _GPTSoVITSConfig(_StrictConfigModel):
+    api_url: str = "http://127.0.0.1:9880/tts"
+    ref_audio_path: str = ""
+    prompt_text: str = ""
+    text_lang: str = "en"
+    prompt_lang: str = "en"
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="tts.gpt_sovits.api_url")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("must be an HTTP(S) URL without credentials or a fragment")
+        return value
+
+    @field_validator("ref_audio_path", "prompt_text")
+    @classmethod
+    def strip_optional_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("text_lang", "prompt_lang")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        return _stripped_nonempty(value, field_name="GPT-SoVITS language")
+
+
+class _PiperConfig(_StrictConfigModel):
+    model_path: str = "models/piper/en_US-amy-medium.onnx"
+    use_cuda: bool = False
+
+    @field_validator("model_path")
+    @classmethod
+    def validate_model_path(cls, value: str) -> str:
+        return _stripped_nonempty(value, field_name="tts.piper.model_path")
+
+
+class _TTSConfig(_StrictConfigModel):
+    engine: Literal["pocket_tts", "piper", "gpt_sovits"] = "pocket_tts"
+    gpt_sovits: _GPTSoVITSConfig = Field(default_factory=_GPTSoVITSConfig)
+    piper: _PiperConfig = Field(default_factory=_PiperConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_layouts(cls, value):
+        if not isinstance(value, dict):
+            return value
+        if "qwen3" in value or value.get("engine") == "qwen3":
+            raise ValueError(
+                "tts.qwen3 is not supported because no Qwen TTS engine is implemented; "
+                "choose pocket_tts, piper, or gpt_sovits"
+            )
+        legacy_selector = next(
+            (name for name in ("provider", "backend") if name in value),
+            None,
+        )
+        if legacy_selector is not None:
+            raise ValueError(f"tts.{legacy_selector} was replaced by tts.engine")
+        legacy_flat_fields = sorted(
+            set(value)
+            & {
+                "api_url",
+                "ref_audio_path",
+                "prompt_text",
+                "text_lang",
+                "prompt_lang",
+                "model_path",
+                "use_cuda",
+            }
+        )
+        if legacy_flat_fields:
+            raise ValueError(
+                "flat TTS settings were replaced by tts.gpt_sovits or tts.piper; "
+                f"move: {', '.join(legacy_flat_fields)}"
+            )
+        return value
+
+    @field_validator("engine", mode="before")
+    @classmethod
+    def normalize_engine(cls, value):
+        aliases = {
+            "pocket-tts": "pocket_tts",
+            "pocket": "pocket_tts",
+            "gpt-sovits": "gpt_sovits",
+            "sovits": "gpt_sovits",
+        }
+        return aliases.get(value, value)
+
+    @model_validator(mode="after")
+    def validate_selected_engine(self):
+        if self.engine == "gpt_sovits" and not self.gpt_sovits.ref_audio_path:
+            raise ValueError(
+                "tts.engine=gpt_sovits requires tts.gpt_sovits.ref_audio_path"
+            )
+        return self
+
+
+class _VADParametersConfig(_StrictConfigModel):
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    neg_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_speech_duration_ms: int = Field(default=0, ge=0)
+    max_speech_duration_s: float | None = Field(default=None, gt=0.0)
+    min_silence_duration_ms: int = Field(default=300, ge=0)
+    speech_pad_ms: int = Field(default=400, ge=0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.neg_threshold is not None and self.neg_threshold > self.threshold:
+            raise ValueError("neg_threshold must not exceed threshold")
+        return self
+
+
+class _STTConfig(_StrictConfigModel):
+    enabled: bool = True
+    model_size: str = "small"
+    device: str = "cpu"
+    compute_type: str = "int8"
+    vad_filter: bool = True
+    vad_parameters: _VADParametersConfig = Field(default_factory=_VADParametersConfig)
+
+    @field_validator("model_size", "device", "compute_type")
+    @classmethod
+    def validate_runtime_name(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="STT runtime value")
+        if len(value) > 256:
+            raise ValueError("STT runtime values must be at most 256 characters")
+        return value
+
+
 class _OrchestratorConfig(_StrictConfigModel):
     summary_trigger: int = Field(default=10, gt=0)
     generation_deadline_s: float = Field(default=600.0, gt=0)
@@ -280,6 +415,8 @@ class _RuntimeConfigSections(_StrictConfigModel):
     llm: _LLMConfig
     assistant: _AssistantConfig
     local_human: _LocalHumanConfig
+    tts: _TTSConfig
+    stt: _STTConfig
     orchestrator: _OrchestratorConfig
     context: _ContextConfig
     beliefs: _BeliefsConfig
@@ -340,21 +477,9 @@ class Config:
 
         self.autonomy = self.raw.get("autonomy", {})
 
-        # TTS
-        self.tts = self._load_tts_config(self.raw.get("tts"))
-
-        # STT
-        self.stt = self.raw.get(
-            "stt",
-            {
-                "enabled": True,
-                "model_size": "small",
-                "device": "cpu",
-                "compute_type": "int8",
-                "vad_filter": True,
-                "vad_parameters": {"min_silence_duration_ms": 300},
-            },
-        )
+        # Speech input/output
+        self.tts = self.raw.get("tts", {})
+        self.stt = self.raw.get("stt", {})
 
         # Voice input routing
         self.voice_input = self.raw.get("voice_input", {})
@@ -382,6 +507,8 @@ class Config:
             "llm": self.llm,
             "assistant": self.assistant,
             "local_human": self.local_human,
+            "tts": self.tts,
+            "stt": self.stt,
             "orchestrator": self.orchestrator,
             "context": self.context,
             "beliefs": self.beliefs,
@@ -398,81 +525,6 @@ class Config:
         for section_name, section_value in normalized.items():
             setattr(self, section_name, section_value)
             self.raw[section_name] = section_value
-
-    @staticmethod
-    def _default_tts_config() -> dict:
-        return {
-            "engine": "qwen3",
-            "gpt_sovits": {
-                "api_url": "http://127.0.0.1:9880/tts",
-                "ref_audio_path": "",
-                "prompt_text": "",
-                "text_lang": "en",
-                "prompt_lang": "en",
-            },
-            "qwen3": {
-                "model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-                "device": "cuda:0",
-                "speaker": "Ryan",
-                "language": "English",
-                "ref_audio_path": "app/tts/sample.wav",
-                "ref_text": (
-                    "Early in my career, I worked at a small restaurant in the "
-                    "Vasari Passage. One day, entirely out of the blue, Lady "
-                    "Furina decided to dine at our restaurant after a performance. "
-                    "As I was scrambling around the back, a customer asked to meet "
-                    "the head chef. So, I rushed out to their table, knife still in "
-                    "hand, and completely froze. Because there I was, standing "
-                    "face-to-face with Lady Furina of all people. I knew I had to "
-                    "make something special, and it was like my instincts took over. "
-                    "I came up with a Lily sugar-glazed opera cake, and Lady Furina "
-                    "actually liked it and said she would remember me. I barely slept "
-                    "a wink that night, and the very next day, there was a position "
-                    "waiting for me at the Palais Mermonia."
-                ),
-            },
-            "piper": {
-                "model_path": "models/piper/en_US-amy-medium.onnx",
-                "use_cuda": False,
-            },
-        }
-
-    def _load_tts_config(self, raw_tts: dict | None) -> dict:
-        config = deepcopy(self._default_tts_config())
-        if not isinstance(raw_tts, dict) or not raw_tts:
-            return config
-
-        engine = raw_tts.get("engine") or raw_tts.get("provider") or raw_tts.get("backend")
-
-        if any(
-            key in raw_tts
-            for key in ("gpt_sovits", "qwen3", "piper", "engine", "provider", "backend")
-        ):
-            if engine:
-                config["engine"] = str(engine)
-
-            for key in ("gpt_sovits", "qwen3", "piper"):
-                engine_config = raw_tts.get(key)
-                if isinstance(engine_config, dict):
-                    config[key].update(engine_config)
-            return config
-
-        if any(
-            key in raw_tts
-            for key in ("api_url", "ref_audio_path", "prompt_text", "text_lang", "prompt_lang")
-        ):
-            config["engine"] = str(engine or "gpt_sovits")
-            config["gpt_sovits"].update(raw_tts)
-            return config
-
-        if any(key in raw_tts for key in ("model_path", "use_cuda")):
-            config["engine"] = str(engine or "piper")
-            config["piper"].update(raw_tts)
-            return config
-
-        config["engine"] = str(engine or "qwen3")
-        config["qwen3"].update(raw_tts)
-        return config
 
     @staticmethod
     def _load_beliefs_config(raw_beliefs: dict | None) -> dict:

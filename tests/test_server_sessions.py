@@ -27,45 +27,7 @@ THREE_BY_TWO_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEUlEQ
 def _load_server_module():
     if "app.server" in sys.modules:
         return sys.modules["app.server"]
-
-    fake_qwen_module = types.ModuleType("qwen_tts")
-    fake_soundfile_module = types.ModuleType("soundfile")
-    fake_torch_module = types.ModuleType("torch")
-
-    class FakeQwen3TTSModel:
-        @staticmethod
-        def from_pretrained(*args, **kwargs):
-            return FakeQwen3TTSModel()
-
-        def create_voice_clone_prompt(self, **kwargs):
-            return {"prompt": "ok"}
-
-        def generate_voice_clone(self, **kwargs):
-            return [[0.0]], 24000
-
-        def generate_custom_voice(self, **kwargs):
-            return [[0.0]], 24000
-
-    def fake_sf_read(_path):
-        return [0.0], 24000
-
-    def fake_sf_write(_path, _audio, _sr):
-        return None
-
-    fake_qwen_module.Qwen3TTSModel = FakeQwen3TTSModel
-    fake_soundfile_module.read = fake_sf_read
-    fake_soundfile_module.write = fake_sf_write
-    fake_torch_module.bfloat16 = object()
-
-    with patch.dict(
-        sys.modules,
-        {
-            "qwen_tts": fake_qwen_module,
-            "soundfile": fake_soundfile_module,
-            "torch": fake_torch_module,
-        },
-    ):
-        return importlib.import_module("app.server")
+    return importlib.import_module("app.server")
 
 
 server_module = _load_server_module()

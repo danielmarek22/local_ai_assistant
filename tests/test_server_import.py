@@ -14,20 +14,6 @@ class ServerImportTests(unittest.TestCase):
     def test_import_is_cwd_independent_and_does_not_write_there(self):
         script = textwrap.dedent(
             """
-            import sys
-            import types
-
-            fake_qwen = types.ModuleType("qwen_tts")
-            fake_qwen.Qwen3TTSModel = type("FakeQwen3TTSModel", (), {})
-            fake_soundfile = types.ModuleType("soundfile")
-            fake_torch = types.ModuleType("torch")
-            fake_torch.bfloat16 = object()
-            sys.modules.update({
-                "qwen_tts": fake_qwen,
-                "soundfile": fake_soundfile,
-                "torch": fake_torch,
-            })
-
             import app.server as server
 
             assert server.AUDIO_DIR == server.STATIC_DIR / "audio"

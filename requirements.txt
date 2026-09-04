@@ -10,7 +10,6 @@ Pillow
 transformers
 piper-tts
 onnxruntime-gpu
-qwen-tts
 torch
 soundfile
 chromadb

@@ -1,4 +1,3 @@
-# app/stt/factory.py
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
