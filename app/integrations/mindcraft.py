@@ -13,13 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from app.integrations.contracts import (
-    CapabilityId,
     ContextContribution,
     EventAttachmentRef,
     InvocationContext,
     RegisteredTool,
     ToolResult,
-    ToolSpec,
     EventId,
     EventPublisher,
     EventSpec,
@@ -27,6 +25,7 @@ from app.integrations.contracts import (
     NotificationPolicy,
     ReplayPolicy,
 )
+from app.integrations.mindcraft_capabilities import build_mindcraft_tool_specs
 
 
 logger = logging.getLogger("mindcraft_integration")
@@ -789,257 +788,31 @@ class MindcraftIntegration:
 
     def registered_tools(self) -> list[RegisteredTool]:
         available = self.client.is_available
+        handlers = {
+            "stop": self._stop,
+            "say": self._say,
+            "go_to_player": self._go_to_player,
+            "follow_player": self._follow_player,
+            "collect_blocks": self._collect_blocks,
+            "collect_resource": self._collect_resource,
+            "chop_tree": self._chop_tree,
+            "capture_view": self._capture_view,
+            "look_at_position": self._look_at_position,
+            "look_at_player": self._look_at_player,
+            "send_message": self._send_message,
+        }
         return [
             RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "stop"),
-                    description=(
-                        "Stop the configured Minecraft agent's current action and any "
-                        "continuous goal. Use this for an immediate stop request."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    },
+                spec=spec,
+                handler=handlers[spec.capability.action],
+                available=(
+                    (lambda: available() and self.client.controller_mode() != "external")
+                    if spec.capability.action == "send_message"
+                    else available
                 ),
-                handler=self._stop,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "say"),
-                    description=(
-                        "Send an exact message through the configured bot's Minecraft chat "
-                        "without invoking Mindcraft's planning model."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256,
-                            },
-                        },
-                        "required": ["message"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._say,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "go_to_player"),
-                    description=(
-                        "Move the configured Minecraft agent near a player. Use this "
-                        "direct action instead of delegating the request to Mindcraft's model."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "player_name": self._player_name_schema(),
-                            "closeness": {
-                                "type": "number",
-                                "description": "Desired distance from the player in blocks.",
-                                "minimum": 0,
-                                "maximum": 128,
-                            },
-                        },
-                        "required": ["player_name", "closeness"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._go_to_player,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "follow_player"),
-                    description=(
-                        "Continuously follow a player at a specified distance. Use "
-                        "mindcraft__stop to stop following."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "player_name": self._player_name_schema(),
-                            "follow_distance": {
-                                "type": "number",
-                                "description": "Following distance in blocks.",
-                                "minimum": 0,
-                                "maximum": 128,
-                            },
-                        },
-                        "required": ["player_name", "follow_distance"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._follow_player,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "collect_blocks"),
-                    description=(
-                        "Collect a bounded number of nearby blocks of one Minecraft block "
-                        "type without invoking Mindcraft's planning model."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "block_type": {
-                                "type": "string",
-                                "description": "Minecraft block identifier, such as oak_log.",
-                                "pattern": "^[a-z0-9_]+$",
-                                "minLength": 1,
-                                "maxLength": 64,
-                            },
-                            "count": {
-                                "type": "integer",
-                                "description": "Number of blocks to collect.",
-                                "minimum": 1,
-                                "maximum": 256,
-                            },
-                        },
-                        "required": ["block_type", "count"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._collect_blocks,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "collect_resource"),
-                    description=(
-                        "Collect a Minecraft resource using semantic names such as coal, iron, "
-                        "diamond, or redstone. Mindcraft resolves the resource to valid block IDs."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "resource": {
-                                "type": "string",
-                                "pattern": "^[a-z0-9_]+$",
-                                "minLength": 1,
-                                "maxLength": 64,
-                            },
-                            "count": {"type": "integer", "minimum": 1, "maximum": 256},
-                        },
-                        "required": ["resource", "count"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._collect_resource,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "chop_tree"),
-                    description=(
-                        "Find the nearest tree log type and chop a bounded number of logs from it."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "max_logs": {"type": "integer", "minimum": 1, "maximum": 64},
-                        },
-                        "required": ["max_logs"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._chop_tree,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "capture_view"),
-                    description=(
-                        "Capture the Minecraft agent's current first-person view for direct "
-                        "visual inspection by the assistant."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._capture_view,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "look_at_position"),
-                    description="Turn toward coordinates, capture the view, and inspect it.",
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "x": {"type": "integer", "minimum": -30000000, "maximum": 30000000},
-                            "y": {"type": "integer", "minimum": -64, "maximum": 320},
-                            "z": {"type": "integer", "minimum": -30000000, "maximum": 30000000},
-                        },
-                        "required": ["x", "y", "z"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._look_at_position,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "look_at_player"),
-                    description="Look at a player or in the same direction as that player.",
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "player_name": self._player_name_schema(),
-                            "direction": {"type": "string", "enum": ["at", "with"]},
-                        },
-                        "required": ["player_name", "direction"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._look_at_player,
-                available=available,
-            ),
-            RegisteredTool(
-                spec=ToolSpec(
-                    capability=CapabilityId(self.name, "send_message"),
-                    description=(
-                        "Delegate a complex, open-ended objective or conversational message to "
-                        "the configured Mindcraft agent and its planning model. Prefer a typed "
-                        "Mindcraft action when one directly matches the request."
-                    ),
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "The instruction or message for the Minecraft agent.",
-                                "minLength": 1,
-                                "maxLength": 4000,
-                            },
-                        },
-                        "required": ["message"],
-                        "additionalProperties": False,
-                    },
-                ),
-                handler=self._send_message,
-                available=lambda: available() and self.client.controller_mode() != "external",
-            ),
+            )
+            for spec in build_mindcraft_tool_specs(self.name)
         ]
-
-    @staticmethod
-    def _player_name_schema() -> dict[str, object]:
-        return {
-            "type": "string",
-            "description": "Exact Minecraft player name.",
-            "pattern": "^[A-Za-z0-9_]+$",
-            "minLength": 1,
-            "maxLength": 16,
-        }
 
     def _stop(
         self,
