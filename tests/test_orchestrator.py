@@ -257,6 +257,7 @@ class OrchestratorTests(unittest.TestCase):
         belief_turn_preparer=None,
         database=None,
         vector_store=None,
+        allowed_expressions=None,
     ):
         llm = FakeLLM(
             llm_chunks or ["Hello", " world"],
@@ -290,6 +291,7 @@ class OrchestratorTests(unittest.TestCase):
             memory_retriever=memory_retriever,
             turn_finalizer=turn_finalizer,
             gesture_catalog={"greeting": "/static/animations/Gestures/Greeting.fbx"},
+            allowed_expressions=allowed_expressions,
             late_routing_enabled=late_routing_enabled,
             belief_context_provider=belief_context_provider,
             belief_processing_mode=belief_processing_mode,
@@ -1262,6 +1264,32 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[:-1], ["Nice."])
         self.assertEqual(speech_texts[-1], "Nice.")
         self.assertEqual(history.records[1][2], "Nice.")
+
+    def test_response_expression_uses_configured_allowlist(self):
+        (
+            orch,
+            _llm,
+            history,
+            _memory,
+            _summary_store,
+            _summarizer,
+            _tool_executor,
+            _context_builder,
+        ) = self._build_orchestrator(
+            llm_chunks=["[state:happy][expression:focused]Ready."],
+            summary_trigger=999,
+            allowed_expressions={"focused"},
+        )
+
+        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        expression_values = [
+            event.expression
+            for event in events
+            if isinstance(event, AvatarExpressionEvent)
+        ]
+        self.assertEqual(expression_values, ["focused"])
+        self.assertEqual(history.records[1][2], "Ready.")
 
     def test_thinking_tags_do_not_trigger_expression_or_animation_events(self):
         (

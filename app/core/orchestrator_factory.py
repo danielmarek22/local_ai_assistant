@@ -39,6 +39,7 @@ from app.services.avatar_controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
     discover_outfit_catalog,
+    normalize_expressions,
 )
 from app.beliefs import (
     BeliefCandidateExtractor,
@@ -399,7 +400,7 @@ def _build_orchestrator(
     # --------------------------------------------------
     logger.info("Setting up context builder")
     gesture_catalog = discover_gesture_catalog()
-    allowed_expressions = avatar_controls_cfg.get("expressions")
+    allowed_expressions = normalize_expressions(avatar_controls_cfg.get("expressions"))
 
     # Executable capabilities are supplied only through native schemas in agent mode.
     base_system_prompt = config.assistant["system_prompt"]
@@ -435,6 +436,7 @@ def _build_orchestrator(
         memory_retriever=memory_retriever,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
+        allowed_expressions=set(allowed_expressions),
         late_routing_enabled=native_late_routing_enabled,
         integration_context_limit=config.context["integration_context_limit"],
         agent_id=agent_id,

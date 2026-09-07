@@ -77,6 +77,7 @@ class GestureCatalogTests(unittest.TestCase):
         self.assertIn("You are Astra.", prompt)
         self.assertIn("Avatar Expression Control", prompt)
         self.assertIn("Allowed emotions: happy, neutral", prompt)
+        self.assertIn("Other bracketed values are removed", prompt)
         self.assertIn("Avatar Gesture Control", prompt)
         self.assertIn("[animation:name]", prompt)
         self.assertIn("greeting", prompt)

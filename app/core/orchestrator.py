@@ -87,6 +87,7 @@ class Orchestrator:
         memory_retriever,
         turn_finalizer,
         gesture_catalog: dict[str, str] | None = None,
+        allowed_expressions: set[str] | None = None,
         late_routing_enabled: bool = False,
         integration_context_limit: int = 4000,
         agent_id: str = "default-agent",
@@ -112,6 +113,7 @@ class Orchestrator:
         self.turn_finalizer = turn_finalizer
         self.gesture_catalog = dict(gesture_catalog or {})
         self.allowed_animations = set(self.gesture_catalog.keys())
+        self.allowed_expressions = allowed_expressions
         self.late_routing_enabled = late_routing_enabled
         self.integration_context_limit = integration_context_limit
         self.agent_id = agent_id
@@ -811,7 +813,10 @@ class Orchestrator:
         thinking_buffer = ""
         expression_initialized = False
         start_ts = time.perf_counter()
-        processor = StreamProcessor(allowed_animations=self.allowed_animations)
+        processor = StreamProcessor(
+            allowed_animations=self.allowed_animations,
+            allowed_expressions=self.allowed_expressions,
+        )
         thinking_splitter = ThinkingBlockSplitter()
 
         stream_kwargs = {"think_override": think_override}
@@ -1285,7 +1290,10 @@ class Orchestrator:
             yield AssistantStateEvent(state=AssistantState.RESPONDING)
             
             # Re-introduce the StreamProcessor to parse avatar tags out of the raw block
-            processor = StreamProcessor(allowed_animations=self.allowed_animations)
+            processor = StreamProcessor(
+                allowed_animations=self.allowed_animations,
+                allowed_expressions=self.allowed_expressions,
+            )
             expression_initialized = False
             
             # Push the text through the processor to strip tags and yield animation events

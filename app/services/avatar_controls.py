@@ -2,7 +2,6 @@ import logging
 import re
 from pathlib import Path
 
-
 logger = logging.getLogger("avatar_controls")
 _NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
 DEFAULT_EXPRESSIONS = (
@@ -112,7 +111,9 @@ def build_prompt_with_avatar_controls(
         f"- Allowed emotions: {expression_names}\n"
         "- Usage: 0-2 tags per message\n"
         "- Guideline: Prefer keeping one expression unless the tone clearly changes\n"
-        "- Rule: Place tags where emotional tone shifts. Do not explain or reference tags."
+        "- Rule: Place tags where emotional tone shifts. Do not explain or reference tags.\n"
+        "- Validation: Other bracketed values are removed unless they are Markdown code, "
+        "links, images, references, or escapes."
     )
     sections.append(expression_block)
 

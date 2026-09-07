@@ -21,6 +21,9 @@ Core orchestration logic of the assistant.
   identities are derived from normalized sender type and display name; renaming a
   participant creates a new identity in the v1 roster-free model.
 - `MemoryRetriever`, `MemoryActionHandler`, `TurnFinalizer`, and `StreamProcessor` keep the turn loop smaller and easier to change.
+- `StreamProcessor` evaluates balanced bracket candidates against the configured avatar
+  allowlists and removes invalid candidates. Escaped brackets and brackets inside
+  fenced code, inline code, Markdown links, images, and references remain ordinary text.
 - Agent-mode turns expose registered native capabilities; `instant_mode` streams a direct response without capability schemas.
 - A frozen `AuthoritativeTurnContext` is created immediately after participant-message
   persistence and explicitly accompanies eligible turn-scoped tools. It contains the
