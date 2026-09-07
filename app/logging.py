@@ -7,6 +7,9 @@ from typing import Any
 
 
 _LOGGING_CONFIGURED = False
+_CONFIGURED_HANDLERS: tuple[logging.Handler, ...] = ()
+_PREVIOUS_ROOT_LEVEL: int | None = None
+_PREVIOUS_TRACE_STATE: tuple[int, bool, bool] | None = None
 _TRACE_LOGGER_NAME = "trace"
 _SENSITIVE_BINARY_KEYS = {"base64_data", "data", "images", "audios"}
 _DEFAULT_MAX_STRING_CHARS = 4000
@@ -205,8 +208,11 @@ def setup_logging(
     trace_file_name: str = "trace.log",
     trace_max_bytes: int | None = None,
     trace_backup_count: int | None = None,
-):
+) -> None:
+    global _CONFIGURED_HANDLERS
     global _LOGGING_CONFIGURED
+    global _PREVIOUS_ROOT_LEVEL
+    global _PREVIOUS_TRACE_STATE
 
     if _LOGGING_CONFIGURED:
         logging.getLogger(__name__).debug("Logging already configured, skipping")
@@ -281,9 +287,21 @@ def setup_logging(
         },
     }
 
+    root = logging.getLogger()
+    trace_logger = logging.getLogger(_TRACE_LOGGER_NAME)
+    previous_root_level = root.level
+    previous_trace_state = (
+        trace_logger.level,
+        trace_logger.propagate,
+        trace_logger.disabled,
+    )
+
     logging.config.dictConfig(logging_config)
 
-    root = logging.getLogger()
+    trace_logger = logging.getLogger(_TRACE_LOGGER_NAME)
+    configured_handlers = tuple(
+        dict.fromkeys((*root.handlers, *trace_logger.handlers))
+    )
     root.info("Logging initialized")
     root.info(
         "Log levels: console=%s file=%s",
@@ -298,7 +316,44 @@ def setup_logging(
             logging.getLevelName(resolved_trace_level),
         )
 
+    _CONFIGURED_HANDLERS = configured_handlers
+    _PREVIOUS_ROOT_LEVEL = previous_root_level
+    _PREVIOUS_TRACE_STATE = previous_trace_state
     _LOGGING_CONFIGURED = True
+
+
+def reset_logging() -> None:
+    """Release ASTRA-owned handlers and allow controlled reconfiguration."""
+    global _CONFIGURED_HANDLERS
+    global _LOGGING_CONFIGURED
+    global _PREVIOUS_ROOT_LEVEL
+    global _PREVIOUS_TRACE_STATE
+
+    root = logging.getLogger()
+    trace_logger = logging.getLogger(_TRACE_LOGGER_NAME)
+    owned_handler_ids = {id(handler) for handler in _CONFIGURED_HANDLERS}
+
+    for logger in (root, trace_logger):
+        for handler in tuple(logger.handlers):
+            if id(handler) in owned_handler_ids:
+                logger.removeHandler(handler)
+
+    for handler in _CONFIGURED_HANDLERS:
+        handler.close()
+
+    if _PREVIOUS_ROOT_LEVEL is not None:
+        root.setLevel(_PREVIOUS_ROOT_LEVEL)
+    if _PREVIOUS_TRACE_STATE is not None:
+        trace_level, trace_propagate, trace_disabled = _PREVIOUS_TRACE_STATE
+        trace_logger.setLevel(trace_level)
+        trace_logger.propagate = trace_propagate
+        trace_logger.disabled = trace_disabled
+
+    _CONFIGURED_HANDLERS = ()
+    _PREVIOUS_ROOT_LEVEL = None
+    _PREVIOUS_TRACE_STATE = None
+    _LOGGING_CONFIGURED = False
+    _WARNED_UNREGISTERED_TRACE_EVENTS.clear()
 
 
 def setup_logging_from_config(config: dict | None = None) -> None:

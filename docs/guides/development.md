@@ -52,6 +52,12 @@ The test runner buffers stdout and stderr for successful tests so expected fault
 logs do not obscure the result. If a test fails, its captured output is printed with the
 failure automatically.
 
+Tests that exercise the real logging configuration should do so in an isolated process,
+or call `app.logging.reset_logging()` during cleanup. The reset closes only handlers
+installed by ASTRA, restores the previous root and trace logger levels, and permits a
+fresh configuration. It is not part of normal application shutdown because logging is
+owned by the process rather than one application lifespan.
+
 The initial lint gate intentionally covers only high-confidence syntax errors and
 undefined names, keeping adoption separate from broad formatting cleanup:
 
