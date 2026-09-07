@@ -358,6 +358,11 @@ class FakeInterleavedApprovalWebSocket(FakeWebSocket):
         }
 
 
+class FakeDisconnectingApprovalWebSocket(FakeWebSocket):
+    async def receive(self):
+        return {"type": "websocket.disconnect"}
+
+
 class FakeFrameWebSocket:
     def __init__(self, message):
         self.message = message
@@ -1206,6 +1211,57 @@ class ServerSessionTests(unittest.TestCase):
             )
         )
         self.assertFalse(approved)
+
+    def test_request_tool_approval_aborts_when_websocket_disconnects(self):
+        ws = FakeDisconnectingApprovalWebSocket()
+
+        with self.assertRaises(server_module.WebSocketDisconnect):
+            server_module.asyncio.run(
+                server_module._request_tool_approval(
+                    server_module.WebSocketMessageInbox(ws),
+                    {"tool": "shell__execute"},
+                    connection_id="conn-1",
+                    timeout_seconds=1.0,
+                )
+            )
+
+        self.assertEqual(ws.messages[0]["type"], "tool_approval_request")
+
+    def test_unregister_denies_and_removes_pending_autonomous_approval(self):
+        async def exercise():
+            hub = server_module.SessionConnectionHub()
+
+            class SignallingWebSocket(FakeWebSocket):
+                def __init__(self):
+                    super().__init__()
+                    self.prompt_sent = server_module.asyncio.Event()
+
+                async def send_text(self, payload: str):
+                    await super().send_text(payload)
+                    self.prompt_sent.set()
+
+            ws = SignallingWebSocket()
+            hub.register("session-1", "conn-1", ws)
+            approval_task = server_module.asyncio.create_task(
+                hub.request_approval(
+                    "session-1",
+                    {"tool": "mindcraft__observe"},
+                    timeout_seconds=10.0,
+                )
+            )
+
+            await server_module.asyncio.wait_for(ws.prompt_sent.wait(), timeout=1.0)
+            hub.unregister("conn-1")
+            approved = await server_module.asyncio.wait_for(approval_task, timeout=1.0)
+            return hub, ws, approved
+
+        hub, ws, approved = server_module.asyncio.run(exercise())
+
+        self.assertFalse(approved)
+        self.assertEqual(ws.messages[0]["type"], "tool_approval_request")
+        self.assertEqual(ws.messages[0]["origin"], "integration_event")
+        self.assertEqual(hub._approvals, {})
+        self.assertEqual(hub._connections, {})
 
     def test_request_tool_approval_preserves_interleaved_messages_in_order(self):
         interleaved_messages = [
