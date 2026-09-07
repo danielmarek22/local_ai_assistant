@@ -48,6 +48,13 @@ CI runs the Python suite on 3.10 and 3.12 using the lightweight, exact-pinned
 `requirements-test.txt` set. Production-only model, GPU, speech, and vector dependencies
 remain in `requirements.txt` and are not installed by unit-test jobs.
 
+The initial lint gate intentionally covers only high-confidence syntax errors and
+undefined names, keeping adoption separate from broad formatting cleanup:
+
+```bash
+venv_app/bin/ruff check --select E9,F63,F7,F82 app tests main.py
+```
+
 ## Documentation expectations
 
 Update the generated documentation when a change affects system boundaries, data flow, configuration meaning, or a stable public contract. Keep the explanation close to the relevant architecture or guide page instead of maintaining a separate decision log.
