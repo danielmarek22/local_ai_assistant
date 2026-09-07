@@ -304,7 +304,12 @@ def resolve_session_id(
     ):
         return requested_session_id
 
-    return uuid.uuid4().hex[:8]
+    return _new_runtime_id()
+
+
+def _new_runtime_id() -> str:
+    """Return a collision-resistant identifier for internal runtime resources."""
+    return uuid.uuid4().hex
 
 
 def _validate_attachment_batch(
@@ -955,7 +960,7 @@ async def _startup_application(
     )
     logger.info("Starting FastAPI server")
 
-    application.state.server_instance_id = uuid.uuid4().hex[:8]
+    application.state.server_instance_id = _new_runtime_id()
     application.state.connection_hub = SessionConnectionHub()
     application.state.orchestrator = orchestrator_builder(settings)
     application.state.memory_reflector = MemoryReflector(
@@ -1337,7 +1342,7 @@ async def set_autonomy_status(payload: AutonomyStateRequest, request: Request = 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     runtime_app = _runtime_app(ws)
-    connection_id = uuid.uuid4().hex[:8]
+    connection_id = _new_runtime_id()
     start_ts = time.perf_counter()
     server_instance_id = runtime_app.state.server_instance_id
     session_mode = ws.query_params.get("session_mode", "new")

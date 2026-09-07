@@ -140,6 +140,8 @@ class ServerLifecycleTests(unittest.TestCase):
                 self.assertIs(application.state.orchestrator, orchestrator)
                 self.assertIs(application.state.tts, fake_tts)
                 self.assertIs(application.state.stt, fake_stt)
+                self.assertEqual(len(application.state.server_instance_id), 32)
+                int(application.state.server_instance_id, 16)
                 request = server_module.Request({"type": "http", "app": application})
                 self.assertEqual(
                     await server_module.list_sessions(request),
@@ -669,6 +671,14 @@ class ServerSessionTests(unittest.TestCase):
         )
 
         self.assertEqual(session_id, "session-a")
+
+    def test_new_runtime_id_preserves_the_full_uuid(self):
+        generated = types.SimpleNamespace(hex="0123456789abcdef" * 2)
+
+        with patch.object(server_module.uuid, "uuid4", return_value=generated):
+            runtime_id = server_module._new_runtime_id()
+
+        self.assertEqual(runtime_id, generated.hex)
 
     def test_resolve_session_id_reopens_requested_session_in_open_mode(self):
         session_id = server_module.resolve_session_id(

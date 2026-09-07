@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     from app.core.orchestrator_factory import build_orchestrator
 
     orchestrator = build_orchestrator()
-    session_id = uuid.uuid4().hex[:8]
+    session_id = uuid.uuid4().hex
 
     while True:
         user_text = input("\nYou: ")
