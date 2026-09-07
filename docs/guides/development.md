@@ -34,8 +34,19 @@ Python tests use `unittest`, in-memory SQLite, and lightweight fakes for externa
 Run the full Python suite:
 
 ```bash
+venv_app/bin/python -m pip install -r requirements-test.txt
 venv_app/bin/python -m unittest discover -s tests -v
 ```
+
+Run all browser-side module tests with Node.js 20:
+
+```bash
+node --test tests/*.mjs
+```
+
+CI runs the Python suite on 3.10 and 3.12 using the lightweight, exact-pinned
+`requirements-test.txt` set. Production-only model, GPU, speech, and vector dependencies
+remain in `requirements.txt` and are not installed by unit-test jobs.
 
 ## Documentation expectations
 

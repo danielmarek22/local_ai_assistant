@@ -1,38 +1,84 @@
-name: Python unittests
+name: Test suite
 
-# This determines when the workflow runs
 on:
   push:
-    branches: [ "main", "dev" ] 
+    branches: [main, dev]
   pull_request:
-    branches: [ "main", "dev" ]
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  python:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
 
     steps:
-    # 1. Check out the repository code
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-    # 2. Set up the Python environment
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10' # Change this to the Python version you are using
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-test.txt
 
-    # 3. Install your project dependencies (if any)
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Install test dependencies
+        run: python -m pip install --requirement requirements-test.txt
 
-    # 4. Create the assistant file from the example template
-    - name: Create config from example
-      run: cp app/config/assistant-template.yaml app/config/assistant.yaml
+      - name: Create local configuration
+        run: cp app/config/assistant-template.yaml app/config/assistant.yaml
 
-    # 5. Run your tests using the command you provided
-    - name: Run tests
-      run: |
-        python -m unittest discover -s tests -v
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -v
+
+  browser:
+    name: Browser modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run JavaScript tests
+        run: node --test tests/*.mjs
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install documentation dependencies
+        run: python -m pip install --requirement requirements-docs.txt
+
+      - name: Build documentation
+        run: python -m mkdocs build --strict

@@ -15,9 +15,11 @@ class ServerImportTests(unittest.TestCase):
         script = textwrap.dedent(
             """
             import app.server as server
+            import sys
 
             assert server.AUDIO_DIR == server.STATIC_DIR / "audio"
             assert not hasattr(server.app.state, "settings")
+            assert "chromadb" not in sys.modules
             """
         )
         env = dict(os.environ)

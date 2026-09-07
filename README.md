@@ -109,7 +109,9 @@ The project includes a unit test suite under `tests/` covering context construct
 From the project root, run:
 
 ```bash
+python -m pip install -r requirements-test.txt
 python -m unittest discover -s tests -v
+node --test tests/*.mjs
 ```
 
 For a deeper breakdown of test scope and how to add more coverage, see `tests/README.md`.

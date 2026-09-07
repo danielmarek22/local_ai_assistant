@@ -43,13 +43,15 @@ Open `http://127.0.0.1:8000` after startup completes.
 Run the complete Python suite from the repository root:
 
 ```bash
+venv_app/bin/python -m pip install -r requirements-test.txt
 venv_app/bin/python -m unittest discover -s tests -v
 ```
 
-Browser-side JavaScript tests use Node's built-in test runner. Individual suites can be run directly, for example:
+Browser-side JavaScript tests use Node's built-in test runner and have no package
+dependencies:
 
 ```bash
-node --test tests/test_attachment_utils.mjs
+node --test tests/*.mjs
 ```
 
 ## Build these docs
