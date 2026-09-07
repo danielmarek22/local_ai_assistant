@@ -8,16 +8,15 @@ class SummaryStore:
 
     def get(self, session_id: str) -> tuple[str, int] | None:
         """Returns a tuple of (summary_text, last_turn_count) or None."""
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT summary, last_turn_count
-            FROM conversation_summary
-            WHERE session_id = ?
-            """,
-            (session_id,)
-        )
-        row = cursor.fetchone()
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT summary, last_turn_count
+                FROM conversation_summary
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
         result = (row["summary"], row["last_turn_count"]) if row else None
         trace_event(
             "summary_store",
@@ -37,28 +36,26 @@ class SummaryStore:
             session_id=session_id,
             payload={"summary": summary, "last_turn_count": last_turn_count},
         )
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO conversation_summary (session_id, summary, last_turn_count)
-            VALUES (?, ?, ?)
-            ON CONFLICT(session_id)
-            DO UPDATE SET
-                summary = excluded.summary,
-                last_turn_count = excluded.last_turn_count,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (session_id, summary, last_turn_count)
-        )
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversation_summary (session_id, summary, last_turn_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id)
+                DO UPDATE SET
+                    summary = excluded.summary,
+                    last_turn_count = excluded.last_turn_count,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (session_id, summary, last_turn_count),
+            )
 
     def delete(self, session_id: str) -> None:
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            DELETE FROM conversation_summary
-            WHERE session_id = ?
-            """,
-            (session_id,)
-        )
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM conversation_summary
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )

@@ -38,7 +38,7 @@ def reconcile_indexes(config: Config) -> dict[str, dict[str, int]]:
             "episodic": history.reconcile_index(),
         }
     finally:
-        db.conn.close()
+        db.close()
 
 
 def _argument_parser() -> argparse.ArgumentParser:

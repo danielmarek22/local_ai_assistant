@@ -263,7 +263,7 @@ class ReconcileIndexesCommandTests(unittest.TestCase):
 
     def test_command_reconciles_both_indexes_without_building_orchestrator(self):
         connection = Mock()
-        database = SimpleNamespace(conn=connection)
+        database = SimpleNamespace(conn=connection, close=Mock())
         semantic = Mock()
         semantic.reconcile_index.return_value = {
             "canonical_count": 2,
@@ -294,11 +294,11 @@ class ReconcileIndexesCommandTests(unittest.TestCase):
         self.assertEqual(report["episodic"]["canonical_count"], 4)
         semantic.reconcile_index.assert_called_once_with()
         episodic.reconcile_index.assert_called_once_with()
-        connection.close.assert_called_once_with()
+        database.close.assert_called_once_with()
 
     def test_command_closes_database_when_reconciliation_fails(self):
         connection = Mock()
-        database = SimpleNamespace(conn=connection)
+        database = SimpleNamespace(conn=connection, close=Mock())
         config = SimpleNamespace(
             local_human={"id": "person-1", "display_name": "Local Person"},
             assistant={"id": "astra", "display_name": "Astra"},
@@ -314,7 +314,7 @@ class ReconcileIndexesCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "index unavailable"):
                 main_module.reconcile_indexes(config)
 
-        connection.close.assert_called_once_with()
+        database.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

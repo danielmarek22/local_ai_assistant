@@ -63,39 +63,45 @@ class ChatHistoryStore:
     def ensure_session(self, session_id: str, kind: SessionKind | str = SessionKind.DIRECT) -> SessionKind:
         session_id = validate_session_id(session_id)
         requested_kind = SessionKind(kind)
-        cursor = self.db.conn.cursor()
-        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
-        row = cursor.fetchone()
-        if row is not None:
-            return SessionKind(row["kind"])
-        cursor.execute(
-            "INSERT OR IGNORE INTO chat_sessions (session_id, kind) VALUES (?, ?)",
-            (session_id, requested_kind.value),
-        )
-        self.db.conn.commit()
-        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
-        return SessionKind(cursor.fetchone()["kind"])
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT kind FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is not None:
+                return SessionKind(row["kind"])
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_sessions (session_id, kind) VALUES (?, ?)",
+                (session_id, requested_kind.value),
+            )
+            row = conn.execute(
+                "SELECT kind FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return SessionKind(row["kind"])
 
     def get_session_kind(self, session_id: str) -> SessionKind:
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute("SELECT kind FROM chat_sessions WHERE session_id = ?", (session_id,))
-        row = cursor.fetchone()
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT kind FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
         return SessionKind(row["kind"]) if row is not None else SessionKind.DIRECT
 
     def session_exists(self, session_id: str) -> bool:
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT (
-                EXISTS(SELECT 1 FROM chat_sessions WHERE session_id = ?)
-                OR EXISTS(SELECT 1 FROM chat_history WHERE session_id = ?)
-            ) AS session_exists
-            """,
-            (session_id, session_id),
-        )
-        return bool(cursor.fetchone()["session_exists"])
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT (
+                    EXISTS(SELECT 1 FROM chat_sessions WHERE session_id = ?)
+                    OR EXISTS(SELECT 1 FROM chat_history WHERE session_id = ?)
+                ) AS session_exists
+                """,
+                (session_id, session_id),
+            ).fetchone()
+        return bool(row["session_exists"])
 
     def default_sender(self, role: str, input_source: InputSource | str | None = None) -> SenderAttribution:
         source = InputSource(input_source) if input_source is not None else None
@@ -169,37 +175,36 @@ class ChatHistoryStore:
             },
         )
 
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO chat_history (
-                session_id, role, content, sender_id, sender_display_name,
-                sender_type, input_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_id, role, content, sender.sender_id, sender.sender_display_name,
-                sender.sender_type.value, sender.input_source.value,
+        with self.db.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chat_history (
+                    session_id, role, content, sender_id, sender_display_name,
+                    sender_type, input_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id, role, content, sender.sender_id, sender.sender_display_name,
+                    sender.sender_type.value, sender.input_source.value,
+                ),
             )
-        )
-        message_id = cursor.lastrowid
-        cursor.execute(
-            "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
-            (session_id,),
-        )
-
-        attachment_records = []
-        if attachments:
-            attachment_records = self._store_attachments(
-                cursor,
-                session_id,
-                message_id,
-                role,
-                content,
-                attachments,
+            message_id = cursor.lastrowid
+            cursor.execute(
+                "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                (session_id,),
             )
 
-        self.db.conn.commit()
+            attachment_records = []
+            if attachments:
+                attachment_records = self._store_attachments(
+                    cursor,
+                    session_id,
+                    message_id,
+                    role,
+                    content,
+                    attachments,
+                )
 
         vector_docs = [self._build_message_vector_doc(role, content, sender, session_kind)]
         vector_metadatas = [{
@@ -292,17 +297,29 @@ class ChatHistoryStore:
         return report
 
     def _canonical_vector_records(self) -> list[dict]:
-        rows = self.db.conn.execute(
-            """
-            SELECT ch.id, ch.session_id, ch.role, ch.content, ch.timestamp,
-                   ch.sender_id, ch.sender_display_name, ch.sender_type,
-                   ch.input_source, COALESCE(cs.kind, 'direct') AS session_kind
-            FROM chat_history ch
-            LEFT JOIN chat_sessions cs ON cs.session_id = ch.session_id
-            WHERE ch.excluded_from_context = 0
-            ORDER BY ch.id ASC
-            """
-        ).fetchall()
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ch.id, ch.session_id, ch.role, ch.content, ch.timestamp,
+                       ch.sender_id, ch.sender_display_name, ch.sender_type,
+                       ch.input_source, COALESCE(cs.kind, 'direct') AS session_kind
+                FROM chat_history ch
+                LEFT JOIN chat_sessions cs ON cs.session_id = ch.session_id
+                WHERE ch.excluded_from_context = 0
+                ORDER BY ch.id ASC
+                """
+            ).fetchall()
+            attachments = conn.execute(
+                """
+                SELECT ca.id, ca.message_id, ca.name, ca.mime_type, ca.storage_path,
+                       ca.sha256, ca.size_bytes, ca.summary_text
+                FROM chat_attachments ca
+                JOIN chat_history ch ON ch.id = ca.message_id
+                WHERE ch.excluded_from_context = 0
+                  AND ca.summary_text IS NOT NULL AND ca.summary_text != ''
+                ORDER BY ca.id ASC
+                """
+            ).fetchall()
 
         records = []
         messages = {}
@@ -322,17 +339,6 @@ class ChatHistoryStore:
         if not messages:
             return records
 
-        attachments = self.db.conn.execute(
-            """
-            SELECT ca.id, ca.message_id, ca.name, ca.mime_type, ca.storage_path,
-                   ca.sha256, ca.size_bytes, ca.summary_text
-            FROM chat_attachments ca
-            JOIN chat_history ch ON ch.id = ca.message_id
-            WHERE ch.excluded_from_context = 0
-              AND ca.summary_text IS NOT NULL AND ca.summary_text != ''
-            ORDER BY ca.id ASC
-            """
-        ).fetchall()
         for row in attachments:
             attachment_row = dict(row)
             item, sender, session_kind = messages[attachment_row["message_id"]]
@@ -532,14 +538,14 @@ class ChatHistoryStore:
 
     def _load_attachments_for_message_ids(
         self,
+        conn,
         message_ids: list[int],
     ) -> dict[int, list[Attachment]]:
         if not message_ids:
             return {}
 
         placeholders = ", ".join("?" for _ in message_ids)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
+        rows = conn.execute(
             f"""
             SELECT id, message_id, name, mime_type, storage_path, sha256, size_bytes, summary_text
             FROM chat_attachments
@@ -547,10 +553,10 @@ class ChatHistoryStore:
             ORDER BY id ASC
             """,
             message_ids,
-        )
+        ).fetchall()
 
         attachments_by_message: dict[int, list[Attachment]] = {}
-        for row in cursor.fetchall():
+        for row in rows:
             attachment = attachment_from_stored_record({
                 "id": row["id"],
                 "name": row["name"],
@@ -565,12 +571,13 @@ class ChatHistoryStore:
 
         return attachments_by_message
 
-    def _rows_with_attachments(self, rows):
+    def _rows_with_attachments(self, conn, rows):
         rows = list(rows)
         if not rows:
             return []
 
         attachments_by_message = self._load_attachments_for_message_ids(
+            conn,
             [row["id"] for row in rows]
         )
 
@@ -631,20 +638,19 @@ class ChatHistoryStore:
 
     def get_recent(self, session_id: str, limit: int = 10):
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source,
-                   retry_error, retry_attempts
-            FROM chat_history
-            WHERE session_id = ? AND excluded_from_context = 0
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (session_id, limit)
-        )
-        rows = cursor.fetchall()
-        hydrated = list(reversed(self._rows_with_attachments(rows)))
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source,
+                       retry_error, retry_attempts
+                FROM chat_history
+                WHERE session_id = ? AND excluded_from_context = 0
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+            hydrated = list(reversed(self._rows_with_attachments(conn, rows)))
         trace_event(
             "chat_history",
             "recent_history",
@@ -655,30 +661,30 @@ class ChatHistoryStore:
 
     def count_messages(self, session_id: str) -> int:
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """SELECT COUNT(*) AS message_count FROM chat_history
-               WHERE session_id = ? AND excluded_from_context = 0""",
-            (session_id,),
-        )
-        return int(cursor.fetchone()["message_count"])
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS message_count FROM chat_history
+                   WHERE session_id = ? AND excluded_from_context = 0""",
+                (session_id,),
+            ).fetchone()
+        return int(row["message_count"])
 
     def get_before(self, session_id: str, message_id: int, limit: int = 2):
         session_id = validate_session_id(session_id)
         if limit <= 0:
             return []
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
-            FROM chat_history
-            WHERE session_id = ? AND id < ? AND excluded_from_context = 0
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (session_id, message_id, limit),
-        )
-        rows = list(reversed([dict(row) for row in cursor.fetchall()]))
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
+                FROM chat_history
+                WHERE session_id = ? AND id < ? AND excluded_from_context = 0
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, message_id, limit),
+            ).fetchall()
+        rows = list(reversed([dict(row) for row in rows]))
         for row in rows:
             sender = self.effective_sender(row)
             row.update({
@@ -700,93 +706,92 @@ class ChatHistoryStore:
         session_id = validate_session_id(session_id)
         if limit <= 0:
             return []
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            WITH latest AS (
-                SELECT sender_id, MAX(id) AS latest_id
-                FROM chat_history
-                WHERE session_id = ? AND id < ?
-                  AND sender_type IN ('human', 'external_agent')
-                  AND sender_id IS NOT NULL AND sender_id != ''
-                GROUP BY sender_id
-            )
-            SELECT ch.sender_id, ch.sender_display_name, ch.sender_type, latest.latest_id
-            FROM latest
-            JOIN chat_history ch ON ch.id = latest.latest_id
-            ORDER BY latest.latest_id DESC, ch.sender_id ASC
-            LIMIT ?
-            """,
-            (session_id, message_id, int(limit)),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH latest AS (
+                    SELECT sender_id, MAX(id) AS latest_id
+                    FROM chat_history
+                    WHERE session_id = ? AND id < ?
+                      AND sender_type IN ('human', 'external_agent')
+                      AND sender_id IS NOT NULL AND sender_id != ''
+                    GROUP BY sender_id
+                )
+                SELECT ch.sender_id, ch.sender_display_name, ch.sender_type, latest.latest_id
+                FROM latest
+                JOIN chat_history ch ON ch.id = latest.latest_id
+                ORDER BY latest.latest_id DESC, ch.sender_id ASC
+                LIMIT ?
+                """,
+                (session_id, message_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_all(self, session_id: str):
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
-                   input_source, retry_error, retry_attempts
-            FROM chat_history
-            WHERE session_id = ? AND excluded_from_context = 0
-            ORDER BY id ASC
-            """,
-            (session_id,)
-        )
-        return self._rows_with_attachments(cursor.fetchall())
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                       input_source, retry_error, retry_attempts
+                FROM chat_history
+                WHERE session_id = ? AND excluded_from_context = 0
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            return self._rows_with_attachments(conn, rows)
 
     def mark_turn_failed(self, session_id: str, user_message_id: int, message: str) -> int:
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            UPDATE chat_history
-            SET retry_error = ?, retry_attempts = retry_attempts + 1
-            WHERE id = ? AND session_id = ? AND role = 'user'
-            """,
-            (message, int(user_message_id), session_id),
-        )
-        if cursor.rowcount != 1:
-            raise ValueError("Retry target is not a user message in this session")
-        self.db.conn.commit()
-        row = cursor.execute(
-            "SELECT retry_attempts FROM chat_history WHERE id = ?",
-            (int(user_message_id),),
-        ).fetchone()
+        with self.db.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_history
+                SET retry_error = ?, retry_attempts = retry_attempts + 1
+                WHERE id = ? AND session_id = ? AND role = 'user'
+                """,
+                (message, int(user_message_id), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Retry target is not a user message in this session")
+            row = conn.execute(
+                "SELECT retry_attempts FROM chat_history WHERE id = ?",
+                (int(user_message_id),),
+            ).fetchone()
         return int(row["retry_attempts"])
 
     def resolve_turn_failure(self, session_id: str, user_message_id: int) -> None:
         session_id = validate_session_id(session_id)
-        self.db.conn.execute(
-            """
-            UPDATE chat_history SET retry_error = NULL
-            WHERE id = ? AND session_id = ? AND role = 'user'
-            """,
-            (int(user_message_id), session_id),
-        )
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE chat_history SET retry_error = NULL
+                WHERE id = ? AND session_id = ? AND role = 'user'
+                """,
+                (int(user_message_id), session_id),
+            )
 
     def get_retryable_user_message(self, session_id: str, user_message_id: int):
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
-                   input_source, retry_error, retry_attempts
-            FROM chat_history
-            WHERE id = ? AND session_id = ? AND role = 'user'
-              AND retry_error IS NOT NULL AND excluded_from_context = 0
-            """,
-            (int(user_message_id), session_id),
-        )
-        rows = self._rows_with_attachments(cursor.fetchall())
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, timestamp, sender_id, sender_display_name, sender_type,
+                       input_source, retry_error, retry_attempts
+                FROM chat_history
+                WHERE id = ? AND session_id = ? AND role = 'user'
+                  AND retry_error IS NOT NULL AND excluded_from_context = 0
+                """,
+                (int(user_message_id), session_id),
+            ).fetchall()
+            rows = self._rows_with_attachments(conn, rows)
         return rows[0] if rows else None
 
     def list_sessions(self):
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
+        with self.db.connection() as conn:
+            return conn.execute(
+                """
             WITH session_ids AS (
                 SELECT session_id FROM chat_sessions
                 UNION
@@ -813,34 +818,34 @@ class ChatHistoryStore:
             GROUP BY sessions.session_id, cs.kind, cs.created_at, cs.updated_at
             HAVING COUNT(ch.id) > 0
             ORDER BY updated_at DESC, sessions.session_id DESC
-            """
-        )
-        return cursor.fetchall()
+                """
+            ).fetchall()
 
     def delete_session(self, session_id: str) -> SessionDeletionResult:
         session_id = validate_session_id(session_id)
-        cursor = self.db.conn.cursor()
-        session_exists = self.session_exists(session_id)
-        cursor.execute(
-            "DELETE FROM chat_sessions WHERE session_id = ?",
-            (session_id,),
-        )
-        cursor.execute(
-            """
-            DELETE FROM chat_attachments
-            WHERE session_id = ?
-            """,
-            (session_id,)
-        )
-        cursor.execute(
-            """
-            DELETE FROM chat_history
-            WHERE session_id = ?
-            """,
-            (session_id,)
-        )
-        deleted_count = cursor.rowcount
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            session_exists = bool(conn.execute(
+                """
+                SELECT (
+                    EXISTS(SELECT 1 FROM chat_sessions WHERE session_id = ?)
+                    OR EXISTS(SELECT 1 FROM chat_history WHERE session_id = ?)
+                ) AS session_exists
+                """,
+                (session_id, session_id),
+            ).fetchone()["session_exists"])
+            conn.execute(
+                "DELETE FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "DELETE FROM chat_attachments WHERE session_id = ?",
+                (session_id,),
+            )
+            cursor = conn.execute(
+                "DELETE FROM chat_history WHERE session_id = ?",
+                (session_id,),
+            )
+            deleted_count = cursor.rowcount
 
         cleanup_errors = []
         try:

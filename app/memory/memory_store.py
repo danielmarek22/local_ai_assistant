@@ -40,15 +40,14 @@ class MemoryStore:
         )
         
         # 1. Save to SQLite with shared UUID
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO memory (id, category, content, importance) 
-            VALUES (?, ?, ?, ?)
-            """,
-            (mem_id, category, content, importance),
-        )
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory (id, category, content, importance)
+                VALUES (?, ?, ?, ?)
+                """,
+                (mem_id, category, content, importance),
+            )
 
         # 2. Idempotently index the canonical row using the SAME UUID.
         try:
@@ -100,29 +99,29 @@ class MemoryStore:
         Retrieves recent memories for the UI/frontend.
         Returns full dicts so the UI can display timestamps!
         """
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, content, importance, created_at, last_accessed_at
-            FROM memory
-            ORDER BY importance DESC, last_accessed_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, content, importance, created_at, last_accessed_at
+                FROM memory
+                ORDER BY importance DESC, last_accessed_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_for_inspection(self) -> list[dict]:
         """Return every canonical SQLite memory row without retrieval side effects."""
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, category, content, importance, created_at, last_accessed_at
-            FROM memory
-            ORDER BY created_at DESC, id DESC
-            """
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, category, content, importance, created_at, last_accessed_at
+                FROM memory
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.65) -> list[str]:
         """
@@ -168,33 +167,32 @@ class MemoryStore:
         if not memory_ids:
             return
             
-        cursor = self.db.conn.cursor()
         # Create a parameter placeholder list like (?, ?, ?)
         placeholders = ",".join(["?"] * len(memory_ids))
-        
-        cursor.execute(
-            f"""
-            UPDATE memory 
-            SET last_accessed_at = CURRENT_TIMESTAMP 
-            WHERE id IN ({placeholders})
-            """,
-            memory_ids
-        )
-        self.db.conn.commit()
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                f"""
+                UPDATE memory
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+                """,
+                memory_ids,
+            )
         logger.debug("Updated last_accessed_at for %d memories", len(memory_ids))
 
     def get_stale(self, days_old: int = 14) -> list[dict]:
         """Fetches memories that haven't been accessed in X days."""
-        cursor = self.db.conn.cursor()
         # Using SQLite's built-in date math
-        cursor.execute(
-            f"""
-            SELECT id, category, content, importance, created_at, last_accessed_at
-            FROM memory
-            WHERE last_accessed_at <= datetime('now', '-{days_old} days')
-            """
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, category, content, importance, created_at, last_accessed_at
+                FROM memory
+                WHERE last_accessed_at <= datetime('now', '-{days_old} days')
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def delete_memories(self, memory_ids: list[str]) -> int:
         """Deletes memories from both SQLite and the Vector DB."""
@@ -202,14 +200,13 @@ class MemoryStore:
             return 0
 
         # 1. Delete from SQLite
-        cursor = self.db.conn.cursor()
         placeholders = ",".join(["?"] * len(memory_ids))
-        cursor.execute(
-            f"DELETE FROM memory WHERE id IN ({placeholders})",
-            memory_ids
-        )
-        deleted_count = cursor.rowcount
-        self.db.conn.commit()
+        with self.db.transaction() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM memory WHERE id IN ({placeholders})",
+                memory_ids,
+            )
+            deleted_count = cursor.rowcount
 
         # 2. Delete from ChromaDB. A reconciliation can complete this cleanup.
         try:

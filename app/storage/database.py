@@ -1,5 +1,8 @@
 import sqlite3
+import threading
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from app.paths import DATA_DIR, resolve_app_path
 
@@ -180,6 +183,7 @@ class Database:
         self.path = path if path == ":memory:" else str(resolve_app_path(path))
         self.legacy_local_human_id = legacy_local_human_id
         self.legacy_local_human_name = legacy_local_human_name
+        self._lock = threading.RLock()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -194,7 +198,26 @@ class Database:
             raise
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Serialize a complete read operation on the shared connection."""
+        with self._lock:
+            yield self.conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize and atomically commit or roll back a write operation."""
+        with self._lock:
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.rollback()
+                raise
+            else:
+                self.conn.commit()
 
     def _init_schema(self):
         cursor = self.conn.cursor()
