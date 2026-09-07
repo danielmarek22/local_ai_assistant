@@ -1,6 +1,6 @@
 import { CONFIG } from './config.js';
-import { marked } from 'https://cdn.jsdelivr.net/npm/marked@13.0.2/lib/marked.esm.js';
-import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.1.6/+esm';
+import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
+import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
 import { extractBase64Payload, extractImageFilesFromDataTransfer, insertTextAtCursor, isImageFile } from './attachment-utils.mjs';
 
 marked.setOptions({
