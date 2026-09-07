@@ -22,7 +22,7 @@ from app.integrations import (
 )
 from app.integrations.beliefs import BeliefIntegration
 from app.integrations.builtins import MemoryIntegration
-from app.services.tool_executor import ToolExecutor
+from app.core.tool_executor import ToolExecutor
 from app.storage.database import Database
 
 

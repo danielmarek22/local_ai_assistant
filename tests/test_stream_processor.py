@@ -1,6 +1,6 @@
 import unittest
 
-from app.core.stream_processor import StreamProcessor
+from app.avatar.stream_processor import StreamProcessor
 
 
 class StreamProcessorTests(unittest.TestCase):

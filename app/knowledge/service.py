@@ -16,7 +16,7 @@ from app.knowledge.models import (
     SourceDTO,
     SubjectDTO,
 )
-from app.services.context_builder import render_belief_context_section
+from app.core.context_builder import render_belief_context_section
 
 
 _PARSE_ERROR = "Stored value is not valid JSON."

@@ -17,7 +17,7 @@ from app.beliefs.models import (
 from app.knowledge.models import BeliefFiltersDTO, BeliefRecordStatus
 from app.knowledge.service import KnowledgeService
 from app.memory.memory_store import MemoryStore
-from app.services.context_builder import ContextBuilder
+from app.core.context_builder import ContextBuilder
 from app.storage.database import Database
 from tests.test_server_sessions import FakeVectorStore, server_module
 

@@ -12,7 +12,7 @@ from app.integrations import (
     ToolResult,
     ToolSpec,
 )
-from app.services.tool_executor import ToolExecutor
+from app.core.tool_executor import ToolExecutor
 
 
 def consume_generator(gen):

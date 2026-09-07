@@ -8,7 +8,7 @@ from app.memory.chat_history import ChatHistoryStore
 from app.perception.state import ImageAttachment
 from app.storage.database import Database
 from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
-from app.services.turn_finalizer import TurnFinalizer
+from app.core.turn_finalizer import TurnFinalizer
 
 
 class FakeCollection:

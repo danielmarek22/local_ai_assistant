@@ -34,6 +34,14 @@ Memory should be treated as an *active system*, not just a database.
   - stores one summary per conversation session in SQLite
 - `SimpleMemoryPolicy`
   - converts late-routed `write_memory` actions into concrete storage decisions
+- `MemoryRetriever`
+  - combines semantic and episodic retrieval for a turn
+- `MemoryActionHandler`
+  - applies policy-validated writes requested through the memory integration
+- `MemoryReflector`
+  - performs explicitly requested consolidation and pruning
+- `HistorySummarizer`
+  - creates rolling conversation summaries used by `TurnFinalizer`
 
 The attachment model now has a shared `Attachment` base type, but persistence is still intentionally image-focused today.
 

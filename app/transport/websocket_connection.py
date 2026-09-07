@@ -12,8 +12,8 @@ import uuid
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.core.assistant_state import AssistantState
-from app.services.connection_hub import parse_approval_decision
-from app.services.websocket_protocol import (
+from app.transport.connection_hub import parse_approval_decision
+from app.transport.websocket_protocol import (
     ToolApprovalResponseFrame,
     decode_client_frame,
     encode_server_frame,

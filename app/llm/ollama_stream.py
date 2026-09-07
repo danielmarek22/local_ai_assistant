@@ -6,7 +6,7 @@ from typing import Iterator
 
 from . import image_fallback
 from .base import InferenceFailure, LLMClient
-from app.core.thinking_filter import ThinkingBlockSplitter
+from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.logging import trace_event
 
 logger = logging.getLogger("ollama_client")

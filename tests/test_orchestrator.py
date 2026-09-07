@@ -27,12 +27,12 @@ from app.integrations import (
     ToolCall,
     ToolResult,
 )
-from app.services.tool_executor import ToolExecutor
+from app.core.tool_executor import ToolExecutor
 from app.perception.state import ImageAttachment
 from app.perception.keys import PerceptionKey
-from app.services.memory_action_handler import MemoryActionHandler
-from app.services.memory_retriever import MemoryRetriever
-from app.services.turn_finalizer import TurnFinalizer
+from app.memory.action_handler import MemoryActionHandler
+from app.memory.retriever import MemoryRetriever
+from app.core.turn_finalizer import TurnFinalizer
 from app.beliefs import (
     BeliefCandidateExtractor,
     BeliefRepository,

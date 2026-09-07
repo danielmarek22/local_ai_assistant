@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.sentence_splitter import split_sentences
+from app.tts.sentence_splitter import split_sentences
 
 
 class SentenceSplitterTests(unittest.TestCase):

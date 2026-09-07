@@ -5,7 +5,7 @@ from datetime import datetime
 
 from app.perception.attachments import AudioAttachment
 from app.perception.state import ImageAttachment
-from app.services.context_builder import ContextBuilder
+from app.core.context_builder import ContextBuilder
 from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
 
 

@@ -3,7 +3,7 @@ import json
 import unittest
 
 from app.autonomy import SessionTurnCoordinator
-from app.services.connection_hub import SessionConnectionHub
+from app.transport.connection_hub import SessionConnectionHub
 
 
 class FakeWebSocket:

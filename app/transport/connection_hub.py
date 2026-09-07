@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from app.services.websocket_protocol import ToolApprovalResponseFrame, encode_server_frame
+from app.transport.websocket_protocol import ToolApprovalResponseFrame, encode_server_frame
 
 
 def parse_approval_decision(

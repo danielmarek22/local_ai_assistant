@@ -22,7 +22,7 @@ from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
 from app.core.session_ids import SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN, validate_session_id
-from app.services.websocket_protocol import (
+from app.transport.websocket_protocol import (
     RelayMessageFrame,
     RetryMessageFrame,
     ToolApprovalResponseFrame,
@@ -52,12 +52,12 @@ from app.perception.attachments import (
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
-from app.services.sentence_splitter import split_sentences
-from app.services.memory_reflector import MemoryReflector
-from app.services.vision_watchdog import VisionWatchdog
-from app.services.perception_frames import PerceptionFrameController
-from app.services.connection_hub import SessionConnectionHub
-from app.services.websocket_connection import (
+from app.tts.sentence_splitter import split_sentences
+from app.memory.reflector import MemoryReflector
+from app.perception.frame_controller import PerceptionFrameController
+from app.perception.vision_watchdog import VisionWatchdog
+from app.transport.connection_hub import SessionConnectionHub
+from app.transport.websocket_connection import (
     TOOL_APPROVAL_TIMEOUT_SECONDS,
     WebSocketMessageInbox,
     WebSocketMessageTooLarge,
@@ -77,7 +77,7 @@ from app.knowledge import (
 )
 from app.knowledge.models import BeliefFiltersDTO
 from app.beliefs.models import EpistemicStatus, VisibilityPolicy
-from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
+from app.llm.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 from app.paths import STATIC_DIR, resolve_app_path
 
 logger = logging.getLogger("server")
@@ -1580,7 +1580,10 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
 
                     if isinstance(client_frame, VisionFrame):
-                        attachment = await perception_frames.handle(client_frame)
+                        attachment = await perception_frames.handle(
+                            client_frame.type,
+                            client_frame.attachment,
+                        )
                         if attachment is not None:
                             pending_voice_attachments.append(attachment)
                             pending_voice_attachments = _dedupe_attachments_by_hash(

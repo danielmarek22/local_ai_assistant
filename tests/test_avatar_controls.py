@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.services.avatar_controls import (
+from app.avatar.controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
     discover_outfit_catalog,

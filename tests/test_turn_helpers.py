@@ -1,7 +1,7 @@
 import unittest
 
-from app.services.memory_action_handler import MemoryActionHandler
-from app.services.memory_retriever import MemoryRetriever
+from app.memory.action_handler import MemoryActionHandler
+from app.memory.retriever import MemoryRetriever
 
 
 class FakeMemoryStore:

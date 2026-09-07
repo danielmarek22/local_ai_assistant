@@ -12,9 +12,6 @@ from app.integrations import EventAttachmentRef, EventId, IntegrationEvent
 from app.paths import STATIC_DIR
 from app.perception.attachments import Attachment, ImageAttachment, attachment_from_payload
 from app.perception.keys import PerceptionKey
-from app.services.websocket_protocol import VisionFrame
-
-
 logger = logging.getLogger("server")
 
 VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
@@ -47,14 +44,18 @@ class PerceptionFrameController:
         self._last_detection = {"screen": 0.0, "webcam": 0.0}
         self._last_hash: dict[str, str | None] = {"screen": None, "webcam": None}
 
-    async def handle(self, frame: VisionFrame) -> Attachment | None:
-        key, source = self._frame_route(frame.type)
+    async def handle(
+        self,
+        frame_type: str,
+        attachment_payload: dict[str, object],
+    ) -> Attachment | None:
+        key, source = self._frame_route(frame_type)
         if source is None:
             return None
 
-        attachment = attachment_from_payload(frame.attachment)
+        attachment = attachment_from_payload(attachment_payload)
         base64_data = getattr(attachment, "base64_data", None)
-        image_hash = attachment.sha256 or self._fallback_hash(frame.attachment)
+        image_hash = attachment.sha256 or self._fallback_hash(attachment_payload)
 
         perception_payload = {
             **attachment.to_perception_payload(),
@@ -67,7 +68,7 @@ class PerceptionFrameController:
         if key is not None:
             self.orchestrator.perception.update(key, perception_payload)
 
-        if frame.type == VOICE_ATTACHMENT_FRAME_TYPE:
+        if frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
             return attachment
 
         if image_hash == self._last_hash[source]:

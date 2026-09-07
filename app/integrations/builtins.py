@@ -10,7 +10,7 @@ from app.integrations.contracts import (
     ToolResult,
     ToolSpec,
 )
-from app.services.memory_action_handler import MemoryActionHandler
+from app.memory.action_handler import MemoryActionHandler
 from app.tools.bash_execution import BashExecutionTool
 from app.tools.web_search import WebSearchTool
 

@@ -19,8 +19,8 @@ from app.core.events import (
     AutonomyOutcomeEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.core.stream_processor import StreamProcessor
-from app.core.thinking_filter import ThinkingBlockSplitter
+from app.avatar.stream_processor import StreamProcessor
+from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.core.turn_input import TurnInput, InputModality
 from app.core.turn_completion import AuthoritativeTurnContext
 from app.core.conversation import (
@@ -44,7 +44,7 @@ from app.integrations import (
 )
 from app.perception.attachments import Attachment, ImageAttachment
 from app.perception.state import PerceptionState
-from app.services.tool_executor import ToolExecutor
+from app.core.tool_executor import ToolExecutor
 from app.perception.keys import PerceptionKey
 
 logger = logging.getLogger("orchestrator")

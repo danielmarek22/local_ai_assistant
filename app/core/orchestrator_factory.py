@@ -9,11 +9,11 @@ from app.storage.vector_store import VectorStore
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
-from app.services.context_builder import ContextBuilder
-from app.services.image_summarizer import ImageSummarizer
-from app.services.summarizer import HistorySummarizer
+from app.core.context_builder import ContextBuilder
+from app.perception.image_summarizer import ImageSummarizer
+from app.memory.history_summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
-from app.services.search_summarizer import SearchResultSummarizer
+from app.tools.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
 from app.integrations import (
@@ -31,11 +31,11 @@ from app.integrations import (
 )
 from app.autonomy import AutonomyRuntime, AutonomyStore
 from app.memory.memory_policy import SimpleMemoryPolicy
-from app.services.memory_action_handler import MemoryActionHandler
-from app.services.memory_retriever import MemoryRetriever
-from app.services.tool_executor import ToolExecutor
-from app.services.turn_finalizer import TurnFinalizer
-from app.services.avatar_controls import (
+from app.memory.action_handler import MemoryActionHandler
+from app.memory.retriever import MemoryRetriever
+from app.core.tool_executor import ToolExecutor
+from app.core.turn_finalizer import TurnFinalizer
+from app.avatar.controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
     discover_outfit_catalog,

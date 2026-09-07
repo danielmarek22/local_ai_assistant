@@ -28,8 +28,8 @@ from app.core.conversation import InputSource, SenderType
 from app.core.orchestrator_factory import _build_belief_components
 from app.core.turn_completion import CompletedUserTurn
 from app.llm.ollama_stream import OllamaClient
-from app.services.context_builder import ContextBuilder
-from app.services.turn_finalizer import TurnFinalizer
+from app.core.context_builder import ContextBuilder
+from app.core.turn_finalizer import TurnFinalizer
 from app.storage.database import Database
 from app.beliefs.models import (
     BeliefMutation,

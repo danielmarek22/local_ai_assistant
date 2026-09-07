@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.memory_reflector import MemoryReflector
+from app.memory.reflector import MemoryReflector
 
 
 class FakeLLM:

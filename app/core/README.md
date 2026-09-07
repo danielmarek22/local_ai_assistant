@@ -20,8 +20,9 @@ Core orchestration logic of the assistant.
 - Conversation sessions have a durable `direct` or `manual_group` kind. Manual relay
   identities are derived from normalized sender type and display name; renaming a
   participant creates a new identity in the v1 roster-free model.
-- `MemoryRetriever`, `MemoryActionHandler`, `TurnFinalizer`, and `StreamProcessor` keep the turn loop smaller and easier to change.
-- `StreamProcessor` evaluates balanced bracket candidates against the configured avatar
+- `ContextBuilder`, `ToolExecutor`, and `TurnFinalizer` keep cross-feature turn
+  coordination close to the orchestrator without placing it in feature packages.
+- `app/avatar/stream_processor.py` evaluates balanced bracket candidates against the configured avatar
   allowlists and removes invalid candidates. Escaped brackets and brackets inside
   fenced code, inline code, Markdown links, images, and references remain ordinary text.
 - Agent-mode turns expose registered native capabilities; `instant_mode` streams a direct response without capability schemas.

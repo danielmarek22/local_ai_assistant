@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter
 
-from app.services.websocket_protocol import (
+from app.transport.websocket_protocol import (
     CLIENT_FRAME_TYPES,
     SERVER_FRAME_TYPES,
     ClientFrame,

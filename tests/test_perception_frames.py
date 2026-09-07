@@ -3,10 +3,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.perception.frame_controller import PerceptionFrameController
 from app.perception.keys import PerceptionKey
 from app.perception.state import PerceptionState
-from app.services.perception_frames import PerceptionFrameController
-from app.services.websocket_protocol import VisionFrame
+from app.transport.websocket_protocol import VisionFrame
 
 
 PNG_BASE64 = (
@@ -63,7 +63,8 @@ class PerceptionFrameControllerTests(unittest.IsolatedAsyncioTestCase):
             connection_id="connection-1",
         )
 
-        attachment = await controller.handle(_frame("user_attached_frame"))
+        frame = _frame("user_attached_frame")
+        attachment = await controller.handle(frame.type, frame.attachment)
 
         self.assertEqual(attachment.name, "frame.png")
         self.assertEqual(orchestrator.perception.snapshot(), {})
@@ -90,8 +91,8 @@ class PerceptionFrameControllerTests(unittest.IsolatedAsyncioTestCase):
             )
 
             frame = _frame("screen_frame", "../screen capture.png")
-            await controller.handle(frame)
-            await controller.handle(frame)
+            await controller.handle(frame.type, frame.attachment)
+            await controller.handle(frame.type, frame.attachment)
 
             self.assertEqual(len(watchdog.screen_calls), 1)
             self.assertEqual(len(runtime.events), 1)
@@ -124,7 +125,8 @@ class PerceptionFrameControllerTests(unittest.IsolatedAsyncioTestCase):
             clock=lambda: 10.0,
         )
 
-        result = await controller.handle(_frame("webcam_frame"))
+        frame = _frame("webcam_frame")
+        result = await controller.handle(frame.type, frame.attachment)
 
         self.assertIsNone(result)
         snapshot = orchestrator.perception.snapshot()

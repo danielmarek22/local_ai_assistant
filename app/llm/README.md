@@ -26,3 +26,5 @@ This layer should hide all backend-specific details from the rest of the system.
 `image_fallback.py` owns the pure policy for recognizing image-related HTTP failures,
 disabling transport retries for image requests, and generating progressively reduced
 message candidates. `ollama_stream.py` remains responsible for HTTP and client state.
+`thinking_filter.py` separates streamed reasoning markers from visible model output;
+it is model-output normalization rather than turn orchestration.
