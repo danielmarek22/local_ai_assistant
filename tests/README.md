@@ -80,7 +80,7 @@ Tests currently focus on deterministic core behavior that can be validated witho
 Run all tests from the repository root:
 
 ```bash
-venv_app/bin/python -m unittest discover -s tests -v
+venv_app/bin/python -m unittest discover -s tests -v --buffer
 ```
 
 Run a single test module, for example:

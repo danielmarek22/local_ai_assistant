@@ -35,7 +35,7 @@ Run the full Python suite:
 
 ```bash
 venv_app/bin/python -m pip install -r requirements-test.txt
-venv_app/bin/python -m unittest discover -s tests -v
+venv_app/bin/python -m unittest discover -s tests -v --buffer
 ```
 
 Run all browser-side module tests with Node.js 20:
@@ -47,6 +47,10 @@ node --test tests/*.mjs
 CI runs the Python suite on 3.10 and 3.12 using the lightweight, exact-pinned
 `requirements-test.txt` set. Production-only model, GPU, speech, and vector dependencies
 remain in `requirements.txt` and are not installed by unit-test jobs.
+
+The test runner buffers stdout and stderr for successful tests so expected fault-injection
+logs do not obscure the result. If a test fails, its captured output is printed with the
+failure automatically.
 
 The initial lint gate intentionally covers only high-confidence syntax errors and
 undefined names, keeping adoption separate from broad formatting cleanup:
