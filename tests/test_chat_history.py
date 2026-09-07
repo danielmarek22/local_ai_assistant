@@ -90,6 +90,50 @@ class ChatHistoryStoreTests(unittest.TestCase):
             image_summarizer=self.image_summarizer,
         )
 
+    def test_database_rejects_attachment_without_parent_message(self):
+        self.assertEqual(
+            self.db.conn.execute("PRAGMA foreign_keys").fetchone()[0],
+            1,
+        )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.conn.execute(
+                """
+                INSERT INTO chat_attachments (
+                    message_id, session_id, name, mime_type, storage_path, sha256
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (999, "session-1", "orphan.png", "image/png", "orphan.png", "digest"),
+            )
+        self.db.conn.rollback()
+
+    def test_deleting_message_cascades_to_attachments(self):
+        message_id = self.db.conn.execute(
+            """
+            INSERT INTO chat_history (session_id, role, content)
+            VALUES (?, ?, ?)
+            """,
+            ("session-1", "user", "Has attachment"),
+        ).lastrowid
+        self.db.conn.execute(
+            """
+            INSERT INTO chat_attachments (
+                message_id, session_id, name, mime_type, storage_path, sha256
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (message_id, "session-1", "image.png", "image/png", "image.png", "digest"),
+        )
+        self.db.conn.commit()
+
+        self.db.conn.execute("DELETE FROM chat_history WHERE id = ?", (message_id,))
+        self.db.conn.commit()
+
+        attachment_count = self.db.conn.execute(
+            "SELECT COUNT(*) FROM chat_attachments WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()[0]
+        self.assertEqual(attachment_count, 0)
+
     def test_add_persists_image_summary_to_sqlite_and_vectordb(self):
         attachment = ImageAttachment(
             name="settings.png",
