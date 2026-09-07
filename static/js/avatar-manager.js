@@ -5,7 +5,6 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { CONFIG } from './config.js';
 import { TurnGestureQueue } from './turn-gesture-queue.js';
 
-// Import the Mixamo loader helper 
 import { loadMixamoAnimation } from './loadMixamoAnimation.js'; 
 
 export class AvatarManager {
@@ -20,7 +19,7 @@ export class AvatarManager {
         this.currentState = "idle";
         this.currentExpression = "neutral";
         
-        // Animation Mixer & Storage
+        // Animation state.
         this.mixer = null;
         this.animations = {}; 
         this.currentAction = null;
@@ -38,14 +37,14 @@ export class AvatarManager {
         this.dreamingOutroTimeoutId = null;
         this.forceEyesClosed = false;
         
-        // Blink State Management
+        // Blink state.
         this.blinkState = 'open'; 
         this.blinkTimer = 0;
         this.nextBlinkTime = Math.random() * 3 + 2; 
 
-        // --- NEW: Eye Tracking State Management ---
+        // Eye tracking state.
         this.lookAtTarget = new THREE.Object3D(); 
-        this.lookAtOffset = new THREE.Vector3(0, 0, 0); // How far away from the camera to look
+        this.lookAtOffset = new THREE.Vector3(0, 0, 0); // Gaze offset from the camera.
         this.eyeTimer = 0;
         this.nextEyeMoveTime = Math.random() * 3 + 2;
         this.isLookingAtCamera = true;
@@ -71,19 +70,18 @@ export class AvatarManager {
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(30.0, window.innerWidth / window.innerHeight, 0.1, 20.0);
         
-        // --- UPDATED: Move the camera HIGHER, near head-level (1.8) ---
+        // Frame the avatar from a head-level camera.
         this.camera.position.set(0.0, 1.6, 3.2); 
 
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
         
-        // --- UPDATED: Keep the look-target LOWER, near waist-level (0.8) ---
-        // This forces the camera to angle downward.
+        // Aim below the face so the full body remains in frame.
         this.controls.target.set(0.0, 0.8, 0.0); 
         this.controls.update();
 
-        // --- NEW: Add the invisible eye target to the scene ---
+        // The VRM look-at controller follows this invisible scene target.
         this.scene.add(this.lookAtTarget);
 
         const light = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -117,12 +115,11 @@ export class AvatarManager {
                 this.currentOutfit = outfit;
                 this.scene.add(vrm.scene);
                 
-                // --- NEW: Assign the lookAt target to the VRM ---
+                // Track the shared target when the model supports look-at.
                 if (this.currentVrm.lookAt) {
                     this.currentVrm.lookAt.target = this.lookAtTarget;
                 }
                 
-                // Initialize the Animation Mixer tied to the VRM scene
                 this.mixer = new THREE.AnimationMixer(vrm.scene);
 
                 // The new avatar is live before cleanup begins. A cleanup problem must
@@ -312,7 +309,6 @@ export class AvatarManager {
         });
     }
 
-    // --- Mixamo FBX Loader Method ---
     loadAnimation(url, name, playImmediately = false, onLoaded = null) {
         const requestToken = this.avatarLoadToken;
         const vrm = this.currentVrm;
@@ -425,15 +421,11 @@ export class AvatarManager {
         if (!nextAction || this.currentAction === nextAction) return;
 
         nextAction.reset();
-        // --- NEW: Ensure the incoming animation isn't paused ---
+        // Cross-fades must start with both actions running.
         nextAction.paused = false; 
         nextAction.play();
 
         if (this.currentAction) {
-            // --- NEW: Unpause the outgoing animation ---
-            // This is the secret sauce. By unpausing the thinking animation right as 
-            // the crossfade begins, her arm naturally starts moving down while simultaneously 
-            // blending into her talking gesture. It looks incredibly fluid!
             this.currentAction.paused = false; 
             
             nextAction.crossFadeFrom(this.currentAction, duration, true);
@@ -442,7 +434,6 @@ export class AvatarManager {
         this.currentAction = nextAction;
     }
 
-    // --- Random Variant Selector ---
     getPlayableAnimationKeys(state) {
         const keys = this.stateAnimations[state] || [];
         return keys.filter((key) => Boolean(this.animations[key]));
@@ -635,17 +626,17 @@ export class AvatarManager {
         this.controls.update(); 
 
         if (this.currentVrm) {
-            // --- Update procedural features BEFORE updating the VRM ---
+            // Apply procedural face and gaze changes before the VRM update.
             this.updateEyes(deltaTime);
             this.updateBlinking(deltaTime);
             this.updateExpression(deltaTime);
             
-            const visemes = this.getAudioLevel(); // rename callback to getVisemeData
+            const visemes = this.getAudioLevel();
 
             const VISEME_KEYS = ['aa', 'ih', 'ou', 'ee', 'oh'];
-            const SMOOTHING = CONFIG.AUDIO.LIP_SYNC_SMOOTHING; // reuse existing value
+            const SMOOTHING = CONFIG.AUDIO.LIP_SYNC_SMOOTHING;
 
-            // Expression dampening factor (your existing logic)
+            // Preserve non-speech facial expressions while applying visemes.
             let dampen = 1.0;
             if (this.currentExpression !== 'neutral' && this.currentVrm.expressionManager) {
                 const w = this.currentVrm.expressionManager.getValue(this.currentExpression) || 0;
@@ -659,58 +650,49 @@ export class AvatarManager {
                 this.currentVrm.expressionManager.setValue(key, next);
             }
 
-            // --- NEW: Dynamic Animation Pausing (Hold the pose) ---
-            // Never pause one-shot gesture clips; they must reach `finished`
-            // so we can resume queued/default state animations.
+            // Hold the default thinking pose without blocking one-shot gestures.
             if (this.currentAction && this.currentState === 'thinking' && !this.isGesturePlaying) {
                 const duration = this.currentAction.getClip().duration;
                 
-                // Freeze at the 50% mark. Tweak this 0.5 value if her hand hasn't 
-                // fully reached her chin yet (e.g., try 0.6 or 0.7).
+                // Freeze halfway through the clip, after the hand reaches the pose.
                 if (this.currentAction.time >= duration * 0.5) {
                     this.currentAction.paused = true;
                 }
             }
 
-            // Update the Animation Mixer (bones)
             if (this.mixer) this.mixer.update(deltaTime);
 
-            // Finally, update the VRM to apply everything to the model
             this.currentVrm.update(deltaTime);
         }
         
         this.renderer.render(this.scene, this.camera);
     }
-    // --- NEW: Eye Tracking Logic ---
+    // Shift gaze between the camera and nearby points.
     updateEyes(deltaTime) {
         this.eyeTimer += deltaTime;
 
-        // Time to change where we are looking?
         if (this.eyeTimer >= this.nextEyeMoveTime) {
             this.eyeTimer = 0;
-            this.isLookingAtCamera = !this.isLookingAtCamera; // Toggle state
+            this.isLookingAtCamera = !this.isLookingAtCamera;
             
             if (this.isLookingAtCamera) {
-                // Stare at the camera for a longer period (3 to 8 seconds)
+                // Look at the camera for three to eight seconds.
                 this.nextEyeMoveTime = Math.random() * 5.0 + 3.0;
                 this.lookAtOffset.set(0, 0, 0);
             } else {
-                // Dart eyes away for a shorter period (0.5 to 2 seconds)
+                // Look away for half a second to two seconds.
                 this.nextEyeMoveTime = Math.random() * 1.5 + 0.5;
                 
-                // Pick a random spot near the camera to look at
                 const xOffset = (Math.random() - 0.5) * 5.0; // Left or right
                 const yOffset = (Math.random() - 0.5) * 2.0; // Up or down
                 this.lookAtOffset.set(xOffset, yOffset, 0);
             }
         }
 
-        // Calculate the exact 3D position we want the eyes to aim at
-        // (Camera position + our random offset)
+        // Aim relative to the current camera position.
         const targetPos = this.camera.position.clone().add(this.lookAtOffset);
         
-        // Smoothly move our invisible target object to that position
-        // A lerp factor of 10.0 gives a nice, quick "eye dart" feel
+        // Use a high interpolation rate for quick but smooth gaze shifts.
         this.lookAtTarget.position.lerp(targetPos, 10.0 * deltaTime);
     }
 

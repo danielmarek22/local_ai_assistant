@@ -145,7 +145,7 @@ class MemoryStore:
         filtered_docs = []
         filtered_ids = []
 
-        # STRICT FILTERING: Drop anything with a distance > 0.55
+        # Exclude results beyond the caller's maximum vector distance.
         for doc_id, doc, distance in zip(retrieved_ids, documents, distances):
             if distance <= max_distance:
                 filtered_docs.append(doc)

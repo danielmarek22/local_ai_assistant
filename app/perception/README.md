@@ -7,7 +7,7 @@ Input interpretation and preprocessing.
 - Parsing and normalizing user input
 - Multimodal input handling for text plus attachments
 - Defining shared attachment models and constructors
-- Preparing structured representations for planners
+- Preparing structured representations for orchestration and model context
 
 ## Current Notes
 

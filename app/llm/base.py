@@ -27,7 +27,7 @@ class LLMClient(ABC):
         options without mutating the client's default configuration.
         `format_override` optionally supplies a native structured-output format
         for blocking callers without affecting normal or streaming requests.
-        Used for planners, summarizers, classifiers, etc.
+        Used for summarizers, classifiers, and other structured workflows.
         """
         raise NotImplementedError
 

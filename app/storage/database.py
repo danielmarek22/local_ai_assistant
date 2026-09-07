@@ -302,7 +302,6 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_chat_attachments_session_id ON chat_attachments(session_id)"
         )
 
-        # UPDATED: id is TEXT, added last_accessed_at
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS memory (
             id TEXT PRIMARY KEY,

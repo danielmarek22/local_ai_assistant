@@ -18,7 +18,7 @@ Persistent storage abstraction.
   `app/memory/summary_store.py` use `Database.conn` directly to run SQL.
 - `app/memory/chat_history.py` and `app/memory/memory_store.py` also write to Chroma collections.
 - Chat attachments are stored as files on disk, while their metadata lives in SQLite.
-- Higher-level components (orchestrator, services, planners) should call these
+- Higher-level application workflows should call these
   stores rather than executing SQL directly.
 - `chat_sessions` stores the authoritative `direct` or `manual_group` kind.
 - `chat_history` keeps model role separate from `sender_id`,

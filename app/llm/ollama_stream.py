@@ -122,7 +122,7 @@ class OllamaClient(LLMClient):
     ) -> dict:
         """
         Blocking, non-streaming call.
-        Used for planners, summarizers, and other structured outputs.
+        Used for summarizers, classifiers, and other structured workflows.
 
         `options_override` is merged on top of instance defaults per-call
         without mutating them. `stream_chat` intentionally does not expose
