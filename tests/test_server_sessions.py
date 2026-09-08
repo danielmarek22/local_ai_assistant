@@ -1,7 +1,6 @@
 import importlib
 import base64
 import json
-import shutil
 import sys
 import tempfile
 import threading
@@ -451,7 +450,7 @@ class ServerSessionTests(unittest.TestCase):
         self.assertEqual(session_b["message_count"], 2)
         self.assertEqual(session_b["preview"], "Second chat")
 
-    def test_stream_failure_always_clears_active_turn_metadata(self):
+    def test_disconnected_stream_does_not_abort_turn_cleanup(self):
         hub = server_module.SessionConnectionHub()
         ws = FailingSendWebSocket()
         ws.app = types.SimpleNamespace(
@@ -463,15 +462,13 @@ class ServerSessionTests(unittest.TestCase):
             yield server_module.AssistantThinkingEvent(text="thinking")
 
         with patch.object(server_module, "run_generator", async_events):
-            with self.assertRaisesRegex(RuntimeError, "send failed"):
-                server_module.asyncio.run(server_module._stream_orchestrator_events(
-                    ws,
-                    self.fake_orchestrator,
-                    iter(()),
-                    "connection-a",
-                    0,
-                    {"state": "idle"},
-                ))
+            server_module.asyncio.run(server_module._stream_orchestrator_events(
+                ws,
+                self.fake_orchestrator,
+                iter(()),
+                "connection-a",
+                0,
+            ))
 
         connection = hub._connections["connection-a"]
         self.assertIsNone(connection.turn_id)
@@ -1113,8 +1110,24 @@ class ServerSessionTests(unittest.TestCase):
                 "session_kind": "direct",
                 "local_human_display_name": "You",
                 "local_assistant_display_name": "Astra",
+                "assistant_state": "idle",
+                "active_turn_id": None,
+                "turn_origin": None,
             },
         )
+
+    def test_build_session_init_payload_restores_active_runtime_state(self):
+        payload = server_module._build_session_init_payload(
+            server_instance_id="server-1",
+            session_id="session-a",
+            assistant_state=server_module.AssistantState.THINKING,
+            active_turn_id="turn-7",
+            turn_origin="user",
+        )
+
+        self.assertEqual(payload["assistant_state"], "thinking")
+        self.assertEqual(payload["active_turn_id"], "turn-7")
+        self.assertEqual(payload["turn_origin"], "user")
 
     def test_build_attachment_drop_notice_payload_returns_none_when_no_drop(self):
         orchestrator = types.SimpleNamespace(

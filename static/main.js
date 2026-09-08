@@ -96,7 +96,18 @@ uiManager.onScreenCapturePolicyChange(() => {
 });
 
 const handlers = {
-    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog, outfitCatalog, currentOutfit, sessionKind, localHumanDisplayName, localAssistantDisplayName }) => {
+    onSessionInit: ({
+        serverInstanceId,
+        sessionId,
+        gestureCatalog,
+        outfitCatalog,
+        currentOutfit,
+        sessionKind,
+        localHumanDisplayName,
+        localAssistantDisplayName,
+        assistantState: restoredAssistantState,
+        activeTurnId,
+    }) => {
         currentServerInstanceId = serverInstanceId;
         currentSessionId = sessionId;
         currentSessionKind = sessionKind || 'direct';
@@ -108,6 +119,9 @@ const handlers = {
         void knowledgeInspector.setActiveSession(sessionId);
         avatarManager.setGestureCatalog(gestureCatalog || {});
         avatarManager.setOutfitCatalog(outfitCatalog || {}, currentOutfit);
+        assistantState = restoredAssistantState || 'idle';
+        avatarManager.setActiveTurn(activeTurnId || null);
+        syncAssistantPresentation();
         persistSessionContext();
     },
     onState: (state, turnId = null) => {

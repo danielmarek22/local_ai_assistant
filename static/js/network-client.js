@@ -78,7 +78,6 @@ export class NetworkClient {
                 console.log('WS Connected');
                 if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 
-                if (this.handlers.onState) this.handlers.onState('idle');
             };
 
             socket.onclose = (event) => {
@@ -120,6 +119,9 @@ export class NetworkClient {
                         sessionKind: data.session_kind || 'direct',
                         localHumanDisplayName: data.local_human_display_name || 'You',
                         localAssistantDisplayName: data.local_assistant_display_name || 'Astra',
+                        assistantState: data.assistant_state || 'idle',
+                        activeTurnId: data.active_turn_id || null,
+                        turnOrigin: data.turn_origin || null,
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {

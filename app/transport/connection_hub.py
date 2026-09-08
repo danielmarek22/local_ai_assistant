@@ -6,7 +6,14 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from app.core.assistant_state import AssistantState
 from app.transport.websocket_protocol import ToolApprovalResponseFrame, encode_server_frame
+
+
+MAX_PENDING_ASSISTANT_FRAMES = 128
+_TERMINAL_ASSISTANT_FRAME_TYPES = frozenset(
+    {"assistant_end", "assistant_retryable_error"}
+)
 
 
 def parse_approval_decision(
@@ -32,11 +39,20 @@ class _Connection:
     turn_origin: str | None = None
 
 
+@dataclass(frozen=True)
+class SessionAssistantState:
+    state: AssistantState = AssistantState.IDLE
+    turn_id: str | None = None
+    origin: str | None = None
+
+
 class SessionConnectionHub:
     def __init__(self):
         self._connections: dict[str, _Connection] = {}
         self._by_websocket: dict[int, str] = {}
         self._approvals: dict[str, tuple[str, asyncio.Future[bool]]] = {}
+        self._assistant_states: dict[str, SessionAssistantState] = {}
+        self._pending_assistant_frames: dict[str, list[dict]] = {}
 
     def register(self, session_id: str, connection_id: str, websocket) -> None:
         connection = _Connection(session_id, connection_id, websocket)
@@ -67,22 +83,115 @@ class SessionConnectionHub:
             connection.turn_id = turn_id
             connection.turn_origin = origin
 
+    def current_assistant_state(self, session_id: str) -> SessionAssistantState:
+        return self._assistant_states.get(session_id, SessionAssistantState())
+
+    async def finish_turn(self, connection_id: str, turn_id: str) -> None:
+        connection = self._connections.get(connection_id)
+        if connection is None:
+            return
+
+        current = self._assistant_states.get(connection.session_id)
+        if current is not None and current.turn_id == turn_id:
+            await self.broadcast(
+                connection.session_id,
+                {
+                    "type": "assistant_state",
+                    "state": AssistantState.IDLE,
+                    "turn_id": turn_id,
+                    "origin": connection.turn_origin,
+                },
+            )
+
+        connection.turn_id = None
+        connection.turn_origin = None
+
     async def send_websocket(self, websocket, payload: dict) -> None:
         connection_id = self._by_websocket.get(id(websocket))
         if connection_id is None:
             await websocket.send_text(encode_server_frame(payload))
             return
-        await self._send(self._connections[connection_id], payload)
+        connection = self._connections[connection_id]
+        prepared_payload = self._with_connection_metadata(connection, payload)
+        if str(prepared_payload.get("type", "")).startswith("assistant_"):
+            await self.broadcast(connection.session_id, prepared_payload)
+            return
+        await self._send(connection, prepared_payload)
 
     async def broadcast(self, session_id: str, payload: dict) -> None:
+        self._record_assistant_state(session_id, payload)
         targets = [
             item for item in self._connections.values() if item.session_id == session_id
         ]
+        results = []
         if targets:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 *(self._send(item, payload) for item in targets),
                 return_exceptions=True,
             )
+        if (
+            str(payload.get("type", "")).startswith("assistant_")
+            and payload.get("type") != "assistant_state"
+            and not any(not isinstance(result, BaseException) for result in results)
+        ):
+            self._buffer_assistant_frame(session_id, payload)
+
+    async def replay_pending(self, connection_id: str) -> None:
+        connection = self._connections.get(connection_id)
+        if connection is None:
+            return
+
+        pending = self._pending_assistant_frames.pop(connection.session_id, [])
+        for index, payload in enumerate(pending):
+            try:
+                await self._send(connection, payload)
+            except Exception:
+                self._pending_assistant_frames[connection.session_id] = pending[index:]
+                return
+
+    def _buffer_assistant_frame(self, session_id: str, payload: dict) -> None:
+        payload = dict(payload)
+        if payload.get("type") in _TERMINAL_ASSISTANT_FRAME_TYPES:
+            self._pending_assistant_frames[session_id] = [payload]
+            return
+
+        pending = self._pending_assistant_frames.setdefault(session_id, [])
+        turn_id = payload.get("turn_id")
+        if pending and turn_id and pending[-1].get("turn_id") != turn_id:
+            pending.clear()
+        pending.append(payload)
+        del pending[:-MAX_PENDING_ASSISTANT_FRAMES]
+
+    def _record_assistant_state(self, session_id: str, payload: dict) -> None:
+        if payload.get("type") != "assistant_state":
+            return
+
+        state = AssistantState(payload.get("state"))
+        turn_id = payload.get("turn_id")
+        origin = payload.get("origin")
+        turn_id = turn_id if isinstance(turn_id, str) and turn_id else None
+        origin = origin if isinstance(origin, str) and origin else None
+
+        if state == AssistantState.IDLE:
+            current = self._assistant_states.get(session_id)
+            if (
+                current is not None
+                and turn_id is not None
+                and current.turn_id is not None
+                and current.turn_id != turn_id
+            ):
+                return
+            self._assistant_states.pop(session_id, None)
+            return
+
+        pending = self._pending_assistant_frames.get(session_id)
+        if pending and turn_id and pending[-1].get("turn_id") != turn_id:
+            self._pending_assistant_frames.pop(session_id, None)
+        self._assistant_states[session_id] = SessionAssistantState(
+            state=state,
+            turn_id=turn_id,
+            origin=origin,
+        )
 
     async def request_approval(
         self,
@@ -141,11 +250,16 @@ class SessionConnectionHub:
         return True
 
     async def _send(self, connection: _Connection, payload: dict) -> None:
+        payload = self._with_connection_metadata(connection, payload)
+        async with connection.send_lock:
+            await connection.websocket.send_text(encode_server_frame(payload))
+
+    @staticmethod
+    def _with_connection_metadata(connection: _Connection, payload: dict) -> dict:
         payload = dict(payload)
         if str(payload.get("type", "")).startswith("assistant_"):
             if connection.turn_id:
                 payload.setdefault("turn_id", connection.turn_id)
             if connection.turn_origin:
                 payload.setdefault("origin", connection.turn_origin)
-        async with connection.send_lock:
-            await connection.websocket.send_text(encode_server_frame(payload))
+        return payload

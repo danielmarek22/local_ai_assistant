@@ -6,6 +6,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 
+AssistantStateValue = Literal["idle", "thinking", "dreaming", "searching", "responding"]
+
+
 class _ClientFrame(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -68,11 +71,14 @@ class SessionInitFrame(_ServerFrame):
     session_kind: Literal["direct", "manual_group"]
     local_human_display_name: str
     local_assistant_display_name: str
+    assistant_state: AssistantStateValue
+    active_turn_id: str | None
+    turn_origin: str | None
 
 
 class AssistantStateFrame(_AssistantFrame):
     type: Literal["assistant_state"]
-    state: Literal["idle", "thinking", "dreaming", "searching", "responding"]
+    state: AssistantStateValue
 
 
 class AssistantExpressionFrame(_AssistantFrame):

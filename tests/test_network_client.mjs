@@ -41,6 +41,37 @@ test('session kind is sent on connection and restored from session init', () => 
     assert.equal(initialized.localAssistantDisplayName, 'Astra Custom');
 });
 
+test('socket open does not invent an idle assistant state', () => {
+    const states = [];
+    const client = new NetworkClient({ onState: (state) => { states.push(state); } });
+    client.connect();
+
+    client.ws.onopen();
+
+    assert.deepEqual(states, []);
+});
+
+test('session initialization restores assistant state and active turn', () => {
+    let initialized = null;
+    const client = new NetworkClient({
+        onSessionInit: (payload) => { initialized = payload; },
+    });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'session_init',
+        server_instance_id: 'server-1',
+        session_id: 'session-1',
+        assistant_state: 'thinking',
+        active_turn_id: 'turn-7',
+        turn_origin: 'user',
+    }) });
+
+    assert.equal(initialized.assistantState, 'thinking');
+    assert.equal(initialized.activeTurnId, 'turn-7');
+    assert.equal(initialized.turnOrigin, 'user');
+});
+
 
 test('oversized websocket closure reports the server reason before reconnecting', () => {
     let notice = null;

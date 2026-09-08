@@ -507,6 +507,9 @@ def _build_session_init_payload(
     session_kind: SessionKind | str = SessionKind.DIRECT,
     local_human_display_name: str = "You",
     local_assistant_display_name: str = "Astra",
+    assistant_state: AssistantState | str = AssistantState.IDLE,
+    active_turn_id: str | None = None,
+    turn_origin: str | None = None,
 ) -> dict:
     return {
         "type": "session_init",
@@ -518,6 +521,9 @@ def _build_session_init_payload(
         "session_kind": SessionKind(session_kind).value,
         "local_human_display_name": local_human_display_name,
         "local_assistant_display_name": local_assistant_display_name,
+        "assistant_state": AssistantState(assistant_state).value,
+        "active_turn_id": active_turn_id,
+        "turn_origin": turn_origin,
     }
 
 
@@ -621,7 +627,6 @@ async def _stream_orchestrator_events(
     event_iterator: Iterator[Any],
     connection_id: str,
     original_attachment_count: int,
-    state_tracker: dict[str, str],
 ) -> None:
     application = _runtime_app(ws)
     hub = getattr(application.state, "connection_hub", None)
@@ -635,12 +640,11 @@ async def _stream_orchestrator_events(
             event_iterator,
             connection_id,
             original_attachment_count,
-            state_tracker,
             application=application,
         )
     finally:
         if hub is not None:
-            hub.set_turn(connection_id, None, None)
+            await hub.finish_turn(connection_id, turn_id)
 
 
 async def _forward_orchestrator_events(
@@ -649,7 +653,6 @@ async def _forward_orchestrator_events(
     event_iterator: Iterator[Any],
     connection_id: str,
     original_attachment_count: int,
-    state_tracker: dict[str, str],
     *,
     application: FastAPI,
 ) -> None:
@@ -689,7 +692,6 @@ async def _forward_orchestrator_events(
             continue
 
         if isinstance(event, AssistantStateEvent):
-            state_tracker["state"] = event.state
             if not _should_forward_state(event.state):
                 logger.debug(
                     "[%s] Holding assistant state at thinking until audio is ready",
@@ -1385,6 +1387,7 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     hub = runtime_app.state.connection_hub
     hub.register(session_id, connection_id, ws)
+    assistant_snapshot = hub.current_assistant_state(session_id)
     logger.info(
         "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
         connection_id,
@@ -1404,11 +1407,14 @@ async def websocket_endpoint(ws: WebSocket):
         session_kind=session_kind,
         local_human_display_name=getattr(orchestrator, "local_human_name", "You"),
         local_assistant_display_name=getattr(orchestrator, "local_assistant_name", "Astra"),
+        assistant_state=assistant_snapshot.state,
+        active_turn_id=assistant_snapshot.turn_id,
+        turn_origin=assistant_snapshot.origin,
     ))
+    await hub.replay_pending(connection_id)
 
     watchdog = getattr(runtime_app.state, "vision_watchdog", None)
     event_loop = asyncio.get_running_loop()
-    assistant_state_tracker = {"state": AssistantState.IDLE}
     perception_frames = PerceptionFrameController(
         orchestrator=orchestrator,
         watchdog=watchdog,
@@ -1671,7 +1677,7 @@ async def websocket_endpoint(ws: WebSocket):
                             session_kind=session_kind,
                             existing_user_message_id=existing_user_message_id,
                         ),
-                        connection_id, original_attachment_count, assistant_state_tracker,
+                        connection_id, original_attachment_count,
                     )
                 else:
                     async with turn_context:
@@ -1686,7 +1692,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 session_kind=session_kind,
                                 existing_user_message_id=existing_user_message_id,
                             ),
-                            connection_id, original_attachment_count, assistant_state_tracker,
+                            connection_id, original_attachment_count,
                         )
 
             except WebSocketDisconnect:
@@ -1697,14 +1703,12 @@ async def websocket_endpoint(ws: WebSocket):
                     ws,
                     f"Couldn't process that message: {exc}",
                 )
-                assistant_state_tracker["state"] = AssistantState.IDLE
             except Exception:
                 logger.exception("[%s] Turn failed; keeping websocket alive", connection_id)
                 await _send_turn_error(
                     ws,
                     "Sorry, something went wrong while processing that message. Please try again.",
                 )
-                assistant_state_tracker["state"] = AssistantState.IDLE
 
     except WebSocketMessageTooLarge as exc:
         logger.warning("[%s] Closed oversized WebSocket message: %s", connection_id, exc)

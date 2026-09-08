@@ -53,6 +53,27 @@ class WebSocketProtocolTests(unittest.TestCase):
                 "unsupported": True,
             })
 
+    def test_session_init_requires_authoritative_runtime_state(self):
+        payload = {
+            "type": "session_init",
+            "server_instance_id": "server-1",
+            "session_id": "session-1",
+            "gesture_catalog": {},
+            "outfit_catalog": {},
+            "current_outfit": None,
+            "session_kind": "direct",
+            "local_human_display_name": "You",
+            "local_assistant_display_name": "Astra",
+            "assistant_state": "thinking",
+            "active_turn_id": "turn-1",
+            "turn_origin": "user",
+        }
+
+        self.assertEqual(json.loads(encode_server_frame(payload)), payload)
+        payload.pop("assistant_state")
+        with self.assertRaisesRegex(ValueError, "assistant_state"):
+            encode_server_frame(payload)
+
     def test_plain_text_and_untyped_json_remain_chat_text(self):
         self.assertIsNone(decode_client_frame("hello"))
         self.assertIsNone(decode_client_frame('{"topic":"JSON as text"}'))
