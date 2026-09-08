@@ -286,7 +286,6 @@ def resolve_session_id(
     requested_session_id: str | None,
     known_server_instance_id: str | None,
     server_instance_id: str,
-    requested_session_exists: bool = False,
 ) -> str:
     if requested_session_id is not None:
         requested_session_id = validate_session_id(requested_session_id)
@@ -297,10 +296,7 @@ def resolve_session_id(
     if (
         session_mode == "resume"
         and requested_session_id
-        and (
-            known_server_instance_id == server_instance_id
-            or requested_session_exists
-        )
+        and known_server_instance_id == server_instance_id
     ):
         return requested_session_id
 
@@ -1369,10 +1365,6 @@ async def websocket_endpoint(ws: WebSocket):
             requested_session_id=validated_requested_session_id,
             known_server_instance_id=known_server_instance_id,
             server_instance_id=server_instance_id,
-            requested_session_exists=bool(
-                validated_requested_session_id
-                and history_store.session_exists(validated_requested_session_id)
-            ),
         )
     except ValueError as exc:
         logger.warning("[%s] Rejected WebSocket session ID: %s", connection_id, exc)

@@ -687,7 +687,9 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertEqual(session_id, "session-a")
 
-    def test_resolve_session_id_ignores_stale_server_instance_for_resume(self):
+    def test_resolve_session_id_starts_new_after_restart_even_when_session_exists(self):
+        self.assertTrue(self.history.session_exists("session-a"))
+
         session_id = server_module.resolve_session_id(
             session_mode="resume",
             requested_session_id="session-a",
@@ -697,16 +699,15 @@ class ServerSessionTests(unittest.TestCase):
 
         self.assertNotEqual(session_id, "session-a")
 
-    def test_resolve_session_id_restores_saved_session_after_server_restart(self):
+    def test_resolve_session_id_starts_new_when_server_identity_is_missing(self):
         session_id = server_module.resolve_session_id(
             session_mode="resume",
             requested_session_id="session-a",
-            known_server_instance_id="stale-server",
+            known_server_instance_id=None,
             server_instance_id="server-1",
-            requested_session_exists=True,
         )
 
-        self.assertEqual(session_id, "session-a")
+        self.assertNotEqual(session_id, "session-a")
 
     def test_resolve_session_id_rejects_unsafe_requested_ids(self):
         unsafe_ids = (
