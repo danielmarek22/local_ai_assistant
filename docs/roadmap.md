@@ -10,8 +10,8 @@ The roadmap is a dependency map, not a promise carved into an ancient GPU. Astra
 ```mermaid
 flowchart TD
     M0[0 · Docs and stabilization]
-    M1[1 · Demo mode]
-    M2[2 · Embodiment polish]
+    M1[1 · Runtime profiles]
+    M2[2 · Embodiment + 3D world]
     M3[3 · Information access]
     M4[4 · Planner and agency]
     M5[5 · Safe agency]
@@ -68,9 +68,11 @@ Make the system understandable and dependable before feeding it additional tenta
 
 <div class="astra-roadmap" markdown>
 
-## 1 · Demo / professional mode
+## 1 · Runtime profiles and demo mode
 
-Create a deliberately boring, safe way to show the real project in interviews, portfolio recordings, and professional settings. Demo mode should be a separate runtime profile—not a spreading colony of `if demo_mode` checks.
+Separate Astra's operating profiles cleanly. One profile provides a deliberately boring, safe way to show the real project in interviews and portfolio recordings; another turns the existing avatar frontend into a presentation layer for an external agent. These should be explicit runtime configurations—not a spreading colony of mode checks.
+
+### Demo / professional profile
 
 **The work**
 
@@ -82,44 +84,61 @@ Create a deliberately boring, safe way to show the real project in interviews, p
 - optionally provide scripted showcase scenarios for research, planning, beliefs, and asynchronous work;
 - exercise the real Planner, belief, tool, and runtime architecture underneath the professional presentation.
 
-**Done when:** Astra can be demonstrated from a known-clean state without leaking personal context, while still proving that the actual architecture—not a fake mock-up—is doing the work.
+### Relay / frontend-only profile
+
+**The work**
+
+- accept normalized messages and presentation cues from an external agent;
+- render the external agent through Astra's existing chat, voice, expression, animation, and avatar frontend;
+- keep Astra's local Planner, memory, beliefs, and tool execution disabled unless a capability is deliberately delegated;
+- preserve the external source and conversation identity instead of recording relayed output as native Astra reasoning;
+- define a small transport contract for text, streaming state, emotion, speech, interruption, and errors;
+- make connection loss, cancellation, and reconnection visible and predictable;
+- clearly indicate when the frontend is operating as a relay rather than the full local assistant.
+
+**Done when:** the project can start in either a clean professional demo profile or a frontend-only relay profile, and neither mode can accidentally inherit Astra's private state or ambiguous ownership of an external agent's messages.
 
 </div>
 
 <figure class="astra-art-placeholder">
   <div class="astra-art-placeholder__frame">
     <span>ART SLOT · MILESTONE 1</span>
-    <strong>Extremely Professional Astra</strong>
+    <strong>Runtime Profiles</strong>
     <code>astra-demo-mode.png</code>
   </div>
-  <figcaption>Suggested scene: Astra attempts to look employable while hiding the cat ears just out of frame.</figcaption>
+  <figcaption>Suggested scene: Astra operates a suspiciously serious switchboard labelled Personal, Demo, and Relay while hiding the cat ears just out of frame.</figcaption>
 </figure>
 
 <div class="astra-roadmap" markdown>
 
-## 2 · Embodiment polish
+## 2 · Embodiment and 3D environment
 
-Make Astra feel present before making her dramatically more capable. Voice, expression, motion, and timing should support the conversation instead of looking like several unrelated demos sharing one browser tab.
+Make Astra feel present before making her dramatically more capable. Voice, expression, motion, timing, and a persistent 3D space should behave as one embodiment system instead of several unrelated demos sharing a browser tab.
 
 **The work**
 
 - smooth speech playback, interruption, and sentence timing;
 - coordinate expressions, gestures, gaze, and speaking state;
 - make outfit and avatar controls semantic rather than asset-specific;
+- create a loadable 3D environment with explicit scene, lighting, camera, and coordinate ownership;
+- place and move Astra reliably within the environment rather than treating the avatar as a fixed overlay;
+- add semantic environment locations and interactions such as standing, sitting, looking at, and moving toward scene anchors;
+- keep environment assets replaceable without coupling cognitive code to mesh names or file paths;
+- define loading, performance, and missing-asset fallbacks for the scene;
 - improve loading, reconnecting, and silent-state feedback;
 - keep embodiment optional so text-only operation remains healthy.
 
-**Done when:** ordinary conversation feels coherent in voice and motion, and turning the avatar off does not break the assistant underneath it.
+**Done when:** ordinary conversation feels coherent in voice and motion, Astra can inhabit a stable replaceable 3D scene, and turning the avatar or environment off does not break the assistant underneath it.
 
 </div>
 
 <figure class="astra-art-placeholder">
   <div class="astra-art-placeholder__frame">
     <span>ART SLOT · MILESTONE 2</span>
-    <strong>Embodiment Polish</strong>
+    <strong>Embodiment and 3D Environment</strong>
     <code>astra-embodiment.png</code>
   </div>
-  <figcaption>Suggested scene: Astra rehearses expressions, gestures, and voice timing in front of an increasingly judgmental mirror.</figcaption>
+  <figcaption>Suggested scene: Astra assembles her own tiny apartment from floating 3D assets while rehearsing expressions in an increasingly judgmental mirror.</figcaption>
 </figure>
 
 <div class="astra-roadmap" markdown>
