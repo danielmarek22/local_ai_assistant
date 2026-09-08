@@ -1,7 +1,13 @@
 import { CONFIG } from './config.js';
 import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
 import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
-import { extractBase64Payload, extractImageFilesFromDataTransfer, insertTextAtCursor, isImageFile } from './attachment-utils.mjs';
+import {
+    extractBase64Payload,
+    extractImageFilesFromDataTransfer,
+    insertTextAtCursor,
+    isImageFile,
+    repairImageBase64Payload,
+} from './attachment-utils.mjs';
 
 marked.setOptions({
     gfm: true,
@@ -766,7 +772,10 @@ export class UIManager {
 
             reader.onload = () => {
                 const result = typeof reader.result === 'string' ? reader.result : '';
-                const base64Data = extractBase64Payload(result);
+                const base64Data = repairImageBase64Payload(
+                    extractBase64Payload(result),
+                    file.type,
+                );
                 if (!base64Data) {
                     reject(new Error('Image did not produce base64 data'));
                     return;
