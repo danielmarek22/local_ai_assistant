@@ -552,8 +552,21 @@ class _OrchestratorConfig(_StrictConfigModel):
 class _ContextConfig(_StrictConfigModel):
     history_limit: int = Field(default=6, gt=0)
     injected_memory_limit: int = Field(default=5, gt=0)
+    semantic_memory_max_distance: float = Field(default=0.70, ge=0.0, le=2.0)
+    semantic_memory_fallback_max_distance: float = Field(default=0.85, ge=0.0, le=2.0)
+    semantic_memory_fallback_limit: int = Field(default=2, gt=0)
+    episodic_memory_max_distance: float = Field(default=0.70, ge=0.0, le=2.0)
     integration_context_limit: int = Field(default=4000, gt=0)
     image_summary_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
+
+    @model_validator(mode="after")
+    def validate_semantic_memory_fallback(self):
+        if self.semantic_memory_fallback_max_distance < self.semantic_memory_max_distance:
+            raise ValueError(
+                "semantic_memory_fallback_max_distance must be at least "
+                "semantic_memory_max_distance"
+            )
+        return self
 
 
 class _BeliefsConfig(_StrictConfigModel):

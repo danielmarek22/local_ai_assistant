@@ -107,6 +107,33 @@ class MemoryStoreTests(unittest.TestCase):
 
         self.assertEqual(results, ["Relevant memory"])
 
+    def test_get_relevant_uses_bounded_fallback_when_strict_matches_are_empty(self):
+        self.store.add("Nearest memory")
+        self.store.add("Second-nearest memory")
+        self.store.add("Too-distant memory")
+        self.vector_store.semantic_collection.distances = [0.72, 0.81, 0.91]
+
+        results = self.store.get_relevant("broad profile question", limit=3)
+
+        self.assertEqual(results, ["Nearest memory", "Second-nearest memory"])
+
+    def test_get_relevant_does_not_use_fallback_when_strict_match_exists(self):
+        self.store.add("Strict match")
+        self.store.add("Fallback-only match")
+        self.vector_store.semantic_collection.distances = [0.69, 0.75]
+
+        results = self.store.get_relevant("specific question", limit=2)
+
+        self.assertEqual(results, ["Strict match"])
+
+    def test_get_relevant_rejects_candidates_beyond_fallback_ceiling(self):
+        self.store.add("Unrelated memory")
+        self.vector_store.semantic_collection.distances = [0.86]
+
+        results = self.store.get_relevant("unrelated question", limit=1)
+
+        self.assertEqual(results, [])
+
     def test_get_stale_with_zero_days_returns_all_memories(self):
         self.store.add("Memory A", category="general", importance=1)
         self.store.add("Memory B", category="general", importance=2)

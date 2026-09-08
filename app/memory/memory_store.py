@@ -21,10 +21,21 @@ class MemoryIndexSyncError(RuntimeError):
 
 
 class MemoryStore:
-    def __init__(self, db: Database, vector_store: VectorStore):
+    def __init__(
+        self,
+        db: Database,
+        vector_store: VectorStore,
+        *,
+        max_distance: float = 0.70,
+        fallback_max_distance: float = 0.85,
+        fallback_limit: int = 2,
+    ):
         self.db = db
         self.vector_store = vector_store
         self.collection = self.vector_store.semantic_collection
+        self.max_distance = float(max_distance)
+        self.fallback_max_distance = float(fallback_max_distance)
+        self.fallback_limit = max(1, int(fallback_limit))
 
     def add(self, content: str, category: str = "general", importance: int = 1) -> str:
         mem_id = str(uuid.uuid4())
@@ -123,11 +134,28 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_relevant(self, query: str, limit: int = 3, max_distance: float = 0.65) -> list[str]:
+    def get_relevant(
+        self,
+        query: str,
+        limit: int = 3,
+        max_distance: float | None = None,
+        fallback_max_distance: float | None = None,
+        fallback_limit: int | None = None,
+    ) -> list[str]:
         """
         True semantic search using CPU embeddings for the Orchestrator, 
         now with a strict similarity threshold.
         """
+        strict_distance = self.max_distance if max_distance is None else float(max_distance)
+        fallback_distance = (
+            self.fallback_max_distance
+            if fallback_max_distance is None
+            else float(fallback_max_distance)
+        )
+        bounded_fallback_limit = min(
+            limit,
+            self.fallback_limit if fallback_limit is None else max(1, int(fallback_limit)),
+        )
         results = self.collection.query(
             query_texts=[query],
             n_results=limit
@@ -141,16 +169,29 @@ class MemoryStore:
         documents = results["documents"][0]
         distances = results["distances"][0] if "distances" in results and results["distances"] else []
 
-        filtered_docs = []
-        filtered_ids = []
+        candidates = list(zip(retrieved_ids, documents, distances))
+        selected = [
+            candidate for candidate in candidates if candidate[2] <= strict_distance
+        ]
+        selection_mode = "strict"
+        if not selected:
+            selected = [
+                candidate for candidate in candidates if candidate[2] <= fallback_distance
+            ][:bounded_fallback_limit]
+            selection_mode = "fallback" if selected else "none"
 
-        # Exclude results beyond the caller's maximum vector distance.
-        for doc_id, doc, distance in zip(retrieved_ids, documents, distances):
-            if distance <= max_distance:
-                filtered_docs.append(doc)
-                filtered_ids.append(doc_id)
-            else:
-                logger.debug(f"Discarded memory '{doc[:30]}...' (Distance: {distance:.3f} > {max_distance})")
+        filtered_ids = [candidate[0] for candidate in selected]
+        filtered_docs = [candidate[1] for candidate in selected]
+        selected_ids = set(filtered_ids)
+        for doc_id, doc, distance in candidates:
+            if doc_id not in selected_ids:
+                logger.debug(
+                    "Discarded memory '%s...' (distance=%.3f, strict=%.3f, fallback=%.3f)",
+                    doc[:30],
+                    distance,
+                    strict_distance,
+                    fallback_distance,
+                )
 
         if filtered_ids:
             self._touch_memories(filtered_ids)
@@ -158,7 +199,23 @@ class MemoryStore:
         trace_event(
             "memory_store",
             "semantic_query_result",
-            payload={"query": query, "limit": limit, "documents": filtered_docs},
+            payload={
+                "query": query,
+                "limit": limit,
+                "selection_mode": selection_mode,
+                "strict_max_distance": strict_distance,
+                "fallback_max_distance": fallback_distance,
+                "fallback_limit": bounded_fallback_limit,
+                "candidates": [
+                    {
+                        "id": doc_id,
+                        "distance": distance,
+                        "selected": doc_id in selected_ids,
+                    }
+                    for doc_id, _doc, distance in candidates
+                ],
+                "documents": filtered_docs,
+            },
         )
         return filtered_docs
 

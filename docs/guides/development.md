@@ -45,8 +45,9 @@ node --test tests/*.mjs
 ```
 
 CI runs the Python suite on 3.10 and 3.12 using the lightweight, exact-pinned
-`requirements-test.txt` set. Production-only model, GPU, speech, and vector dependencies
-remain in `requirements.txt` and are not installed by unit-test jobs.
+`requirements-test.txt` set. The full exact-pinned runtime in `requirements.txt`
+composes core, media, and integration manifests; those production dependencies are not
+installed by unit-test jobs.
 
 The test runner buffers stdout and stderr for successful tests so expected fault-injection
 logs do not obscure the result. If a test fails, its captured output is printed with the

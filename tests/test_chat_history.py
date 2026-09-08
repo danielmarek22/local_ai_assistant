@@ -189,6 +189,24 @@ class ChatHistoryStoreTests(unittest.TestCase):
             any("speech toggle enabled" in document for document in results)
         )
 
+    def test_episodic_retrieval_uses_configured_distance_ceiling(self):
+        self.vector_store.episodic_collection.add(
+            ids=["near", "far"],
+            documents=["Near past conversation", "Far past conversation"],
+            metadatas=[
+                {"session_id": "old-a", "distance": 0.69},
+                {"session_id": "old-b", "distance": 0.71},
+            ],
+        )
+
+        results = self.store.search_past_conversations(
+            "past conversation",
+            current_session="current-session",
+            limit=2,
+        )
+
+        self.assertEqual(results, ["Near past conversation"])
+
     def test_none_or_timeout_summary_does_not_fail_persisted_attachment(self):
         attachment = ImageAttachment(
             name="settings.png",

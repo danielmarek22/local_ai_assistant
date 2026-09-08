@@ -242,9 +242,16 @@ def _build_orchestrator(
         local_human_name=config.local_human["display_name"],
         local_assistant_id=agent_id,
         local_assistant_name=assistant_name,
+        episodic_max_distance=config.context["episodic_memory_max_distance"],
         uploads_root=str(STATIC_DIR / "uploads"),
     )
-    memory_store = MemoryStore(db, vector_store)
+    memory_store = MemoryStore(
+        db,
+        vector_store,
+        max_distance=config.context["semantic_memory_max_distance"],
+        fallback_max_distance=config.context["semantic_memory_fallback_max_distance"],
+        fallback_limit=config.context["semantic_memory_fallback_limit"],
+    )
     summary_store = SummaryStore(db)
 
     logger.debug("Storage initialized: database, vector_store, history, memory, summary")

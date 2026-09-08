@@ -337,7 +337,10 @@ class OrchestratorTests(unittest.TestCase):
         config = SimpleNamespace(
             llm={"model": "test", "host": "http://localhost", "generation": {}},
             integrations={},
-            context={"image_summary_timeout_s": 15.0},
+            context={
+                "image_summary_timeout_s": 15.0,
+                "episodic_memory_max_distance": 0.70,
+            },
             local_human={"id": "person-1", "display_name": "Local Person"},
             assistant={"id": "astra", "display_name": "Astra"},
         )

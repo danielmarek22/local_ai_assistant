@@ -13,7 +13,7 @@ Start with the narrowest row matching your goal. Paths are relative to the repos
 | What Astra sees in a prompt | `context`, `orchestrator`, and `beliefs` sections | `app/core/context_builder.py` | `tests/test_context_builder.py` |
 | How restored chats regain context | `context.history_limit` | `app/memory/chat_history.py`, `app/core/context_builder.py`, session routes in `app/server.py` | `tests/test_chat_history.py`, `tests/test_server_sessions.py` |
 | Conversation summaries | `orchestrator.summary_trigger` | `app/memory/history_summarizer.py`, `app/memory/summary_store.py`, `app/core/turn_finalizer.py` | Context and orchestrator tests |
-| Long-term memory retrieval | `context.injected_memory_limit`, `integrations.memory` | `app/memory/retriever.py`, `app/memory/memory_store.py`, `app/storage/vector_store.py` | `tests/test_memory_store.py`, `tests/test_memory_reflector.py` |
+| Long-term memory retrieval | `context.injected_memory_limit`, `context.semantic_memory_*`, `context.episodic_memory_max_distance`, `integrations.memory` | `app/memory/retriever.py`, `app/memory/memory_store.py`, `app/memory/chat_history.py`, `app/storage/vector_store.py` | `tests/test_memory_store.py`, `tests/test_chat_history.py` |
 | Image or audio attachment handling | `voice_input` for spoken audio | `app/perception/attachments.py`, `app/perception/frame_controller.py`, `app/core/turn_input.py`, `app/server.py` | `tests/test_attachment_utils.mjs`, `tests/test_perception_frames.py`, `tests/test_turn_input.py` |
 | The system prompt or assistant name | `assistant` | Loaded through `app/config.py` | `tests/test_config.py` |
 | Speech recognition | `stt` | `app/stt/factory.py`, `app/stt/whisper_engine.py` | Exercise a short microphone recording |

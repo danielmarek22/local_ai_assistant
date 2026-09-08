@@ -28,6 +28,27 @@ The committed template lives at `app/config/assistant-template.yaml`. Create the
 !!! warning "Local configuration is intentionally untracked"
     `app/config/assistant.yaml` can contain machine-specific paths and behavioral configuration. Do not replace the template with personal values.
 
+## Install runtime dependencies
+
+The complete local runtime preserves the original installation path:
+
+```bash
+venv_app/bin/python -m pip install -r requirements.txt
+```
+
+`requirements.txt` composes three exact-pinned groups:
+
+- `requirements-core.txt` — web UI, configuration, validation, SQLite/vector storage,
+  embeddings, vision-model support, and the remote GPT-SoVITS client;
+- `requirements-media.txt` — selectable local PocketTTS, Piper, and Whisper backends;
+- `requirements-integrations.txt` — the optional Mindcraft Socket.IO transport.
+
+For a reduced installation, install `requirements-core.txt` plus only the optional
+groups your configuration uses. A core-only server requires remote GPT-SoVITS, disabled
+STT, and no Mindcraft transport. PyTorch wheels are
+platform-specific; install the appropriate `torch==2.11.0` wheel first when the default
+package index does not match the local CPU/CUDA environment.
+
 ## Run Astra
 
 The browser experience is served by the FastAPI application. The console entry point in `main.py` is useful for narrower text-only experiments.

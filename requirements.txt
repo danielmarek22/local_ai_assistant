@@ -1,19 +1,4 @@
-requests
-pydantic
-jsonschema
-python-socketio[client]
-rich
-pyyaml
-fastapi
-uvicorn[standard]
-Pillow
-transformers
-piper-tts
-onnxruntime-gpu
-torch
-soundfile
-chromadb
-sentence-transformers
-pocket-tts
-emoji
-faster-whisper
+# Complete local runtime. Existing full-install workflows can keep using this file.
+-r requirements-core.txt
+-r requirements-media.txt
+-r requirements-integrations.txt

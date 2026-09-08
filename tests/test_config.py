@@ -299,6 +299,10 @@ class ConfigTests(unittest.TestCase):
                     "context": {
                         "history_limit": 8,
                         "injected_memory_limit": 7,
+                        "semantic_memory_max_distance": 0.7,
+                        "semantic_memory_fallback_max_distance": 0.85,
+                        "semantic_memory_fallback_limit": 2,
+                        "episodic_memory_max_distance": 0.7,
                     }
                 },
                 config_file,
@@ -309,8 +313,20 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.context["history_limit"], 8)
         self.assertEqual(config.context["injected_memory_limit"], 7)
+        self.assertEqual(config.context["semantic_memory_max_distance"], 0.7)
+        self.assertEqual(config.context["semantic_memory_fallback_max_distance"], 0.85)
+        self.assertEqual(config.context["semantic_memory_fallback_limit"], 2)
+        self.assertEqual(config.context["episodic_memory_max_distance"], 0.7)
         self.assertEqual(config.context["integration_context_limit"], 4000)
         self.assertEqual(config.context["image_summary_timeout_s"], 15.0)
+
+    def test_context_rejects_invalid_semantic_memory_fallback(self):
+        context = {
+            "semantic_memory_max_distance": 0.8,
+            "semantic_memory_fallback_max_distance": 0.7,
+        }
+        with self.assertRaisesRegex(ValueError, "fallback_max_distance must be at least"):
+            self._load({"context": context})
 
     def test_autonomy_defaults_are_bounded_and_disabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

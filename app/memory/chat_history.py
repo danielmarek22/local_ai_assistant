@@ -49,6 +49,7 @@ class ChatHistoryStore:
         local_human_name: str = "You",
         local_assistant_id: str = "default-agent",
         local_assistant_name: str = "Astra",
+        episodic_max_distance: float = 0.70,
     ):
         self.db = db
         self.vector_store = vector_store
@@ -61,6 +62,7 @@ class ChatHistoryStore:
         self.local_human_name = local_human_name
         self.local_assistant_id = local_assistant_id
         self.local_assistant_name = local_assistant_name
+        self.episodic_max_distance = float(episodic_max_distance)
 
     def ensure_session(self, session_id: str, kind: SessionKind | str = SessionKind.DIRECT) -> SessionKind:
         session_id = validate_session_id(session_id)
@@ -714,8 +716,19 @@ class ChatHistoryStore:
 
         return hydrated_rows
 
-    def search_past_conversations(self, query: str, current_session: str, limit: int = 4, max_distance: float = 0.65) -> list[str]:
+    def search_past_conversations(
+        self,
+        query: str,
+        current_session: str,
+        limit: int = 4,
+        max_distance: float | None = None,
+    ) -> list[str]:
         current_session = validate_session_id(current_session)
+        effective_max_distance = (
+            self.episodic_max_distance
+            if max_distance is None
+            else float(max_distance)
+        )
         results = self.collection.query(
             query_texts=[query],
             n_results=limit,
@@ -741,16 +754,26 @@ class ChatHistoryStore:
         for doc, distance in zip(documents, distances):
             if legacy_fallback in doc:
                 continue
-            if distance <= max_distance:
+            if distance <= effective_max_distance:
                 filtered_docs.append(doc)
             else:
-                logger.debug(f"Discarded episodic memory '{doc[:30]}...' (Distance: {distance:.3f} > {max_distance})")
+                logger.debug(
+                    "Discarded episodic memory '%s...' (distance=%.3f > %.3f)",
+                    doc[:30],
+                    distance,
+                    effective_max_distance,
+                )
 
         trace_event(
             "chat_history",
             "episodic_search",
             session_id=current_session,
-            payload={"query": query, "limit": limit, "documents": filtered_docs},
+            payload={
+                "query": query,
+                "limit": limit,
+                "max_distance": effective_max_distance,
+                "documents": filtered_docs,
+            },
         )
         return filtered_docs
 

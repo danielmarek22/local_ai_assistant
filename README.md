@@ -57,6 +57,11 @@ inspection remain future work.
 - `app/server.py` – HTTP / UI server bootstrap
 - `app/config/assistant.yaml` – main configuration file
 
+Runtime dependencies are exact-pinned and grouped by ownership. Install the complete
+runtime with `python -m pip install -r requirements.txt`, or follow the
+[getting-started guide](docs/getting-started.md) for reduced core/media/integration
+installations.
+
 ## Philosophy
 
 This project is intentionally **not** a polished product.  
