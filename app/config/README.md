@@ -30,6 +30,8 @@ This layer should remain *dumb*: no business logic, only structured data.
 - `integrations.mindcraft` attaches to a running Mindcraft mindserver. It can
   provide cached world state, strict direct actions, and complex task delegation.
 - `context.integration_context_limit` bounds passive integration state injected per turn.
+- `context.image_summary_timeout_s` bounds the complete post-response image-summary batch;
+  timed-out or empty summaries do not affect attachment persistence or the visible answer.
 - `autonomy` configures durable event processing, global model concurrency, causal-chain
   limits, queue size, approvals, and recent autonomous context.
 

@@ -44,6 +44,7 @@ class ChatHistoryStore:
         vector_store: VectorStore,
         uploads_root: str = str(STATIC_DIR / "uploads"),
         image_summarizer=None,
+        image_summary_timeout_s: float = 15.0,
         local_human_id: str = "local-human",
         local_human_name: str = "You",
         local_assistant_id: str = "default-agent",
@@ -55,6 +56,7 @@ class ChatHistoryStore:
         self.uploads_root = resolve_app_path(uploads_root)
         self.uploads_root.mkdir(parents=True, exist_ok=True)
         self.image_summarizer = image_summarizer
+        self.image_summary_timeout_s = max(0.1, float(image_summary_timeout_s))
         self.local_human_id = local_human_id
         self.local_human_name = local_human_name
         self.local_assistant_id = local_assistant_id
@@ -201,8 +203,6 @@ class ChatHistoryStore:
                     cursor,
                     session_id,
                     message_id,
-                    role,
-                    content,
                     attachments,
                 )
 
@@ -396,8 +396,6 @@ class ChatHistoryStore:
         cursor,
         session_id: str,
         message_id: int,
-        role: str,
-        content: str,
         attachments: list[Attachment],
     ) -> list[ImageAttachment]:
         message_dir = self._session_upload_dir(session_id) / str(message_id)
@@ -432,7 +430,12 @@ class ChatHistoryStore:
                 size_bytes=attachment.size_bytes,
                 storage_path=str(file_path),
                 sha256=sha256,
-                summary_text=self._summarize_attachment(attachment, content),
+                summary_text=(
+                    attachment.summary_text.strip()
+                    if isinstance(attachment.summary_text, str)
+                    and attachment.summary_text.strip()
+                    else None
+                ),
             )
 
             cursor.execute(
@@ -474,23 +477,138 @@ class ChatHistoryStore:
 
         return stored_attachments
 
-    def _summarize_attachment(self, attachment: ImageAttachment, content: str) -> str | None:
+    def summarize_pending_attachments(self, message_id: int) -> int:
+        if self.image_summarizer is None:
+            return 0
+
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ca.id AS attachment_id, ca.name, ca.mime_type,
+                       ca.storage_path, ca.sha256, ca.size_bytes, ca.summary_text,
+                       ch.id, ch.session_id, ch.role, ch.content, ch.timestamp,
+                       ch.sender_id, ch.sender_display_name, ch.sender_type,
+                       ch.input_source, COALESCE(cs.kind, 'direct') AS session_kind
+                FROM chat_attachments ca
+                JOIN chat_history ch ON ch.id = ca.message_id
+                LEFT JOIN chat_sessions cs ON cs.session_id = ch.session_id
+                WHERE ca.message_id = ?
+                  AND (ca.summary_text IS NULL OR ca.summary_text = '')
+                ORDER BY ca.id ASC
+                """,
+                (message_id,),
+            ).fetchall()
+
+        deadline = time.monotonic() + self.image_summary_timeout_s
+        completed = 0
+        for row in rows:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                logger.warning(
+                    "Image-summary budget exhausted for message %d; remaining images were skipped",
+                    message_id,
+                )
+                break
+
+            record = dict(row)
+            attachment = attachment_from_stored_record({
+                "id": record["attachment_id"],
+                "name": record["name"],
+                "mime_type": record["mime_type"],
+                "storage_path": record["storage_path"],
+                "sha256": record["sha256"],
+                "size_bytes": record["size_bytes"],
+                "summary_text": record["summary_text"],
+            })
+            summary = self._summarize_attachment(
+                attachment,
+                record["content"],
+                timeout_s=remaining_s,
+            )
+            if not summary:
+                continue
+
+            with self.db.transaction() as conn:
+                update = conn.execute(
+                    """
+                    UPDATE chat_attachments SET summary_text = ?
+                    WHERE id = ? AND (summary_text IS NULL OR summary_text = '')
+                    """,
+                    (summary, attachment.attachment_id),
+                )
+            if update.rowcount != 1:
+                continue
+
+            summarized = ImageAttachment(
+                name=attachment.name,
+                mime_type=attachment.mime_type,
+                size_bytes=attachment.size_bytes,
+                attachment_id=attachment.attachment_id,
+                storage_path=attachment.storage_path,
+                sha256=attachment.sha256,
+                summary_text=summary,
+            )
+            sender = self.effective_sender(record)
+            try:
+                self.collection.upsert(
+                    ids=[self._attachment_vector_id(summarized.attachment_id)],
+                    documents=[self._build_attachment_vector_doc(
+                        record["role"],
+                        record["content"],
+                        summarized,
+                        sender,
+                        SessionKind(record["session_kind"]),
+                    )],
+                    metadatas=[self._vector_metadata(
+                        record,
+                        sender,
+                        source="image_attachment",
+                        attachment_id=summarized.attachment_id,
+                    )],
+                )
+            except Exception:
+                logger.exception(
+                    "Image attachment %d was summarized canonically but its episodic "
+                    "index update failed; reconciliation is required",
+                    summarized.attachment_id,
+                )
+            completed += 1
+
+        return completed
+
+    def _summarize_attachment(
+        self,
+        attachment: ImageAttachment,
+        content: str,
+        *,
+        timeout_s: float,
+    ) -> str | None:
         if self.image_summarizer is None:
             return None
 
         try:
-            summary = self.image_summarizer.summarize(attachment, message_text=content)
+            summary = self.image_summarizer.summarize(
+                attachment,
+                message_text=content,
+                timeout_s=timeout_s,
+            )
         except Exception:
             logger.exception("Failed to summarize image attachment '%s'", attachment.name)
             return None
 
+        if not isinstance(summary, str):
+            logger.warning("Image summarizer returned no text for '%s'", attachment.name)
+            return None
         summary = summary.strip()
+        if not summary:
+            logger.warning("Image summarizer returned an empty result for '%s'", attachment.name)
+            return None
         trace_event(
             "chat_history",
             "attachment_summary",
             payload={"attachment_name": attachment.name, "summary": summary},
         )
-        return summary or None
+        return summary
 
     def _build_attachment_vector_doc(
         self,

@@ -4,11 +4,18 @@ from app.logging import trace_event
 
 logger = logging.getLogger("image_summarizer")
 
+
 class ImageSummarizer:
     def __init__(self, llm):
         self.llm = llm
 
-    def summarize(self, attachment, message_text: str = "") -> str | None:
+    def summarize(
+        self,
+        attachment,
+        message_text: str = "",
+        *,
+        timeout_s: float = 15.0,
+    ) -> str | None:
         prompt = [
             {
                 "role": "system",
@@ -41,16 +48,22 @@ class ImageSummarizer:
                 "temperature": 0.1,
                 "num_predict": 160,
             },
+            timeout_override=timeout_s,
+            max_retries_override=0,
         )
-        
-        # Safely extract the text content from the dictionary before stripping
-        result = response.get("content", "").strip()
-        
+
+        content = response.get("content", "") if isinstance(response, dict) else ""
+        result = content.strip() if isinstance(content, str) else ""
+
         if getattr(self.llm, "last_chat_dropped_current_images", False):
             logger.warning(
                 "Skipping image summary for %r because Ollama rejected the image payload.",
                 attachment.name,
             )
+            return None
+
+        if not result:
+            logger.warning("Image summary for %r was empty.", attachment.name)
             return None
 
         trace_event(

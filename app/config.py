@@ -553,6 +553,7 @@ class _ContextConfig(_StrictConfigModel):
     history_limit: int = Field(default=6, gt=0)
     injected_memory_limit: int = Field(default=5, gt=0)
     integration_context_limit: int = Field(default=4000, gt=0)
+    image_summary_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
 
 
 class _BeliefsConfig(_StrictConfigModel):

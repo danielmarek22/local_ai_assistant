@@ -410,7 +410,21 @@ class Orchestrator:
             )
             yield AssistantSpeechEvent(text=response, is_final=True)
 
-            # 6. Post-processing (summarization)
+            # 6. Post-processing (image and conversation summarization)
+            summarize_attachments = getattr(
+                self.history,
+                "summarize_pending_attachments",
+                None,
+            )
+            try:
+                if callable(summarize_attachments):
+                    summarize_attachments(user_message_id)
+            except Exception:
+                logger.exception(
+                    "[%s] Deferred image summarization failed",
+                    session_id,
+                )
+
             try:
                 self.turn_finalizer.finalize(
                     session_id,

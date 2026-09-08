@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
+from app.perception.image_summarizer import ImageSummarizer
 from app.perception.state import ImageAttachment
 from app.storage.database import Database
 from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
@@ -67,12 +68,30 @@ class FakeVectorStore:
 
 
 class FakeImageSummarizer:
-    def __init__(self):
+    def __init__(self, result="Screenshot of the settings screen showing the speech toggle enabled."):
         self.calls = []
+        self.result = result
 
-    def summarize(self, attachment, message_text: str = "") -> str:
-        self.calls.append((attachment.name, message_text))
-        return "Screenshot of the settings screen showing the speech toggle enabled."
+    def summarize(self, attachment, message_text: str = "", *, timeout_s: float = 15.0):
+        self.calls.append((attachment.name, message_text, timeout_s))
+        return self.result
+
+
+class FailingImageSummarizer(FakeImageSummarizer):
+    def summarize(self, attachment, message_text: str = "", *, timeout_s: float = 15.0):
+        self.calls.append((attachment.name, message_text, timeout_s))
+        raise TimeoutError("summary timed out")
+
+
+class FakeImageLLM:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+        self.last_chat_dropped_current_images = False
+
+    def chat(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        return self.response
 
 
 class ChatHistoryStoreTests(unittest.TestCase):
@@ -90,7 +109,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
             image_summarizer=self.image_summarizer,
         )
 
-    def test_add_persists_image_summary_to_sqlite_and_vectordb(self):
+    def test_deferred_image_summary_updates_sqlite_and_vectordb(self):
         attachment = ImageAttachment(
             name="settings.png",
             mime_type="image/png",
@@ -113,14 +132,31 @@ class ChatHistoryStoreTests(unittest.TestCase):
         row = cursor.fetchone()
 
         self.assertIsNotNone(row)
+        self.assertIsNone(row["summary_text"])
+        self.assertEqual(self.image_summarizer.calls, [])
+        self.assertEqual(
+            {record["id"] for record in self.vector_store.episodic_collection.records},
+            {f"message:{message_id}"},
+        )
+
+        summarized_count = self.store.summarize_pending_attachments(message_id)
+
+        self.assertEqual(summarized_count, 1)
+        row = self.db.conn.execute(
+            "SELECT summary_text FROM chat_attachments WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
         self.assertEqual(
             row["summary_text"],
             "Screenshot of the settings screen showing the speech toggle enabled.",
         )
-        self.assertEqual(
-            self.image_summarizer.calls,
-            [("settings.png", "Please remember this screen")],
-        )
+        self.assertEqual(len(self.image_summarizer.calls), 1)
+        attachment_name, message_text, timeout_s = self.image_summarizer.calls[0]
+        self.assertEqual((attachment_name, message_text), (
+            "settings.png", "Please remember this screen"
+        ))
+        self.assertGreater(timeout_s, 0)
+        self.assertLessEqual(timeout_s, 15.0)
 
         history_rows = self.store.get_all("session-1")
         self.assertEqual(len(history_rows), 1)
@@ -152,6 +188,88 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertTrue(
             any("speech toggle enabled" in document for document in results)
         )
+
+    def test_none_or_timeout_summary_does_not_fail_persisted_attachment(self):
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        for index, summarizer in enumerate(
+            (FakeImageSummarizer(None), FailingImageSummarizer()),
+            start=1,
+        ):
+            with self.subTest(summarizer=type(summarizer).__name__):
+                self.store.image_summarizer = summarizer
+                session_id = f"summary-failure-{index}"
+                message_id = self.store.add(
+                    session_id,
+                    "user",
+                    "Keep the image",
+                    attachments=[attachment],
+                )
+                with self.assertLogs("chat_history", level="WARNING"):
+                    summarized_count = self.store.summarize_pending_attachments(message_id)
+
+                self.assertEqual(summarized_count, 0)
+                stored = self.store.get_all(session_id)[0]["attachments"][0]
+                self.assertIsNone(stored.summary_text)
+
+    def test_image_summary_batch_uses_one_total_timeout_budget(self):
+        self.store.image_summarizer = FakeImageSummarizer(None)
+        attachments = [
+            ImageAttachment(
+                name=f"image-{index}.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )
+            for index in range(2)
+        ]
+        message_id = self.store.add(
+            "budget-session", "user", "Two images", attachments=attachments
+        )
+
+        with patch(
+            "app.memory.chat_history.time.monotonic",
+            side_effect=[0.0, 0.0, 20.0],
+        ), self.assertLogs("chat_history", level="WARNING"):
+            summarized_count = self.store.summarize_pending_attachments(message_id)
+
+        self.assertEqual(summarized_count, 0)
+        self.assertEqual(len(self.store.image_summarizer.calls), 1)
+
+    def test_image_summarizer_applies_dedicated_timeout_without_retries(self):
+        llm = FakeImageLLM({"content": "  A blue settings panel.  "})
+        summarizer = ImageSummarizer(llm)
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        result = summarizer.summarize(attachment, timeout_s=7.5)
+
+        self.assertEqual(result, "A blue settings panel.")
+        self.assertEqual(llm.calls[0][1]["timeout_override"], 7.5)
+        self.assertEqual(llm.calls[0][1]["max_retries_override"], 0)
+
+    def test_image_summarizer_treats_invalid_response_as_missing_summary(self):
+        summarizer = ImageSummarizer(FakeImageLLM(None))
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        with self.assertLogs("image_summarizer", level="WARNING"):
+            result = summarizer.summarize(attachment)
+
+        self.assertIsNone(result)
 
     def test_delete_session_removes_attachment_rows_files_and_vector_docs(self):
         attachment = ImageAttachment(
@@ -222,6 +340,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
                 size_bytes=5,
             )],
         )
+        self.store.summarize_pending_attachments(message_id)
         attachment_id = self.store.get_all("session-1")[0]["attachments"][0].attachment_id
         self.store.collection.records = [{
             "id": "legacy-random-id",

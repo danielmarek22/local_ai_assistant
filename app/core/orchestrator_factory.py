@@ -237,6 +237,7 @@ def _build_orchestrator(
     history_store = ChatHistoryStore(
         db,
         vector_store,
+        image_summary_timeout_s=config.context["image_summary_timeout_s"],
         local_human_id=config.local_human["id"],
         local_human_name=config.local_human["display_name"],
         local_assistant_id=agent_id,

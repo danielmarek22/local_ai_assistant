@@ -94,6 +94,7 @@ class FakeHistoryStore:
         self.senders = []
         self.session_kinds = {}
         self.added_session_kinds = []
+        self.summarized_message_ids = []
 
     def add(
         self, session_id: str, role: str, content: str, attachments=None,
@@ -108,6 +109,10 @@ class FakeHistoryStore:
 
     def get_session_kind(self, session_id: str):
         return self.session_kinds.get(session_id, SessionKind.DIRECT)
+
+    def summarize_pending_attachments(self, message_id: int):
+        self.summarized_message_ids.append(message_id)
+        return 0
 
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
@@ -332,6 +337,7 @@ class OrchestratorTests(unittest.TestCase):
         config = SimpleNamespace(
             llm={"model": "test", "host": "http://localhost", "generation": {}},
             integrations={},
+            context={"image_summary_timeout_s": 15.0},
             local_human={"id": "person-1", "display_name": "Local Person"},
             assistant={"id": "astra", "display_name": "Astra"},
         )
@@ -367,11 +373,25 @@ class OrchestratorTests(unittest.TestCase):
 
         mem_ctx = context_builder.calls[0]["memory_context"]
         tool_ctx = context_builder.calls[0]["integration_context"]
-        
+
         self.assertIn("User likes testing", mem_ctx)
         self.assertIn("Past answer", mem_ctx)
-        
+
         self.assertIsNone(tool_ctx)
+
+    def test_image_summarization_starts_after_final_response_event(self):
+        orch, _llm, history, *_rest = self._build_orchestrator(summary_trigger=999)
+        events = iter(orch.handle_user_input(self.SESSION_ID, "hello"))
+
+        for event in events:
+            if isinstance(event, AssistantSpeechEvent) and event.is_final:
+                break
+
+        self.assertEqual(history.summarized_message_ids, [])
+
+        next(events)
+
+        self.assertEqual(history.summarized_message_ids, [1])
 
     def test_instant_mode_skips_tool_routing_and_responds_directly(self):
         orch, _llm, _history, _memory, _summary, _summarizer, tool_executor, context_builder = self._build_orchestrator(summary_trigger=999)

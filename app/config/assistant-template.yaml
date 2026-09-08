@@ -57,6 +57,7 @@ context:
   history_limit: 6
   injected_memory_limit: 5
   integration_context_limit: 4000
+  image_summary_timeout_s: 15
 
 beliefs:
   enabled: true

@@ -37,6 +37,8 @@ class ConfigTests(unittest.TestCase):
         invalid = (
             ({"autonomy": {"enabled": "false"}}, "autonomy.enabled"),
             ({"context": {"history_limit": 0}}, "context.history_limit"),
+            ({"context": {"image_summary_timeout_s": 0}}, "image_summary_timeout_s"),
+            ({"context": {"image_summary_timeout_s": "15"}}, "image_summary_timeout_s"),
             ({"orchestrator": {"recovery_num_predict": True}}, "recovery_num_predict"),
             ({"voice_input": {"path": "native"}}, "voice_input.path"),
             ({"vision_watchdog": {"max_new_tokens": -1}}, "max_new_tokens"),
@@ -308,6 +310,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.context["history_limit"], 8)
         self.assertEqual(config.context["injected_memory_limit"], 7)
         self.assertEqual(config.context["integration_context_limit"], 4000)
+        self.assertEqual(config.context["image_summary_timeout_s"], 15.0)
 
     def test_autonomy_defaults_are_bounded_and_disabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
