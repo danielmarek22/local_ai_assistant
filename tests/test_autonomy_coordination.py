@@ -21,6 +21,104 @@ class FailingWebSocket(FakeWebSocket):
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def start_turn(self, coordinator, kind, session, order, label, release=None):
+        async def run():
+            async with getattr(coordinator, kind)(session):
+                order.append(label)
+                if release is not None:
+                    await release.wait()
+
+        task = asyncio.create_task(run())
+
+        async def cleanup():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.addAsyncCleanup(cleanup)
+        # Let the task enter its context or reach the admission wait.
+        await asyncio.sleep(0)
+        return task
+
+    async def test_user_overtakes_event_waiting_for_capacity_in_same_session(self):
+        coordinator = SessionTurnCoordinator()
+        order = []
+        async with coordinator.user_turn("a"):
+            event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+            user = await self.start_turn(coordinator, "user_turn", "b", order, "user")
+            self.assertEqual(order, [])
+
+        await asyncio.wait_for(asyncio.gather(event, user), timeout=1)
+        self.assertEqual(order, ["user", "event"])
+
+    async def test_same_session_waiter_does_not_reserve_spare_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator(global_concurrency=2)
+                order = []
+                async with coordinator.user_turn("a"):
+                    same = await self.start_turn(coordinator, kind, "a", order, "same")
+                    other = await self.start_turn(coordinator, "user_turn", "b", order, "other")
+                    await asyncio.wait_for(other, timeout=1)
+                    self.assertEqual(order, ["other"])
+                    self.assertFalse(same.done())
+                await asyncio.wait_for(same, timeout=1)
+                self.assertEqual(order, ["other", "same"])
+
+    async def test_cancelling_waiter_allows_following_event(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                order = []
+                async with coordinator.user_turn("a"):
+                    waiter = await self.start_turn(coordinator, kind, "b", order, "cancelled")
+                    event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+                    waiter.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await waiter
+                    self.assertEqual(order, [])
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["event"])
+
+    async def test_cancelling_active_turn_releases_session_and_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                order = []
+                active = await self.start_turn(
+                    coordinator, kind, "a", order, "active", asyncio.Event(),
+                )
+                event = await self.start_turn(coordinator, "event_turn", "a", order, "event")
+                active.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await active
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["active", "event"])
+
+    async def test_cancelling_user_wakes_event_without_an_active_turn_finishing(self):
+        coordinator = SessionTurnCoordinator(global_concurrency=2)
+        order = []
+        async with coordinator.user_turn("a"):
+            user = await self.start_turn(coordinator, "user_turn", "a", order, "user")
+            event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+            self.assertEqual(order, [])
+            user.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await user
+            await asyncio.wait_for(event, timeout=1)
+            self.assertEqual(order, ["event"])
+
+    async def test_failed_turn_releases_session_and_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                with self.assertRaisesRegex(RuntimeError, "turn failed"):
+                    async with getattr(coordinator, kind)("a"):
+                        raise RuntimeError("turn failed")
+                order = []
+                event = await self.start_turn(coordinator, "event_turn", "a", order, "event")
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["event"])
+
     async def test_user_waiter_runs_before_next_event(self):
         coordinator = SessionTurnCoordinator()
         order = []
@@ -50,20 +148,25 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["event-1", "user", "event-2"])
 
     async def test_global_model_limit_prevents_cross_session_overlap(self):
-        coordinator = SessionTurnCoordinator(global_concurrency=1)
-        active = 0
-        maximum = 0
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                coordinator = SessionTurnCoordinator(global_concurrency=limit)
+                active = 0
+                maximum = 0
 
-        async def run(session):
-            nonlocal active, maximum
-            async with coordinator.user_turn(session):
-                active += 1
-                maximum = max(maximum, active)
-                await asyncio.sleep(0.01)
-                active -= 1
+                async def run(session):
+                    nonlocal active, maximum
+                    async with coordinator.user_turn(session):
+                        active += 1
+                        maximum = max(maximum, active)
+                        await asyncio.sleep(0.01)
+                        active -= 1
 
-        await asyncio.gather(run("a"), run("b"))
-        self.assertEqual(maximum, 1)
+                await asyncio.wait_for(
+                    asyncio.gather(*(run(session) for session in ("a", "b", "c", "d"))),
+                    timeout=1,
+                )
+                self.assertEqual(maximum, limit)
 
 
 class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
