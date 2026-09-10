@@ -257,25 +257,7 @@ class Orchestrator:
                 },
             )
 
-            # 2. Vector Retrieval (Semantic + Episodic)
-            retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
-            memory_context = retrieval.memory_context
-            trace_event(
-                "orchestrator",
-                "memory_retrieval",
-                session_id=session_id,
-                payload={
-                    "query": retrieval_text,
-                    "memory_context": retrieval.memory_context,
-                    "perception_value": retrieval.perception_value,
-                },
-            )
-            self.perception.update(
-                PerceptionKey.MEMORY_RETRIEVED,
-                {"value": retrieval.perception_value},
-            )
-
-            # 3. Persist user input (to SQLite + Vector Store)
+            # 2. Persist user input (to SQLite + Vector Store)
             storable_attachments = [
                 attachment
                 for attachment in turn_input.attachments
@@ -308,6 +290,24 @@ class Orchestrator:
                 sender_type=sender.sender_type,
                 input_source=sender.input_source,
                 session_kind=session_kind,
+            )
+
+            # 3. Retrieve optional context after authoritative input is durable
+            retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
+            memory_context = retrieval.memory_context
+            trace_event(
+                "orchestrator",
+                "memory_retrieval",
+                session_id=session_id,
+                payload={
+                    "query": retrieval_text,
+                    "memory_context": retrieval.memory_context,
+                    "perception_value": retrieval.perception_value,
+                },
+            )
+            self.perception.update(
+                PerceptionKey.MEMORY_RETRIEVED,
+                {"value": retrieval.perception_value},
             )
 
             integration_context = self._collect_integration_context(

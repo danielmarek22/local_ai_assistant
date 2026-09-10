@@ -50,10 +50,15 @@ The attachment model now has a shared `Attachment` base type, but persistence is
 ## How Memory Is Used In A Turn
 
 1. The orchestrator receives user input.
-2. Semantic memory is queried for relevant facts.
-3. Episodic memory is queried for similar messages from past sessions.
-4. Retrieved memory is injected into perception and into prompt context for response generation.
-5. The current user/assistant messages are persisted to both chat history layers.
+2. The user message and supported attachments are saved before retrieval; retries reuse
+   the existing message. A canonical persistence failure stops the turn.
+3. Semantic and episodic memory are queried independently. Either provider may fail
+   without suppressing results from the other or preventing response generation.
+4. Available memory is injected into perception and prompt context. Failed provider
+   names are recorded in retrieval results, logs, traces, and perception diagnostics;
+   an outage is distinguished from a successful search with no matches.
+5. The assistant response is persisted after generation. Canonical message writes
+   survive vector-index write failures, which remain repairable through reconciliation.
 6. If the user attached images, those files are stored, summarized once for long-term retrieval, and linked back to the chat message.
 7. Current-turn images are sent as multimodal payloads. Historical image turns use their
    stored filename and summary as text, avoiding repeated binary payloads while keeping

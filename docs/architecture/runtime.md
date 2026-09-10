@@ -23,8 +23,8 @@ sequenceDiagram
     User->>UI: Send text, voice, or images
     UI->>API: Structured WebSocket payload
     API->>O: handle_user_input(session_id, ...)
-    O->>H: Retrieve semantic + episodic context
     O->>H: Persist authoritative user turn
+    O->>H: Retrieve optional semantic + episodic context
     O->>C: Build complete model message list
     C-->>O: System, history, current input
     O->>L: Buffered routing inference
@@ -81,6 +81,8 @@ The server translates those events into WebSocket payloads. The UI controls play
 - Invalid client payloads fail before orchestration.
 - Capability schemas are validated before invocation.
 - A failed optional context provider does not stop the turn.
+- User input is durable before retrieval; semantic and episodic query failures are
+  isolated independently, preserving successful context from the other provider.
 - Empty model output is replaced with a deterministic visible fallback.
 - The runtime returns the assistant to an idle state even when inference fails.
 - User-visible tool side effects may require explicit approval.
