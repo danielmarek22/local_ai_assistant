@@ -572,7 +572,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
 
         class Summarizer:
             def __init__(self): self.messages = None
-            def summarize(self, messages):
+            def summarize(self, messages, *, previous_summary=None):
                 self.messages = messages
                 return "Alice said she is in Warsaw."
 

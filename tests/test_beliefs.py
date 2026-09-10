@@ -2281,7 +2281,7 @@ class FakeSummaryStore:
 
 
 class FakeSummarizer:
-    def summarize(self, _messages):
+    def summarize(self, _messages, *, previous_summary=None):
         raise AssertionError("summary should not run")
 
 

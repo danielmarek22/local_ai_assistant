@@ -226,7 +226,7 @@ class FakeSummarizer:
         self.summary_text = summary_text
         self.calls = []
 
-    def summarize(self, messages: list[dict]):
+    def summarize(self, messages: list[dict], *, previous_summary=None):
         self.calls.append(messages)
         return self.summary_text
 

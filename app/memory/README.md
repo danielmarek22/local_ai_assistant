@@ -42,6 +42,8 @@ Memory should be treated as an *active system*, not just a database.
   - performs explicitly requested consolidation and pruning
 - `HistorySummarizer`
   - creates rolling conversation summaries used by `TurnFinalizer`
+  - receives the saved summary separately from new messages and treats both as data
+  - rejects empty or malformed model output, preserving the saved summary and checkpoint
 
 The attachment model now has a shared `Attachment` base type, but persistence is still intentionally image-focused today.
 
@@ -56,7 +58,9 @@ The attachment model now has a shared `Attachment` base type, but persistence is
 7. Current-turn images are sent as multimodal payloads. Historical image turns use their
    stored filename and summary as text, avoiding repeated binary payloads while keeping
    visual context retrievable.
-8. If enough turns have accumulated and no summary exists yet, the session is summarized.
+8. If enough new messages have accumulated, create or update the session summary using
+   its previous summary and the messages after its saved checkpoint. Failed or empty
+   generations leave both the summary and checkpoint unchanged for a later attempt.
 
 ## Data Access
 

@@ -59,35 +59,25 @@ class TurnFinalizer:
 
         logger.info("[%s] Summarizing conversation history", session_id)
 
-        summary_input = []
-        if existing_summary:
-            summary_input.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "Here is the current summary of the conversation so far. "
-                        "Update it using the new messages below:\n\n"
-                        f"{existing_summary}"
-                    ),
-                }
-            )
-
-        summary_input.extend(
+        summary_input = [
             {
                 "role": row["role"],
                 "content": self._summary_content(session_id, row),
             }
             for row in history[last_count:]
-        )
+        ]
         trace_event(
             "turn_finalizer",
             "summary_input",
             session_id=session_id,
-            payload={"summary_input": summary_input},
+            payload={"previous_summary": existing_summary, "summary_input": summary_input},
         )
 
         try:
-            summary = self.summarizer.summarize(summary_input)
+            summary = self.summarizer.summarize(
+                summary_input,
+                previous_summary=existing_summary,
+            )
         except Exception:
             logger.exception("[%s] Summarization failed", session_id)
             return
