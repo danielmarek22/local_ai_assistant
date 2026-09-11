@@ -22,6 +22,8 @@ from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
 from app.core.session_ids import SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN, validate_session_id
+from app.core.session_ids import SessionDeletedError
+from app.autonomy.coordinator import SessionTurnCoordinator
 from app.transport.websocket_protocol import (
     RelayMessageFrame,
     RetryMessageFrame,
@@ -1017,6 +1019,9 @@ async def _startup_application(
 
 
 async def _shutdown_application(application: FastAPI) -> None:
+    deletion_tasks = list(getattr(application.state, "session_deletion_tasks", {}).values())
+    if deletion_tasks:
+        await asyncio.gather(*deletion_tasks, return_exceptions=True)
     queue = getattr(application.state, "tts_queue", None)
     worker_task = getattr(application.state, "tts_worker_task", None)
     orchestrator = getattr(application.state, "orchestrator", None)
@@ -1242,24 +1247,65 @@ async def get_belief_context_preview(session_id: SessionIdQuery, request: Reques
     return service.context_preview(session_id)
 
 
-@router.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: SessionIdPath, request: Request = None):
-    orchestrator = _runtime_app(request).state.orchestrator
-    deletion = orchestrator.history.delete_session(session_id)
+def _session_coordinator(application: FastAPI) -> SessionTurnCoordinator:
+    runtime = getattr(application.state.orchestrator, "autonomy_runtime", None)
+    if runtime is not None:
+        return runtime.coordinator
+    coordinator = getattr(application.state, "turn_coordinator", None)
+    if coordinator is None:
+        coordinator = SessionTurnCoordinator()
+        application.state.turn_coordinator = coordinator
+    return coordinator
+
+
+async def _delete_session(application: FastAPI, session_id: str) -> dict:
+    orchestrator = application.state.orchestrator
+    await _session_coordinator(application).close_session(session_id)
+    runtime = getattr(orchestrator, "autonomy_runtime", None)
+    if runtime is not None:
+        runtime.store.delete_session(session_id)
+    deletion = await asyncio.to_thread(orchestrator.history.delete_session, session_id)
+    # History deletion atomically removes all canonical session-owned records.
+    # Keep adapter cleanup for injected runtimes as well.
     orchestrator.summary_store.delete(session_id)
     belief_repository = getattr(orchestrator, "belief_repository", None)
     if belief_repository is not None:
         belief_repository.delete_session(orchestrator.agent_id, session_id)
 
-    if not deletion.deleted:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    hub = getattr(application.state, "connection_hub", None)
+    if hub is not None:
+        await hub.close_session(session_id)
     return {
         "deleted": True,
         "session_id": session_id,
         "cleanup_complete": deletion.cleanup_complete,
         "cleanup_errors": list(deletion.cleanup_errors),
     }
+
+
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: SessionIdPath, request: Request = None):
+    application = _runtime_app(request)
+    history = application.state.orchestrator.history
+    if not history.session_exists(session_id) and not history.is_session_deleted(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    tasks = getattr(application.state, "session_deletion_tasks", None)
+    if tasks is None:
+        tasks = {}
+        application.state.session_deletion_tasks = tasks
+    task = tasks.get(session_id)
+    if task is None:
+        task = asyncio.create_task(_delete_session(application, session_id))
+        tasks[session_id] = task
+
+        def finished(completed):
+            tasks.pop(session_id, None)
+            if not completed.cancelled() and completed.exception() is not None:
+                logger.error("[%s] Session deletion failed: %s", session_id, completed.exception())
+
+        task.add_done_callback(finished)
+    # A disconnected HTTP caller must not interrupt deletion after closing admission.
+    return await asyncio.shield(task)
 
 
 @router.post("/api/admin/reflect")
@@ -1371,6 +1417,12 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.close(code=1008, reason=str(exc))
         return
 
+    if (history_store.is_session_deleted(session_id)
+            or _session_coordinator(runtime_app).is_closed(session_id)):
+        await ws.accept()
+        await ws.close(code=4004, reason="Conversation deleted")
+        return
+
     if requested_session_id and session_id == requested_session_id:
         session_kind = history_store.get_session_kind(session_id)
     else:
@@ -1378,7 +1430,13 @@ async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
     hub = runtime_app.state.connection_hub
-    hub.register(session_id, connection_id, ws)
+    try:
+        if _session_coordinator(runtime_app).is_closed(session_id):
+            raise SessionDeletedError()
+        hub.register(session_id, connection_id, ws)
+    except SessionDeletedError:
+        await ws.close(code=4004, reason="Conversation deleted")
+        return
     assistant_snapshot = hub.current_assistant_state(session_id)
     logger.info(
         "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
@@ -1440,6 +1498,9 @@ async def websocket_endpoint(ws: WebSocket):
             # text frames (keyboard) and binary frames (microphone audio).
             raw_message = await inbox.receive()
             hub.touch(connection_id)
+            if _session_coordinator(runtime_app).is_closed(session_id):
+                await ws.close(code=4004, reason="Conversation deleted")
+                break
 
             # Starlette surfaces disconnects as a message dict rather than
             # raising WebSocketDisconnect, so we must check before touching
@@ -1655,9 +1716,7 @@ async def websocket_endpoint(ws: WebSocket):
                 )
                 logger.debug("[%s] User input text: %r", connection_id, user_text)
 
-                runtime = getattr(orchestrator, "autonomy_runtime", None)
-                turn_context = runtime.coordinator.user_turn(session_id) if runtime else None
-                if turn_context is None:
+                async with _session_coordinator(runtime_app).user_turn(session_id):
                     await _stream_orchestrator_events(
                         ws, orchestrator,
                         orchestrator.handle_user_input(
@@ -1671,22 +1730,10 @@ async def websocket_endpoint(ws: WebSocket):
                         ),
                         connection_id, original_attachment_count,
                     )
-                else:
-                    async with turn_context:
-                        await _stream_orchestrator_events(
-                            ws, orchestrator,
-                            orchestrator.handle_user_input(
-                                session_id, user_text, think_override=reasoning_override,
-                                instant_mode=instant_mode, attachments=attachments,
-                                input_modality=input_modality,
-                                tool_approval_callback=request_tool_approval,
-                                sender=turn_sender,
-                                session_kind=session_kind,
-                                existing_user_message_id=existing_user_message_id,
-                            ),
-                            connection_id, original_attachment_count,
-                        )
 
+            except SessionDeletedError:
+                await ws.close(code=4004, reason="Conversation deleted")
+                break
             except WebSocketDisconnect:
                 raise
             except ValueError as exc:

@@ -8,6 +8,7 @@ from typing import Any
 from app.autonomy.broker import EventTurnOutcome, IntegrationEventBroker
 from app.autonomy.coordinator import SessionTurnCoordinator
 from app.autonomy.store import AutonomyStore, EventRecord
+from app.core.session_ids import SessionDeletedError
 from app.core.events import (
     AssistantStateEvent,
     AutonomyOutcomeEvent,
@@ -88,6 +89,8 @@ class AutonomyRuntime:
             int(self.config.get("recent_context_limit", 4000)),
         )
         async with self.coordinator.event_turn(event.session_id):
+            if self.store.is_session_deleted(event.session_id):
+                raise SessionDeletedError()
             iterator = self.orchestrator.handle_integration_event(
                 session_id=event.session_id,
                 event=event,
@@ -102,8 +105,8 @@ class AutonomyRuntime:
                     continue
                 if isinstance(output, AssistantStateEvent) and self.output_sink is not None:
                     await self.output_sink(event.session_id, output, event.event_id)
-        if notification is not None and self.notification_sink is not None:
-            await self.notification_sink(event.session_id, notification, event.event_id)
+            if notification is not None and self.notification_sink is not None:
+                await self.notification_sink(event.session_id, notification, event.event_id)
         return EventTurnOutcome(summary=summary, notification=notification)
 
     async def _handle_discard(
@@ -114,11 +117,17 @@ class AutonomyRuntime:
         session_id = record.event.session_id
         if session_id is None:
             return
-        message = str(notification.get("message", "")).strip()
-        if message:
-            self.orchestrator.history.add(session_id, "assistant", message)
-        if self.notification_sink is not None:
-            await self.notification_sink(session_id, notification, record.event.event_id)
+        try:
+            async with self.coordinator.event_turn(session_id):
+                if self.store.is_session_deleted(session_id):
+                    return
+                message = str(notification.get("message", "")).strip()
+                if message:
+                    self.orchestrator.history.add(session_id, "assistant", message)
+                if self.notification_sink is not None:
+                    await self.notification_sink(session_id, notification, record.event.event_id)
+        except SessionDeletedError:
+            return
 
     def _build_approval_callback(self, session_id: str):
         if self.approval_provider is None or self._loop is None:

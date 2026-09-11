@@ -1,5 +1,6 @@
 from app.logging import trace_event
 from app.storage.database import Database
+from app.storage.session_lifecycle import require_writable_session
 
 
 class SummaryStore:
@@ -37,6 +38,7 @@ class SummaryStore:
             payload={"summary": summary, "last_turn_count": last_turn_count},
         )
         with self.db.transaction() as conn:
+            require_writable_session(conn, session_id)
             conn.execute(
                 """
                 INSERT INTO conversation_summary (session_id, summary, last_turn_count)

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterator
 
 from app.paths import DATA_DIR, resolve_app_path
+from app.storage.session_lifecycle import initialize_session_lifecycle
 
 
 def _create_beliefs_table(conn: sqlite3.Connection, table_name: str = "beliefs") -> None:
@@ -58,6 +59,7 @@ def initialize_belief_schema(
     legacy_local_human_id: str = "local-human",
     legacy_local_human_name: str = "You",
 ) -> None:
+    initialize_session_lifecycle(conn)
     existing = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'beliefs'"
     ).fetchone()

@@ -91,11 +91,25 @@ Deleting a session removes:
 - attachment rows from SQLite
 - uploaded image files on disk
 - episodic vector entries for both text turns and image summaries
+- the conversation summary and session-scoped beliefs
+
+The deletion endpoint closes admission to new and queued turns, waits for active
+work (including autonomous notification delivery), then removes the session data.
+Deletion continues if the HTTP caller disconnects. A durable SQLite deletion marker
+rejects late history, summary, belief, and integration writes, including after restart.
+Queued integration events are discarded and pending operation records are cancelled;
+the diagnostic journal remains. This does not undo effects already performed by an
+external integration.
+
+Existing browser connections close with code `4004`; the client reconnects with a
+new conversation. Session replay buffers and outstanding approvals are cleared.
+Deletion can wait for the current turn or delivery to finish; it does not interrupt
+an in-flight model request or worker thread.
 
 The deletion result distinguishes the canonical SQLite deletion from secondary cleanup.
 Vector and filesystem cleanup are both attempted, and any failures are returned to the
 API and shown as a warning in the history UI.
 
-Long-term structured records in the global `memory` table are not session-owned and
+Agent-wide beliefs and long-term structured records in the global `memory` table are not session-owned and
 therefore survive chat-session deletion. Their current schema has no source session or
 message provenance.

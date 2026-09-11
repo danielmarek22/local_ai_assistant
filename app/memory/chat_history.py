@@ -9,6 +9,7 @@ from pathlib import Path
 from app.logging import trace_event
 from app.perception.attachments import Attachment, ImageAttachment, attachment_from_stored_record
 from app.storage.database import Database
+from app.storage.session_lifecycle import is_session_deleted, require_writable_session
 from app.storage.vector_store import VectorStore
 from app.core.conversation import (
     InputSource,
@@ -68,6 +69,7 @@ class ChatHistoryStore:
         session_id = validate_session_id(session_id)
         requested_kind = SessionKind(kind)
         with self.db.transaction() as conn:
+            require_writable_session(conn, session_id)
             row = conn.execute(
                 "SELECT kind FROM chat_sessions WHERE session_id = ?",
                 (session_id,),
@@ -83,6 +85,10 @@ class ChatHistoryStore:
                 (session_id,),
             ).fetchone()
         return SessionKind(row["kind"])
+
+    def is_session_deleted(self, session_id: str) -> bool:
+        with self.db.connection() as conn:
+            return is_session_deleted(conn, validate_session_id(session_id))
 
     def get_session_kind(self, session_id: str) -> SessionKind:
         session_id = validate_session_id(session_id)
@@ -180,6 +186,7 @@ class ChatHistoryStore:
         )
 
         with self.db.transaction() as conn:
+            require_writable_session(conn, session_id)
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -974,6 +981,21 @@ class ChatHistoryStore:
                 """,
                 (session_id, session_id),
             ).fetchone()["session_exists"])
+            if session_exists:
+                conn.execute(
+                    "INSERT OR IGNORE INTO deleted_sessions (session_id) VALUES (?)",
+                    (session_id,),
+                )
+            # Canonical session-owned records disappear atomically with the fence.
+            conn.execute("DELETE FROM conversation_summary WHERE session_id = ?", (session_id,))
+            conn.execute(
+                "DELETE FROM beliefs WHERE visibility = 'SESSION_CURRENT' AND scope_session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "DELETE FROM belief_applications WHERE source_message_id IN "
+                "(SELECT id FROM chat_history WHERE session_id = ?)", (session_id,),
+            )
             conn.execute(
                 "DELETE FROM chat_sessions WHERE session_id = ?",
                 (session_id,),

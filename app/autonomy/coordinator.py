@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from app.core.session_ids import SessionDeletedError
 
 
 class SessionTurnCoordinator:
@@ -14,6 +15,17 @@ class SessionTurnCoordinator:
         self._active_sessions: set[str] = set()
         self._condition = asyncio.Condition()
         self._waiting_users = 0
+        self._closed_sessions: set[str] = set()
+
+    def is_closed(self, session_id: str) -> bool:
+        return session_id in self._closed_sessions
+
+    async def close_session(self, session_id: str) -> None:
+        """Reject new/queued turns, then drain active work without cancelling workers."""
+        async with self._condition:
+            self._closed_sessions.add(session_id)
+            self._condition.notify_all()
+            await self._condition.wait_for(lambda: session_id not in self._active_sessions)
 
     @asynccontextmanager
     async def user_turn(self, session_id: str):
@@ -35,10 +47,14 @@ class SessionTurnCoordinator:
                 # a session while waiting for capacity can block a priority user
                 # behind an event that is itself waiting for that user to run.
                 await self._condition.wait_for(
-                    lambda: session_id not in self._active_sessions
-                    and len(self._active_sessions) < self._global_concurrency
-                    and (is_user or self._waiting_users == 0)
+                    lambda: self.is_closed(session_id) or (
+                        session_id not in self._active_sessions
+                        and len(self._active_sessions) < self._global_concurrency
+                        and (is_user or self._waiting_users == 0)
+                    )
                 )
+                if self.is_closed(session_id):
+                    raise SessionDeletedError()
             finally:
                 if is_user:
                     self._waiting_users -= 1

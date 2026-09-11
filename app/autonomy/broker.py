@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.autonomy.store import AutonomyStore, EventRecord
+from app.core.session_ids import SessionDeletedError
 from app.integrations import EventSpec, IntegrationEvent, IntegrationRegistry
 
 
@@ -155,6 +156,8 @@ class IntegrationEventBroker:
                     continue
                 try:
                     outcome = await self.handler(record, spec)
+                except SessionDeletedError:
+                    self.store.fail_event(event_id, "Session deleted", status="discarded")
                 except Exception as exc:
                     logger.exception("Autonomous event %s failed", event_id)
                     self.store.fail_event(event_id, str(exc))

@@ -41,6 +41,18 @@ test('session kind is sent on connection and restored from session init', () => 
     assert.equal(initialized.localAssistantDisplayName, 'Astra Custom');
 });
 
+test('deleted conversation reconnects as a new session instead of reopening its id', () => {
+    const client = new NetworkClient({});
+    client.scheduleReconnect = () => {};
+    client.connect({sessionMode: 'resume', sessionId: 'deleted', serverInstanceId: 'old', sessionKind: 'manual_group'});
+    client.ws.onclose({code: 4004, reason: 'Conversation deleted'});
+    assert.deepEqual(client.connectionOptions, {sessionMode: 'new', sessionKind: 'manual_group'});
+    client.connect();
+    const url = new URL(client.ws.url);
+    assert.equal(url.searchParams.get('session_mode'), 'new');
+    assert.equal(url.searchParams.has('session_id'), false);
+});
+
 test('socket open does not invent an idle assistant state', () => {
     const states = [];
     const client = new NetworkClient({ onState: (state) => { states.push(state); } });

@@ -6,6 +6,11 @@ SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
 _SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
 
 
+class SessionDeletedError(ValueError):
+    def __init__(self):
+        super().__init__("This conversation has been deleted")
+
+
 def validate_session_id(value: object) -> str:
     if not isinstance(value, str) or _SESSION_ID_RE.fullmatch(value) is None:
         raise ValueError(

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from app.core.assistant_state import AssistantState
+from app.core.session_ids import SessionDeletedError
 from app.transport.websocket_protocol import ToolApprovalResponseFrame, encode_server_frame
 
 
@@ -53,11 +54,30 @@ class SessionConnectionHub:
         self._approvals: dict[str, tuple[str, asyncio.Future[bool]]] = {}
         self._assistant_states: dict[str, SessionAssistantState] = {}
         self._pending_assistant_frames: dict[str, list[dict]] = {}
+        self._closed_sessions: set[str] = set()
 
     def register(self, session_id: str, connection_id: str, websocket) -> None:
+        if session_id in self._closed_sessions:
+            raise SessionDeletedError()
         connection = _Connection(session_id, connection_id, websocket)
         self._connections[connection_id] = connection
         self._by_websocket[id(websocket)] = connection_id
+
+    async def close_session(self, session_id: str) -> None:
+        self._closed_sessions.add(session_id)
+        self._assistant_states.pop(session_id, None)
+        self._pending_assistant_frames.pop(session_id, None)
+        targets = [c for c in self._connections.values() if c.session_id == session_id]
+        for connection in targets:
+            self.unregister(connection.connection_id)
+
+        async def close(connection):
+            async with connection.send_lock:
+                await connection.websocket.close(code=4004, reason="Conversation deleted")
+
+        await asyncio.gather(
+            *(asyncio.wait_for(close(c), timeout=2) for c in targets), return_exceptions=True,
+        )
 
     def unregister(self, connection_id: str) -> None:
         connection = self._connections.pop(connection_id, None)
@@ -119,6 +139,8 @@ class SessionConnectionHub:
         await self._send(connection, prepared_payload)
 
     async def broadcast(self, session_id: str, payload: dict) -> None:
+        if session_id in self._closed_sessions:
+            return
         self._record_assistant_state(session_id, payload)
         targets = [
             item for item in self._connections.values() if item.session_id == session_id
@@ -150,6 +172,8 @@ class SessionConnectionHub:
                 return
 
     def _buffer_assistant_frame(self, session_id: str, payload: dict) -> None:
+        if session_id in self._closed_sessions:
+            return
         payload = dict(payload)
         if payload.get("type") in _TERMINAL_ASSISTANT_FRAME_TYPES:
             self._pending_assistant_frames[session_id] = [payload]
@@ -252,6 +276,8 @@ class SessionConnectionHub:
     async def _send(self, connection: _Connection, payload: dict) -> None:
         payload = self._with_connection_metadata(connection, payload)
         async with connection.send_lock:
+            if connection.session_id in self._closed_sessions:
+                return
             await connection.websocket.send_text(encode_server_frame(payload))
 
     @staticmethod

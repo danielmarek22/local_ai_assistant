@@ -84,6 +84,13 @@ export class NetworkClient {
                 if (this.ws !== socket) return;
                 if (this.isExplicitlyClosed) return;
 
+                if (event.code === 4004) {
+                    this.connectionOptions = {
+                        sessionMode: 'new',
+                        sessionKind: this.connectionOptions.sessionKind || 'direct',
+                    };
+                }
+
                 if (event.code === 1009 && this.handlers.onUserNotice) {
                     this.handlers.onUserNotice({
                         scope: 'last_user_message',
