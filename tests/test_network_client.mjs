@@ -21,6 +21,27 @@ class FakeWebSocket {
 globalThis.WebSocket = FakeWebSocket;
 globalThis.window = { location: { href: 'http://localhost:8000/' } };
 
+test('browser identity survives reconnect and a page refresh', () => {
+    const stored = new Map();
+    globalThis.sessionStorage = {
+        getItem: key => stored.get(key) || null,
+        setItem: (key, value) => stored.set(key, value),
+    };
+    try {
+        const first = new NetworkClient({});
+        first.connect();
+        const identity = new URL(first.ws.url).searchParams.get('client_id');
+        first.connect();
+        assert.equal(new URL(first.ws.url).searchParams.get('client_id'), identity);
+        const refreshed = new NetworkClient({});
+        refreshed.connect();
+        assert.equal(new URL(refreshed.ws.url).searchParams.get('client_id'), identity);
+        assert.ok(identity);
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});
+
 
 test('session kind is sent on connection and restored from session init', () => {
     let initialized = null;

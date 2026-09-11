@@ -170,6 +170,62 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acceptance_survives_dead_origin_and_precedes_terminal_replay(self):
+        hub = SessionConnectionHub()
+        dead = FailingWebSocket()
+        hub.register("session", "origin", dead)
+        accepted = {"type": "user_message_accepted", "message_id": 7, "is_retry": False}
+        await hub.send_websocket(dead, accepted)
+        await hub.send_websocket(dead, {"type": "assistant_end", "content": "Answer"})
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual(replacement.sent[0], accepted)
+        self.assertEqual(replacement.sent[1]["type"], "assistant_end")
+
+    async def test_acceptance_is_recoverable_even_after_successful_send_and_failed_replay(self):
+        hub = SessionConnectionHub()
+        origin = FakeWebSocket()
+        hub.register("session", "origin", origin)
+        accepted = {"type": "user_message_accepted", "message_id": 8, "is_retry": True}
+        await hub.send_websocket(origin, accepted)
+        failed = FailingWebSocket()
+        hub.register("session", "failed", failed)
+        await hub.replay_pending("failed")
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual(replacement.sent, [accepted])
+        other = FakeWebSocket()
+        hub.register("other", "other", other)
+        await hub.replay_pending("other")
+        self.assertEqual(other.sent, [])
+
+    async def test_reconnected_browser_gets_acceptance_without_acknowledging_other_tabs(self):
+        hub = SessionConnectionHub()
+        origin, replacement, other = FailingWebSocket(), FakeWebSocket(), FakeWebSocket()
+        hub.register("session", "origin", origin, client_id="browser-a")
+        hub.register("session", "replacement", replacement, client_id="browser-a")
+        hub.register("session", "other", other, client_id="browser-b")
+        accepted = {"type": "user_message_accepted", "message_id": 9, "is_retry": False}
+        await hub.send_websocket(origin, accepted)
+        self.assertEqual(replacement.sent, [accepted])
+        await hub.replay_pending("other")
+        self.assertEqual(other.sent, [])
+
+    async def test_latest_acceptance_replaces_previous_and_deletion_clears_it(self):
+        hub = SessionConnectionHub()
+        origin = FakeWebSocket()
+        hub.register("session", "origin", origin)
+        for message_id in (10, 11):
+            await hub.send_websocket(origin, {"type": "user_message_accepted", "message_id": message_id, "is_retry": False})
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual([frame["message_id"] for frame in replacement.sent], [11])
+        await hub.close_session("session")
+        self.assertNotIn("session", hub._accepted_messages)
+
     async def test_turn_metadata_is_added_to_assistant_payloads(self):
         hub = SessionConnectionHub()
         ws = FakeWebSocket()

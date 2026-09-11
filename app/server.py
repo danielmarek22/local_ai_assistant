@@ -1401,6 +1401,9 @@ async def websocket_endpoint(ws: WebSocket):
     orchestrator = runtime_app.state.orchestrator
     history_store = orchestrator.history
     try:
+        client_id = ws.query_params.get("client_id")
+        if client_id is not None:
+            client_id = validate_session_id(client_id)
         validated_requested_session_id = (
             validate_session_id(requested_session_id)
             if requested_session_id is not None
@@ -1433,7 +1436,7 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         if _session_coordinator(runtime_app).is_closed(session_id):
             raise SessionDeletedError()
-        hub.register(session_id, connection_id, ws)
+        hub.register(session_id, connection_id, ws, client_id=client_id)
     except SessionDeletedError:
         await ws.close(code=4004, reason="Conversation deleted")
         return

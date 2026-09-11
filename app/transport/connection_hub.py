@@ -34,6 +34,7 @@ class _Connection:
     session_id: str
     connection_id: str
     websocket: object
+    client_id: str | None = None
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_active: float = field(default_factory=time.monotonic)
     turn_id: str | None = None
@@ -54,12 +55,15 @@ class SessionConnectionHub:
         self._approvals: dict[str, tuple[str, asyncio.Future[bool]]] = {}
         self._assistant_states: dict[str, SessionAssistantState] = {}
         self._pending_assistant_frames: dict[str, list[dict]] = {}
+        self._accepted_messages: dict[str, dict[str | None, dict]] = {}
         self._closed_sessions: set[str] = set()
 
-    def register(self, session_id: str, connection_id: str, websocket) -> None:
+    def register(
+        self, session_id: str, connection_id: str, websocket, *, client_id: str | None = None,
+    ) -> None:
         if session_id in self._closed_sessions:
             raise SessionDeletedError()
-        connection = _Connection(session_id, connection_id, websocket)
+        connection = _Connection(session_id, connection_id, websocket, client_id=client_id)
         self._connections[connection_id] = connection
         self._by_websocket[id(websocket)] = connection_id
 
@@ -67,6 +71,7 @@ class SessionConnectionHub:
         self._closed_sessions.add(session_id)
         self._assistant_states.pop(session_id, None)
         self._pending_assistant_frames.pop(session_id, None)
+        self._accepted_messages.pop(session_id, None)
         targets = [c for c in self._connections.values() if c.session_id == session_id]
         for connection in targets:
             self.unregister(connection.connection_id)
@@ -133,6 +138,21 @@ class SessionConnectionHub:
             return
         connection = self._connections[connection_id]
         prepared_payload = self._with_connection_metadata(connection, payload)
+        if prepared_payload.get("type") == "user_message_accepted":
+            if connection.session_id in self._closed_sessions:
+                return
+            # The same browser may already have reconnected while persistence ran.
+            # Other tabs can have their own pending input, so do not acknowledge it.
+            accepted = self._accepted_messages.setdefault(connection.session_id, {})
+            accepted[connection.client_id] = dict(prepared_payload)
+            targets = [
+                item for item in self._connections.values()
+                if item.session_id == connection.session_id and item.client_id == connection.client_id
+            ]
+            await asyncio.gather(
+                *(self._send(item, prepared_payload) for item in targets), return_exceptions=True,
+            )
+            return
         if str(prepared_payload.get("type", "")).startswith("assistant_"):
             await self.broadcast(connection.session_id, prepared_payload)
             return
@@ -163,6 +183,14 @@ class SessionConnectionHub:
         if connection is None:
             return
 
+        # A successful send is not proof of browser receipt. Retain the latest
+        # identity per browser independently of lossy assistant-frame replay.
+        accepted = self._accepted_messages.get(connection.session_id, {}).get(connection.client_id)
+        if accepted is not None:
+            try:
+                await self._send(connection, accepted)
+            except Exception:
+                return
         pending = self._pending_assistant_frames.pop(connection.session_id, [])
         for index, payload in enumerate(pending):
             try:

@@ -1,7 +1,9 @@
 import tempfile
 import unittest
+import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.core.context_builder import ContextBuilder
 from app.core.events import AssistantSpeechEvent, AssistantTurnFailureEvent, UserMessageAcceptedEvent
@@ -10,9 +12,36 @@ from app.memory.chat_history import ChatHistoryStore
 from app.memory.retriever import MemoryRetriever
 from app.memory.summary_store import SummaryStore
 from app.storage.database import Database
+from app import server
+from app.transport.connection_hub import SessionConnectionHub
 
 
 class RetrievalFailureTests(unittest.TestCase):
+    def test_refresh_before_acceptance_does_not_abort_persisted_turn(self):
+        self.configure_queries(())
+
+        async def check():
+            hub = SessionConnectionHub()
+            app = SimpleNamespace(state=SimpleNamespace(connection_hub=hub))
+            dead = SimpleNamespace(app=app, send_text=AsyncMock(side_effect=RuntimeError("Disconnected")))
+            hub.register("session", "origin", dead)
+            with patch.object(server, "synthesize_async", AsyncMock(side_effect=RuntimeError("No TTS"))):
+                await server._stream_orchestrator_events(
+                    dead, self.orchestrator,
+                    self.orchestrator.handle_user_input("session", "Question"), "origin", 0,
+                )
+            rows = self.history.get_all("session")
+            self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+            replacement = SimpleNamespace(send_text=AsyncMock())
+            hub.register("session", "replacement", replacement)
+            await hub.replay_pending("replacement")
+            frames = [json.loads(call.args[0]) for call in replacement.send_text.await_args_list]
+            self.assertEqual(frames[0], {"type": "user_message_accepted", "message_id": rows[0]["id"], "is_retry": False})
+            self.assertEqual(frames[1]["type"], "assistant_end")
+            self.assertEqual(frames[1]["content"], "A useful answer.")
+
+        asyncio.run(check())
+
     def setUp(self):
         self.db = Database(":memory:")
         self.addCleanup(self.db.close)

@@ -48,6 +48,15 @@ export class NetworkClient {
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
         this.connectionOptions = {};
+        this.clientId = globalThis.crypto?.randomUUID?.()
+            || `browser-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+            const key = 'astra.websocket-client-id';
+            this.clientId = sessionStorage.getItem(key) || this.clientId;
+            sessionStorage.setItem(key, this.clientId);
+        } catch {
+            // Reconnect still works when browser storage is unavailable.
+        }
     }
 
     connect(options = this.connectionOptions) {
@@ -56,6 +65,7 @@ export class NetworkClient {
 
         try {
             const wsUrl = new URL(CONFIG.SYSTEM.WS_URL, window.location.href);
+            wsUrl.searchParams.set('client_id', this.clientId);
             if (this.connectionOptions.sessionId) {
                 wsUrl.searchParams.set('session_id', this.connectionOptions.sessionId);
             }
