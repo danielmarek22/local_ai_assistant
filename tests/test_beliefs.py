@@ -2271,6 +2271,9 @@ class FakeHistory:
     def get_recent(self, session_id=None, limit=10):
         return self.rows[-limit:]
 
+    def get_summary_batch(self, session_id, after_message_id, limit):
+        return [row for row in self.rows if row["id"] > after_message_id and row["role"] in ("user", "assistant")][:limit]
+
 
 class FakeSummaryStore:
     def get(self, _session_id):

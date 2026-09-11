@@ -807,6 +807,22 @@ class ChatHistoryStore:
         )
         return hydrated
 
+    def get_summary_batch(self, session_id: str, after_message_id: int, limit: int = 100):
+        """Read the next eligible messages in stable ID order, without a moving window."""
+        session_id = validate_session_id(session_id)
+        if after_message_id < 0 or limit < 1:
+            raise ValueError("Summary checkpoint must be nonnegative and limit must be positive")
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, role, content, sender_id, sender_display_name, sender_type, input_source
+                   FROM chat_history
+                   WHERE session_id = ? AND id > ? AND excluded_from_context = 0
+                     AND role IN ('user', 'assistant')
+                   ORDER BY id ASC LIMIT ?""",
+                (session_id, after_message_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def count_messages(self, session_id: str) -> int:
         session_id = validate_session_id(session_id)
         with self.db.connection() as conn:

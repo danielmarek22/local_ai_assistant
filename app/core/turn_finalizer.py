@@ -15,6 +15,8 @@ class TurnFinalizer:
         summary_trigger: int = 10,
         completion_observers=None,
     ):
+        if summary_trigger < 1:
+            raise ValueError("summary_trigger must be at least one")
         self.history = history_store
         self.summary_store = summary_store
         self.summarizer = summarizer
@@ -34,27 +36,28 @@ class TurnFinalizer:
 
         summary_data = self.summary_store.get(session_id)
         if summary_data:
-            existing_summary, last_count = summary_data
+            existing_summary, last_message_id = summary_data
         else:
-            existing_summary, last_count = None, 0
+            existing_summary, last_message_id = None, 0
 
-        history = self.history.get_recent(
+        # One bounded batch per completed turn; preserve backlog for later turns.
+        history = self.history.get_summary_batch(
             session_id=session_id,
-            limit=1000,
+            after_message_id=last_message_id,
+            limit=max(100, self.summary_trigger),
         )
-        current_count = len(history)
         trace_event(
             "turn_finalizer",
             "summarization_check",
             session_id=session_id,
             payload={
-                "current_count": current_count,
-                "last_count": last_count,
+                "pending_batch_count": len(history),
+                "last_message_id": last_message_id,
                 "summary_trigger": self.summary_trigger,
             },
         )
 
-        if (current_count - last_count) < self.summary_trigger:
+        if len(history) < self.summary_trigger:
             return
 
         logger.info("[%s] Summarizing conversation history", session_id)
@@ -64,7 +67,7 @@ class TurnFinalizer:
                 "role": row["role"],
                 "content": self._summary_content(session_id, row),
             }
-            for row in history[last_count:]
+            for row in history
         ]
         trace_event(
             "turn_finalizer",
@@ -82,13 +85,13 @@ class TurnFinalizer:
             logger.exception("[%s] Summarization failed", session_id)
             return
 
-        self.summary_store.set(session_id, summary, current_count)
+        self.summary_store.set(session_id, summary, history[-1]["id"])
         logger.info("[%s] History summarized (%d chars)", session_id, len(summary))
         trace_event(
             "turn_finalizer",
             "summary_saved",
             session_id=session_id,
-            payload={"summary": summary, "last_turn_count": current_count},
+            payload={"summary": summary, "last_message_id": history[-1]["id"]},
         )
 
     def _summary_content(self, session_id: str, row: dict) -> str:

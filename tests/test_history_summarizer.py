@@ -16,7 +16,9 @@ class HistorySummarizerTests(unittest.TestCase):
         self.rows = []
         self.llm = Mock()
         self.finalizer = TurnFinalizer(
-            SimpleNamespace(get_recent=lambda **kwargs: list(self.rows)),
+            SimpleNamespace(get_summary_batch=lambda session_id, after_message_id, limit: [
+                row for row in self.rows if row["id"] > after_message_id
+            ][:limit]),
             self.store,
             HistorySummarizer(self.llm),
             summary_trigger=2,
@@ -24,8 +26,8 @@ class HistorySummarizerTests(unittest.TestCase):
 
     def add_exchange(self, text):
         self.rows.extend([
-            {"role": "user", "content": text},
-            {"role": "assistant", "content": "Understood."},
+            {"id": len(self.rows) + 1, "role": "user", "content": text},
+            {"id": len(self.rows) + 2, "role": "assistant", "content": "Understood."},
         ])
 
     def test_consecutive_updates_include_saved_summary_and_only_new_messages(self):

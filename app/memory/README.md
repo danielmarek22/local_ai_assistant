@@ -67,6 +67,20 @@ The attachment model now has a shared `Attachment` base type, but persistence is
    its previous summary and the messages after its saved checkpoint. Failed or empty
    generations leave both the summary and checkpoint unchanged for a later attempt.
 
+Summary checkpoints use the last summarized SQLite message ID, not a row count or
+position in a recent-history window. Each completed turn can summarize one batch of
+up to 100 eligible messages (or the configured trigger size if larger), in ascending
+ID order. Only non-excluded user and assistant rows count toward the trigger; tool
+records and other sessions do not consume the batch. Summary text and its checkpoint
+are saved together only after successful generation. A backlog is drained gradually
+as turns complete, rather than through an unbounded series of model calls.
+
+Existing databases retain their summary text but start the new ID checkpoint at zero.
+The legacy moving-window count cannot reliably identify covered messages, so migration
+conservatively replays eligible history in batches into the saved summary. This may
+revisit old facts, but avoids silently skipping them. Reopening the database preserves
+new ID checkpoints; the old count column is retained only for schema compatibility.
+
 ## Data Access
 
 Memory store classes execute SQL through the shared SQLite connection provided

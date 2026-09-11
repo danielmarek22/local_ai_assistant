@@ -344,9 +344,20 @@ class Database:
             session_id TEXT PRIMARY KEY,
             summary TEXT NOT NULL,
             last_turn_count INTEGER DEFAULT 0,
+            last_message_id INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+
+        summary_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(conversation_summary)")}
+        if "last_message_id" not in summary_columns:
+            # Legacy counts index a moving/filtered window and cannot safely be
+            # translated to IDs. Preserve the summary and replay from the start.
+            cursor.execute("ALTER TABLE conversation_summary ADD COLUMN last_message_id INTEGER NOT NULL DEFAULT 0")
+
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_chat_history_summary_cursor
+            ON chat_history(session_id, id)
+            WHERE excluded_from_context = 0 AND role IN ('user', 'assistant')""")
 
         self.conn.commit()
         initialize_belief_schema(

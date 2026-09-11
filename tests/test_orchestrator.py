@@ -117,6 +117,10 @@ class FakeHistoryStore:
     def get_recent(self, session_id: str, limit: int = 10):
         return self.recent_rows
 
+    def get_summary_batch(self, session_id, after_message_id, limit):
+        rows = [{"id": index + 1, **row} for index, row in enumerate(self.recent_rows)]
+        return [row for row in rows if row["id"] > after_message_id and row["role"] in ("user", "assistant")][:limit]
+
     def get_before(self, _session_id: str, _message_id: int, limit: int = 2):
         return self.recent_rows[-limit:]
 
