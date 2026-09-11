@@ -413,19 +413,20 @@ export class AvatarManager {
         this.activeGestureName = nextGestureName;
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
-        this.fadeToAction(animationKey, 0.35);
+        this.fadeToAction(animationKey, 0.35, true);
     }
 
-    fadeToAction(name, duration = 0.5) {
+    fadeToAction(name, duration = 0.5, restart = false) {
         const nextAction = this.animations[name];
-        if (!nextAction || this.currentAction === nextAction) return;
+        if (!nextAction || (this.currentAction === nextAction && !restart)) return;
 
         nextAction.reset();
         // Cross-fades must start with both actions running.
         nextAction.paused = false; 
         nextAction.play();
 
-        if (this.currentAction) {
+        // Repeated one-shots must restart, but cannot cross-fade from themselves.
+        if (this.currentAction && this.currentAction !== nextAction) {
             this.currentAction.paused = false; 
             
             nextAction.crossFadeFrom(this.currentAction, duration, true);
@@ -607,7 +608,7 @@ export class AvatarManager {
 
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
-        this.fadeToAction(animationKey, duration);
+        this.fadeToAction(animationKey, duration, true);
         return true;
     }
 
