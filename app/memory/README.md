@@ -83,6 +83,22 @@ Run `python main.py reconcile-indexes` with the application stopped to reconcile
 semantic and episodic Chroma collections from SQLite. The command initializes storage
 only and prints a JSON report containing canonical, upserted, and removed counts.
 
+## Reflection
+
+Manual reflection reads text from the blocking model client's message dictionary
+using the same content validation as history summarization. Invalid or empty content,
+invalid plans, and conflicting keep/delete decisions are rejected before mutation.
+Deletion IDs are restricted to the reviewed stale set and deduplicated. If a deletion
+source has disappeared during generation, consolidation aborts rather than partially
+applying the plan.
+
+Reflection deletes and replacement inserts commit together in one SQLite transaction.
+Vector updates happen afterward; both replacement indexing and obsolete-vector cleanup
+are attempted. A committed reflection returns `success: true` with
+`index_sync_complete: false` and repair details if either index operation fails. The UI
+distinguishes this from complete success. Use the reconciliation command described
+above to repair the index; do not rerun reflection to recover an indexing failure.
+
 ## Deletion Semantics
 
 Deleting a session removes:

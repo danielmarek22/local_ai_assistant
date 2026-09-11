@@ -71,6 +71,48 @@ class MemoryStore:
             raise MemoryIndexSyncError("upsert", [mem_id], 1) from exc
         return mem_id
 
+    def apply_consolidation(self, delete_ids: list[str], new_memories: list[dict]) -> dict:
+        """Commit the complete reflection in SQLite before syncing derived vectors."""
+        delete_ids = list(dict.fromkeys(delete_ids))
+        additions = [{**memory, "id": str(uuid.uuid4())} for memory in new_memories]
+        with self.db.transaction() as conn:
+            for memory_id in delete_ids:
+                cursor = conn.execute("DELETE FROM memory WHERE id = ?", (memory_id,))
+                if cursor.rowcount != 1:
+                    raise ValueError("Reflection source memory changed; run reflection again")
+            for memory in additions:
+                conn.execute(
+                    "INSERT INTO memory (id, category, content, importance) VALUES (?, ?, ?, ?)",
+                    (memory["id"], memory["category"], memory["content"], memory["importance"]),
+                )
+
+        errors = []
+        # Try both operations even if one fails. Canonical replacements already
+        # exist and reconcile_index can repair either kind of divergence later.
+        if additions:
+            try:
+                self.collection.upsert(
+                    ids=[memory["id"] for memory in additions],
+                    documents=[memory["content"] for memory in additions],
+                    metadatas=[{"category": memory["category"], "importance": memory["importance"]}
+                               for memory in additions],
+                )
+            except Exception:
+                logger.exception("Reflection committed, but replacement indexing failed")
+                errors.append("Replacement memories could not be indexed")
+        if delete_ids:
+            try:
+                self.collection.delete(ids=delete_ids)
+            except Exception:
+                logger.exception("Reflection committed, but obsolete vector cleanup failed")
+                errors.append("Obsolete memory vectors could not be removed")
+        return {
+            "deleted_count": len(delete_ids),
+            "created_ids": [memory["id"] for memory in additions],
+            "index_sync_complete": not errors,
+            "index_sync_errors": errors,
+        }
+
     def reconcile_index(self, batch_size: int = 100) -> dict[str, int]:
         """Make the semantic index match canonical SQLite memory rows."""
         if batch_size < 1:

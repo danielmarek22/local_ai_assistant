@@ -1,4 +1,5 @@
 import unittest
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -69,6 +70,42 @@ class FakeVectorStore:
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_consolidation_rolls_back_deletes_and_all_additions_on_insert_failure(self):
+        old = self.store.add("Original")
+        with self.db.transaction() as conn:
+            conn.execute("""CREATE TRIGGER reject_bad_memory BEFORE INSERT ON memory
+                WHEN NEW.content = 'Rejected' BEGIN SELECT RAISE(ABORT, 'Rejected'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.apply_consolidation([old], [
+                {"content": "First replacement", "category": "general", "importance": 2},
+                {"content": "Rejected", "category": "general", "importance": 2},
+            ])
+        self.assertEqual([row["id"] for row in self.store.get_all()], [old])
+        self.assertEqual(self.vector_store.semantic_collection.ids, [old])
+
+    def test_consolidation_commits_canonical_batch_despite_vector_failures_then_repairs(self):
+        old = self.store.add("Original")
+        collection = self.vector_store.semantic_collection
+        with patch.object(collection, "upsert", side_effect=RuntimeError("Unavailable")) as upsert, \
+                patch.object(collection, "delete", side_effect=RuntimeError("Unavailable")) as delete:
+            with self.assertLogs("memory_store", level="ERROR"):
+                result = self.store.apply_consolidation([old], [
+                    {"content": "Replacement", "category": "general", "importance": 2},
+                ])
+            upsert.assert_called_once()
+            delete.assert_called_once()
+        self.assertFalse(result["index_sync_complete"])
+        self.assertEqual(len(result["index_sync_errors"]), 2)
+        self.assertEqual([row["content"] for row in self.store.get_all()], ["Replacement"])
+        self.store.reconcile_index()
+        self.assertEqual(collection.ids, result["created_ids"])
+
+    def test_consolidation_rejects_missing_source_without_partial_deletion(self):
+        old = self.store.add("Original")
+        with self.assertRaisesRegex(ValueError, "source memory changed"):
+            self.store.apply_consolidation([old, "already-deleted"], [])
+        self.assertEqual([row["id"] for row in self.store.get_all()], [old])
+
     def setUp(self):
         self.db = Database(path=":memory:")
         self.vector_store = FakeVectorStore()

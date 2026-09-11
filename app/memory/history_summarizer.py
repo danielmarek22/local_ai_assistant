@@ -1,4 +1,5 @@
 from app.logging import trace_event
+from app.llm.base import response_text
 
 class HistorySummarizer:
     def __init__(self, llm):
@@ -63,10 +64,7 @@ class HistorySummarizer:
             tools=[] 
         )
 
-        content = response.get("content") if isinstance(response, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("History summarization returned no usable text content")
-        buffer = content.strip()
+        buffer = response_text(response, context="History summarization")
 
         trace_event(
             "history_summarizer",

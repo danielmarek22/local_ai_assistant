@@ -539,8 +539,10 @@ uiManager.onReflect(async () => {
     try {
         const result = await client.reflectMemories(0);
         uiManager.setReflectStatus(
-            `Dream complete: ${result.deleted_count} deleted, ${result.created_count} created.`,
-            'success',
+            result.index_sync_complete === false
+                ? `Dream saved: ${result.deleted_count} deleted, ${result.created_count} created. Memory search needs repair before these changes are fully searchable.`
+                : `Dream complete: ${result.deleted_count} deleted, ${result.created_count} created.`,
+            result.index_sync_complete === false ? 'error' : 'success',
         );
     } catch (error) {
         console.error(error);

@@ -3,6 +3,7 @@ import logging
 from typing import Any, Optional
 from pydantic import BaseModel, ValidationError
 from app.logging import trace_event
+from app.llm.base import response_text
 
 logger = logging.getLogger("memory_reflector")
 
@@ -115,22 +116,25 @@ class MemoryReflector:
         )
 
         try:
-            data = self._extract_json(response)
+            content = response_text(response, context="Memory reflection")
+            data = self._extract_json(content)
             if data is None:
-                if "{" in response:
+                if "{" in content:
                     raise ValueError(
                         "No complete JSON object found in reflection response (output may be truncated)"
                     )
                 raise ValueError("No JSON object found in reflection response")
 
             parsed = ReflectorOutput.model_validate(data)
-            delete_ids = [memory_id for memory_id in parsed.delete_ids if memory_id in stale_ids]
+            delete_ids = list(dict.fromkeys(memory_id for memory_id in parsed.delete_ids if memory_id in stale_ids))
             ignored_delete_ids = [memory_id for memory_id in parsed.delete_ids if memory_id not in stale_ids]
-            keep_ids = [memory_id for memory_id in parsed.keep_ids if memory_id in stale_ids]
+            keep_ids = list(dict.fromkeys(memory_id for memory_id in parsed.keep_ids if memory_id in stale_ids))
+            if set(delete_ids) & set(keep_ids):
+                raise ValueError("Reflection cannot both keep and delete the same memory")
 
-            # Execute Deletions
-            if delete_ids:
-                self.memory_store.delete_memories(delete_ids)
+            mutation = self.memory_store.apply_consolidation(
+                delete_ids, [memory.model_dump() for memory in parsed.new_memories],
+            )
 
             if ignored_delete_ids:
                 logger.warning(
@@ -138,20 +142,14 @@ class MemoryReflector:
                     len(ignored_delete_ids),
                 )
 
-            # Execute Additions
-            for new_mem in parsed.new_memories:
-                self.memory_store.add(
-                    content=new_mem.content,
-                    category=new_mem.category,
-                    importance=new_mem.importance
-                )
-
             result["delete_ids"] = delete_ids
             result["keep_ids"] = keep_ids
             result["new_memories"] = [memory.model_dump() for memory in parsed.new_memories]
-            result["deleted_count"] = len(delete_ids)
+            result["deleted_count"] = mutation["deleted_count"]
             result["kept_count"] = len(keep_ids)
             result["created_count"] = len(parsed.new_memories)
+            result["index_sync_complete"] = mutation["index_sync_complete"]
+            result["index_sync_errors"] = mutation["index_sync_errors"]
             if ignored_delete_ids:
                 result["ignored_delete_ids"] = ignored_delete_ids
 
