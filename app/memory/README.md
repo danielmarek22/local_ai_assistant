@@ -21,13 +21,13 @@ Memory should be treated as an *active system*, not just a database.
   - uses canonical message and attachment IDs for idempotent vector documents
   - can reconcile missing, stale, and orphaned episodic vector entries from SQLite
   - retrieves recent turns from SQLite
-  - retrieves semantically similar past-session messages and stored image summaries from Chroma
+  - uses Chroma candidate IDs/scores to retrieve canonical past-session messages and image summaries from SQLite
 - `MemoryStore`
   - stores long-term fact-like memory in SQLite
   - stores embeddings in Chroma's `semantic_memory`
   - uses the canonical SQLite UUID as the idempotent vector document ID
   - can reconcile missing, stale, and orphaned semantic vector entries from SQLite
-  - retrieves relevant facts semantically from Chroma
+  - uses Chroma candidate IDs/scores to retrieve current fact text from SQLite
   - exposes a separate SQLite-only, read-only inspection list for the Knowledge UI;
     this path does not query Chroma or update access timestamps
 - `SummaryStore`
@@ -96,6 +96,20 @@ duplicating canonical rows.
 Run `python main.py reconcile-indexes` with the application stopped to reconcile both
 semantic and episodic Chroma collections from SQLite. The command initializes storage
 only and prints a JSON report containing canonical, upserted, and removed counts.
+
+Retrieval treats vector results as ranked candidate IDs, never authoritative text or
+visibility metadata. Semantic candidates must still exist in SQLite, and their current
+content is loaded before strict/fallback selection. Only selected canonical memories
+have their access times updated. Episodic message and attachment IDs must resolve to
+non-excluded history outside the current session and outside deleted sessions. Image
+candidates also require a stored summary and a visible parent message; text and sender
+labels are rebuilt from canonical records. Missing, unknown legacy, duplicate, and
+invalid-score candidates are dropped without returning vector text as a fallback.
+
+This keeps deleted or corrected content from being recalled from a stale index before
+repair. Reconciliation is still needed for missing candidates, stale embeddings and
+ranking quality. Retrieval does not repeatedly expand the search to replace rejected
+candidates, so it can return fewer than the requested number while indexes diverge.
 
 ## Reflection
 

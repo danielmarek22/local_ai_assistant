@@ -4,6 +4,7 @@ import logging
 from app.logging import trace_event
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
+from app.storage.vector_candidates import ranked_candidates
 
 logger = logging.getLogger("memory_store")
 
@@ -188,6 +189,8 @@ class MemoryStore:
         True semantic search using CPU embeddings for the Orchestrator, 
         now with a strict similarity threshold.
         """
+        if limit < 1:
+            return []
         strict_distance = self.max_distance if max_distance is None else float(max_distance)
         fallback_distance = (
             self.fallback_max_distance
@@ -203,15 +206,22 @@ class MemoryStore:
             n_results=limit
         )
         
-        if not results["documents"] or not results["documents"][0]:
+        ranked = ranked_candidates(results, limit)
+        if not ranked:
             logger.debug("Semantic memory search returned no results")
             return []
 
-        retrieved_ids = results["ids"][0]
-        documents = results["documents"][0]
-        distances = results["distances"][0] if "distances" in results and results["distances"] else []
-
-        candidates = list(zip(retrieved_ids, documents, distances))
+        # Hydrate before strict/fallback selection so an orphaned strict match
+        # cannot suppress valid canonical fallback candidates.
+        with self.db.connection() as conn:
+            placeholders = ",".join("?" for _ in ranked)
+            rows = conn.execute(
+                f"SELECT id, content FROM memory WHERE id IN ({placeholders})",
+                [record_id for record_id, _ in ranked],
+            ).fetchall()
+        canonical = {row["id"]: row["content"] for row in rows}
+        candidates = [(record_id, canonical[record_id], distance)
+                      for record_id, distance in ranked if record_id in canonical]
         selected = [
             candidate for candidate in candidates if candidate[2] <= strict_distance
         ]

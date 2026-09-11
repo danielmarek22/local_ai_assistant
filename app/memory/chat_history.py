@@ -11,6 +11,7 @@ from app.perception.attachments import Attachment, ImageAttachment, attachment_f
 from app.storage.database import Database
 from app.storage.session_lifecycle import is_session_deleted, require_writable_session
 from app.storage.vector_store import VectorStore
+from app.storage.vector_candidates import ranked_candidates
 from app.core.conversation import (
     InputSource,
     SenderAttribution,
@@ -731,6 +732,8 @@ class ChatHistoryStore:
         max_distance: float | None = None,
     ) -> list[str]:
         current_session = validate_session_id(current_session)
+        if limit < 1:
+            return []
         effective_max_distance = (
             self.episodic_max_distance
             if max_distance is None
@@ -742,34 +745,15 @@ class ChatHistoryStore:
             where={"session_id": {"$ne": current_session}}
         )
 
-        if not results["documents"] or not results["documents"][0]:
-            trace_event(
-                "chat_history",
-                "episodic_search",
-                session_id=current_session,
-                payload={"query": query, "limit": limit, "documents": []},
-            )
-            return []
-
-        documents = results["documents"][0]
-        distances = results["distances"][0] if "distances" in results and results["distances"] else []
-        
         filtered_docs = []
-
-        # STRICT FILTERING: Drop episodic memories that are too far away
         legacy_fallback = "I'm sorry, I lost my train of thought. Could you repeat that?"
-        for doc, distance in zip(documents, distances):
-            if legacy_fallback in doc:
-                continue
-            if distance <= effective_max_distance:
-                filtered_docs.append(doc)
-            else:
-                logger.debug(
-                    "Discarded episodic memory '%s...' (distance=%.3f > %.3f)",
-                    doc[:30],
-                    distance,
-                    effective_max_distance,
-                )
+        with self.db.connection() as conn:
+            for vector_id, distance in ranked_candidates(results, limit):
+                if distance > effective_max_distance:
+                    continue
+                doc = self._canonical_episodic_document(conn, vector_id, current_session)
+                if doc is not None and legacy_fallback not in doc:
+                    filtered_docs.append(doc)
 
         trace_event(
             "chat_history",
@@ -783,6 +767,41 @@ class ChatHistoryStore:
             },
         )
         return filtered_docs
+
+    def _canonical_episodic_document(self, conn, vector_id: str, current_session: str) -> str | None:
+        source, separator, raw_id = vector_id.partition(":")
+        if (not separator or source not in {"message", "attachment"}
+                or not raw_id.isascii() or not raw_id.isdecimal() or len(raw_id) > 19):
+            return None
+        record_id = int(raw_id)
+        if not 0 < record_id <= 2**63 - 1 or str(record_id) != raw_id:
+            return None
+        attachment = None
+        message_id = record_id
+        if source == "attachment":
+            row = conn.execute(
+                "SELECT * FROM chat_attachments WHERE id = ? AND summary_text IS NOT NULL AND summary_text != ''",
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            attachment = attachment_from_stored_record(dict(row))
+            message_id = row["message_id"]
+        row = conn.execute(
+            """SELECT ch.*, COALESCE(cs.kind, 'direct') AS session_kind
+               FROM chat_history ch LEFT JOIN chat_sessions cs ON cs.session_id = ch.session_id
+               WHERE ch.id = ? AND ch.session_id != ? AND ch.excluded_from_context = 0
+                 AND NOT EXISTS (SELECT 1 FROM deleted_sessions ds WHERE ds.session_id = ch.session_id)""",
+            (message_id, current_session),
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        sender = self.effective_sender(item)
+        kind = SessionKind(item["session_kind"])
+        if attachment is not None:
+            return self._build_attachment_vector_doc(item["role"], item["content"], attachment, sender, kind)
+        return self._build_message_vector_doc(item["role"], item["content"], sender, kind)
 
     def get_recent(self, session_id: str, limit: int = 10):
         session_id = validate_session_id(session_id)

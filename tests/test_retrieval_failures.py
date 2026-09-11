@@ -11,12 +11,34 @@ from app.core.orchestrator import Orchestrator
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.retriever import MemoryRetriever
 from app.memory.summary_store import SummaryStore
+from app.memory.memory_store import MemoryStore, MemoryIndexSyncError
 from app.storage.database import Database
 from app import server
 from app.transport.connection_hub import SessionConnectionHub
 
 
 class RetrievalFailureTests(unittest.TestCase):
+    def test_stale_deleted_vectors_do_not_enter_the_generation_prompt(self):
+        semantic = Mock()
+        memory = MemoryStore(self.db, SimpleNamespace(semantic_collection=semantic))
+        memory_id = memory.add("Deleted semantic fact")
+        semantic.delete.side_effect = RuntimeError("Vector cleanup unavailable")
+        with self.assertRaises(MemoryIndexSyncError):
+            memory.delete_memories([memory_id])
+        self.collection.delete.side_effect = RuntimeError("Vector cleanup unavailable")
+        with self.assertLogs("chat_history", level="ERROR"):
+            self.history.delete_session("past-session")
+        semantic.query.return_value = {"ids": [[memory_id]], "distances": [[0.1]],
+                                       "documents": [["Deleted semantic fact"]]}
+        self.collection.query.return_value = {"ids": [[f"message:{self.past_message_id}"]],
+                                             "distances": [[0.1]], "documents": [["Episodic fact"]]}
+        self.retriever.memory = memory
+        events = list(self.orchestrator.handle_user_input("session", "Question"))
+        prompt = str(self.llm.stream_chat.call_args.args[0])
+        self.assertNotIn("Deleted semantic fact", prompt)
+        self.assertNotIn("Episodic fact", prompt)
+        self.assertTrue(any(isinstance(event, AssistantSpeechEvent) and event.is_final for event in events))
+
     def test_refresh_before_acceptance_does_not_abort_persisted_turn(self):
         self.configure_queries(())
 
@@ -52,6 +74,7 @@ class RetrievalFailureTests(unittest.TestCase):
             self.db, SimpleNamespace(episodic_collection=self.collection),
             uploads_root=uploads.name,
         )
+        self.past_message_id = self.history.add("past-session", "user", "Episodic fact")
         self.memory = Mock()
         self.retriever = MemoryRetriever(self.memory, self.history)
         self.summary = SummaryStore(self.db)
@@ -77,7 +100,8 @@ class RetrievalFailureTests(unittest.TestCase):
                 self.assertEqual(self.history.count_messages("session"), 1)
             if "episodic" in failures:
                 raise RuntimeError("episodic unavailable")
-            return {"documents": [["Episodic fact"]], "distances": [[0.1]]}
+            return {"ids": [[f"message:{self.past_message_id}"]],
+                    "documents": [["Episodic fact"]], "distances": [[0.1]]}
 
         self.memory.get_relevant.side_effect = semantic
         self.collection.query.side_effect = episodic

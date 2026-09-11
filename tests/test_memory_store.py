@@ -70,6 +70,38 @@ class FakeVectorStore:
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_orphan_strict_match_does_not_suppress_canonical_fallback(self):
+        orphan = self.store.add("Orphan")
+        self.store.add("Available fallback")
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM memory WHERE id = ?", (orphan,))
+        self.store.collection.distances = [0.1, 0.75]
+        self.assertEqual(self.store.get_relevant("query"), ["Available fallback"])
+
+    def test_candidate_ids_and_scores_are_required_and_duplicates_are_not_replayed(self):
+        memory_id = self.store.add("Canonical")
+        for result, expected in (
+            ({"documents": [["Unverifiable"]], "distances": [[0.1]]}, []),
+            ({"ids": [[memory_id]], "distances": [[float("nan")]]}, []),
+            ({"ids": [[memory_id]], "distances": [["0.1"]]}, []),
+            ({"ids": [[memory_id, memory_id]], "distances": [[0.1, 0.2]]}, ["Canonical"]),
+        ):
+            with self.subTest(result=result), patch.object(self.store.collection, "query", return_value=result):
+                self.assertEqual(self.store.get_relevant("query"), expected)
+
+    def test_failed_vector_delete_does_not_recall_deleted_canonical_memory(self):
+        memory_id = self.store.add("Deleted fact")
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("Offline")):
+            with self.assertRaises(MemoryIndexSyncError):
+                self.store.delete_memories([memory_id])
+        self.assertEqual(self.store.get_relevant("fact"), [])
+
+    def test_retrieval_uses_current_canonical_text_instead_of_vector_document(self):
+        memory_id = self.store.add("Old fact")
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE memory SET content = 'Corrected fact' WHERE id = ?", (memory_id,))
+        self.assertEqual(self.store.get_relevant("fact"), ["Corrected fact"])
+
     def test_consolidation_rolls_back_deletes_and_all_additions_on_insert_failure(self):
         old = self.store.add("Original")
         with self.db.transaction() as conn:

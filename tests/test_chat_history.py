@@ -44,6 +44,7 @@ class FakeCollection:
             ]
 
         return {
+            "ids": [[record["id"] for record in records[:n_results]]],
             "documents": [[record["document"] for record in records[:n_results]]],
             "distances": [[record["metadata"].get("distance", 0.2) for record in records[:n_results]]],
         }
@@ -95,6 +96,61 @@ class FakeImageLLM:
 
 
 class ChatHistoryStoreTests(unittest.TestCase):
+    def test_deleted_session_is_not_recalled_when_vector_cleanup_fails(self):
+        self.store.add("deleted", "user", "Deleted conversation")
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("Offline")):
+            with self.assertLogs("chat_history", level="ERROR"):
+                result = self.store.delete_session("deleted")
+        self.assertFalse(result.cleanup_complete)
+        self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
+    def test_episodic_reads_canonical_text_exclusion_and_session_instead_of_metadata(self):
+        old = self.store.add("old", "user", "Outdated text")
+        current = self.store.add("current", "user", "Current session text")
+        excluded = self.store.add("excluded", "user", "Excluded text")
+        tombstoned = self.store.add("tombstoned", "user", "Deleted but not cleaned yet")
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE chat_history SET content = 'Corrected text' WHERE id = ?", (old,))
+            conn.execute("UPDATE chat_history SET excluded_from_context = 1 WHERE id = ?", (excluded,))
+            conn.execute("INSERT INTO deleted_sessions (session_id) VALUES ('tombstoned')")
+        # Deliberately lie about the session and document in the index.
+        self.store.collection.upsert(
+            ids=[f"message:{value}" for value in (old, current, excluded, tombstoned)],
+            documents=["Stale vector text"] * 4,
+            metadatas=[{"session_id": "lie"}] * 4,
+        )
+        self.assertEqual(self.store.search_past_conversations("query", "current", limit=10),
+                         ["USER: Corrected text"])
+
+    def test_attachment_candidate_uses_current_summary_and_requires_visible_parent(self):
+        message_id = self.store.add("old", "user", "Look at this", attachments=[ImageAttachment(
+            name="screen.png", mime_type="image/png", base64_data="aGVsbG8=",
+        )])
+        self.store.summarize_pending_attachments(message_id)
+        attachment_id = self.store.get_all("old")[0]["attachments"][0].attachment_id
+        result = {"ids": [[f"attachment:{attachment_id}"]], "distances": [[0.1]],
+                  "documents": [["Stale image summary"]]}
+        with patch.object(self.store.collection, "query", return_value=result):
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE chat_attachments SET summary_text = 'Corrected image summary' WHERE id = ?", (attachment_id,))
+            docs = self.store.search_past_conversations("query", "current")
+            self.assertEqual(len(docs), 1)
+            self.assertIn("Corrected image summary", docs[0])
+            self.assertNotIn("Stale", docs[0])
+            self.assertEqual(self.store.search_past_conversations("query", "old"), [])
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE chat_history SET excluded_from_context = 1 WHERE id = ?", (message_id,))
+            self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
+    def test_unknown_or_missing_episodic_ids_are_not_trusted(self):
+        for result in (
+            {"documents": [["Unverifiable text"]], "distances": [[0.1]]},
+            {"ids": [["legacy-uuid", "message:999999", "attachment:999999", "message:01"]],
+             "documents": [["Unverifiable text"]] * 4, "distances": [[0.1] * 4]},
+        ):
+            with self.subTest(result=result), patch.object(self.store.collection, "query", return_value=result):
+                self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -190,8 +246,10 @@ class ChatHistoryStoreTests(unittest.TestCase):
         )
 
     def test_episodic_retrieval_uses_configured_distance_ceiling(self):
-        self.vector_store.episodic_collection.add(
-            ids=["near", "far"],
+        near = self.store.add("old-a", "user", "Near past conversation")
+        far = self.store.add("old-b", "user", "Far past conversation")
+        self.vector_store.episodic_collection.upsert(
+            ids=[f"message:{near}", f"message:{far}"],
             documents=["Near past conversation", "Far past conversation"],
             metadatas=[
                 {"session_id": "old-a", "distance": 0.69},
@@ -205,7 +263,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
             limit=2,
         )
 
-        self.assertEqual(results, ["Near past conversation"])
+        self.assertEqual(results, ["USER: Near past conversation"])
 
     def test_none_or_timeout_summary_does_not_fail_persisted_attachment(self):
         attachment = ImageAttachment(
