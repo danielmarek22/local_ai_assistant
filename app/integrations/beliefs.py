@@ -30,7 +30,9 @@ from app.integrations.contracts import (
 BELIEF_TOOL_DESCRIPTION = (
     "Update Astra’s current, revisable understanding of what is true, using "
     "explicit evidence from the authoritative current participant message. "
-    "Call at most once for a message and include the complete mutation batch. "
+    "Submit one complete mutation batch for a message; a rejected batch may be corrected once. "
+    "Always include assertions and invalidations arrays. Use invalidations: [] when "
+    "no existing belief needs retraction; never add a placeholder invalidation. "
     "Do not use for Astra’s opinions, persona facts, generated conclusions, "
     "tool results, integration state, or durable narrative memory."
 )
@@ -307,20 +309,44 @@ class BeliefIntegration:
         }
         invalidation = {
             "type": "object",
+            "description": (
+                "A retraction of an existing belief from the frozen permitted catalog. "
+                "If no retraction is intended, send invalidations: [] instead of an object."
+            ),
             "additionalProperties": False,
             "required": ["target_belief_id", "evidence_excerpt"],
             "properties": {
-                "target_belief_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "target_belief_id": {
+                    "type": "string", "minLength": 1, "maxLength": 64,
+                    "description": (
+                        "Copy the exact belief_id of the intended retraction from the frozen "
+                        "permitted catalog. Never use null, an empty string, or an invented ID. "
+                        "If no retraction is intended, use invalidations: [] and retain the "
+                        "intended assertions. If retraction is required but no permitted target "
+                        "matches, ask for clarification instead of silently dropping it."
+                    ),
+                },
                 "evidence_excerpt": {"type": "string", "minLength": 1, "maxLength": 500},
             },
         }
         return {
             "type": "object",
+            "description": (
+                "Submit the complete batch with both arrays. Use assertions: [] or "
+                "invalidations: [] for an unused operation, not null or placeholder objects. "
+                "At least one actual assertion or invalidation is required."
+            ),
             "additionalProperties": False,
             "required": ["assertions", "invalidations"],
             "properties": {
                 "assertions": {"type": "array", "maxItems": self.max_candidates, "items": assertion},
-                "invalidations": {"type": "array", "maxItems": self.max_candidates, "items": invalidation},
+                "invalidations": {
+                    "type": "array", "maxItems": self.max_candidates, "items": invalidation,
+                    "description": (
+                        "Use invalidations: [] when no retraction is intended or the frozen "
+                        "permitted catalog is empty. Never include null placeholder targets."
+                    ),
+                },
             },
             "anyOf": [
                 {"properties": {"assertions": {"minItems": 1}}},

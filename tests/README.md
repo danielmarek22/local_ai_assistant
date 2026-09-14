@@ -5,11 +5,6 @@ Tests currently focus on deterministic core behavior that can be validated witho
 
 ## What Is Covered
 
-- `test_rule_planner.py`
-  - Rule-based planner intent detection and action generation
-  - Memory command extraction
-  - Search intent routing and default response fallback
-
 - `test_late_routing_filter.py`
   - Thinking-stream directive filtering
   - Tool-call and memory-write directive parsing across chunk boundaries
@@ -71,6 +66,10 @@ Tests currently focus on deterministic core behavior that can be validated witho
 - `test_http_retries.py`
   - LLM retry behavior
   - Web search retry behavior
+
+- `test_image_fallback.py`
+  - Image-capability error classification and retry selection
+  - Ordered, non-mutating fallback message generation
   - Thinking-mode handling for Ollama
 
 - `test_sentence_splitter.py`
@@ -81,19 +80,13 @@ Tests currently focus on deterministic core behavior that can be validated witho
 Run all tests from the repository root:
 
 ```bash
-venv_app/bin/python -m unittest discover -s tests -v
+venv_app/bin/python -m unittest discover -s tests -v --buffer
 ```
 
-Run a single test module:
+Run a single test module, for example:
 
 ```bash
-python -m unittest tests.test_rule_planner -v
-```
-
-Run a single test case:
-
-```bash
-python -m unittest tests.test_rule_planner.RulePlannerTests.test_default_falls_back_to_respond_only -v
+python -m unittest tests.test_orchestrator -v
 ```
 
 ## Design Notes
@@ -106,7 +99,7 @@ python -m unittest tests.test_rule_planner.RulePlannerTests.test_default_falls_b
 
 When adding tests, prefer:
 
-1. Fast unit tests for deterministic logic (planner decisions, policies, formatting).
+1. Fast unit tests for deterministic logic (routing, policies, formatting).
 2. Integration-like tests with fakes for orchestrator turn flow.
 3. Regression tests for discovered bugs before implementing fixes.
 

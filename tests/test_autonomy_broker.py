@@ -2,7 +2,7 @@ import asyncio
 import tempfile
 import unittest
 
-from app.autonomy import AutonomyStore, EventTurnOutcome, IntegrationEventBroker
+from app.autonomy import AutonomyRuntime, AutonomyStore, EventTurnOutcome, IntegrationEventBroker
 from app.integrations import EventId, EventSpec, IntegrationEvent, IntegrationRegistry
 
 
@@ -23,6 +23,34 @@ class EventIntegration:
                 "additionalProperties": False,
             },
         )]
+
+
+class AutonomyRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_releases_broker_and_store_when_registry_close_fails(self):
+        close_order = []
+        runtime = AutonomyRuntime.__new__(AutonomyRuntime)
+
+        class FailingRegistry:
+            def close(self):
+                close_order.append("registry")
+                raise RuntimeError("registry failed")
+
+        class Broker:
+            async def close(self):
+                close_order.append("broker")
+
+        class Store:
+            def close(self):
+                close_order.append("store")
+
+        runtime.registry = FailingRegistry()
+        runtime.broker = Broker()
+        runtime.store = Store()
+
+        with self.assertRaisesRegex(RuntimeError, "registry failed"):
+            await runtime.close()
+
+        self.assertEqual(close_order, ["registry", "broker", "store"])
 
 
 class AutonomyBrokerTests(unittest.IsolatedAsyncioTestCase):

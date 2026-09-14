@@ -1,15 +1,15 @@
-from pathlib import Path
-
 from app.tts.base import TTS
+from app.paths import resolve_app_path
 
 
 def _resolve_engine_name(tts_config: dict) -> str:
-    return str(
-        tts_config.get("engine")
-        or tts_config.get("provider")
-        or tts_config.get("backend")
-        or "qwen3"
-    ).lower()
+    engine = str(tts_config.get("engine") or "pocket_tts").lower()
+    return {
+        "pocket-tts": "pocket_tts",
+        "pocket": "pocket_tts",
+        "gpt-sovits": "gpt_sovits",
+        "sovits": "gpt_sovits",
+    }.get(engine, engine)
 
 
 def build_tts_engine(tts_config: dict) -> TTS:
@@ -20,16 +20,16 @@ def build_tts_engine(tts_config: dict) -> TTS:
 
         settings = tts_config.get("piper", tts_config)
         return PiperTTS(
-            model_path=Path(settings["model_path"]),
+            model_path=resolve_app_path(settings["model_path"]),
             use_cuda=settings.get("use_cuda", True),
         )
-    
-    if engine in ("pocket_tts", "pocket-tts", "pocket"):
+
+    if engine == "pocket_tts":
         from app.tts.pocket_tts import PocketTTSWrapper
-        print("\n[DEBUG] Native Pocket TTS Engine loaded.\n")
+
         return PocketTTSWrapper()
 
-    if engine in ("gpt_sovits", "gpt-sovits", "sovits"):
+    if engine == "gpt_sovits":
         from app.tts.gpt_sovits_tts import GPTSoVITSTTS
 
         settings = tts_config.get("gpt_sovits", tts_config)
@@ -42,5 +42,6 @@ def build_tts_engine(tts_config: dict) -> TTS:
         )
 
     raise ValueError(
-        f"Unsupported TTS engine '{engine}'. Supported engines: qwen3, piper, gpt_sovits."
+        f"Unsupported TTS engine '{engine}'. Supported engines: pocket_tts, piper, "
+        "gpt_sovits."
     )

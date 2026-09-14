@@ -15,6 +15,7 @@ from app.beliefs.models import (
     VisibilityPolicy,
 )
 from app.storage.database import initialize_belief_schema
+from app.storage.session_lifecycle import require_writable_session
 
 
 class StaleBeliefObservation(ValueError):
@@ -211,6 +212,7 @@ class BeliefRepository:
                     return False
 
                 for mutation in mutations:
+                    require_writable_session(conn, mutation.source_session_id)
                     if mutation.operation == CandidateOperation.INVALIDATE:
                         cursor = conn.execute(
                             """

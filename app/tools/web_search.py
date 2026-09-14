@@ -154,9 +154,10 @@ class WebSearchTool:
         "required": ["query"]
     }
 
-    def __init__(self, client: SearXNGClient, summarizer):
+    def __init__(self, client: SearXNGClient, summarizer, max_results: int = 5):
         self.client = client
         self.summarizer = summarizer
+        self.max_results = max_results
 
     @property
     def is_available(self) -> bool:
@@ -168,7 +169,7 @@ class WebSearchTool:
         Raises on unexpected failure (orchestrator handles it).
         """
         trace_event("web_search", "tool_run", payload={"query": query})
-        results = self.client.search(query)
+        results = self.client.search(query, limit=self.max_results)
         summary = self.summarizer.summarize(results)
         trace_event("web_search", "tool_summary", payload={"summary": summary})
 

@@ -1,70 +1,70 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from app.core.session_ids import SessionDeletedError
 
 
 class SessionTurnCoordinator:
     """Serializes a session and gives waiting user turns priority over events."""
 
-    def __init__(self, global_concurrency: int = 1):
+    def __init__(self, global_concurrency: int = 1) -> None:
         if int(global_concurrency) < 1:
             raise ValueError("global_concurrency must be at least one")
         self._global_concurrency = int(global_concurrency)
-        self._active_global = 0
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._active_sessions: set[str] = set()
         self._condition = asyncio.Condition()
         self._waiting_users = 0
+        self._closed_sessions: set[str] = set()
 
-    @asynccontextmanager
-    async def user_turn(self, session_id: str):
+    def is_closed(self, session_id: str) -> bool:
+        return session_id in self._closed_sessions
+
+    async def close_session(self, session_id: str) -> None:
+        """Reject new/queued turns, then drain active work without cancelling workers."""
         async with self._condition:
-            self._waiting_users += 1
+            self._closed_sessions.add(session_id)
             self._condition.notify_all()
-        waiting_registered = True
-        try:
-            async with self._session_lock(session_id):
-                async with self._condition:
-                    await self._condition.wait_for(
-                        lambda: self._active_global < self._global_concurrency
-                    )
-                    self._waiting_users -= 1
-                    waiting_registered = False
-                    self._active_global += 1
-                    self._condition.notify_all()
-                try:
-                    yield
-                finally:
-                    async with self._condition:
-                        self._active_global -= 1
-                        self._condition.notify_all()
-        finally:
-            if waiting_registered:
-                async with self._condition:
-                    self._waiting_users -= 1
-                    self._condition.notify_all()
+            await self._condition.wait_for(lambda: session_id not in self._active_sessions)
 
     @asynccontextmanager
-    async def event_turn(self, session_id: str):
-        async with self._condition:
-            await self._condition.wait_for(lambda: self._waiting_users == 0)
-        async with self._session_lock(session_id):
-            async with self._condition:
-                await self._condition.wait_for(
-                    lambda: self._waiting_users == 0
-                    and self._active_global < self._global_concurrency
-                )
-                self._active_global += 1
-            try:
-                yield
-            finally:
-                async with self._condition:
-                    self._active_global -= 1
-                    self._condition.notify_all()
+    async def user_turn(self, session_id: str) -> AsyncIterator[None]:
+        async with self._turn(session_id, is_user=True):
+            yield
 
-    def _session_lock(self, session_id: str) -> asyncio.Lock:
-        lock = self._session_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._session_locks[session_id] = lock
-        return lock
+    @asynccontextmanager
+    async def event_turn(self, session_id: str) -> AsyncIterator[None]:
+        async with self._turn(session_id, is_user=False):
+            yield
+
+    @asynccontextmanager
+    async def _turn(self, session_id: str, *, is_user: bool) -> AsyncIterator[None]:
+        async with self._condition:
+            if is_user:
+                self._waiting_users += 1
+            try:
+                # Admit a turn only when both resources are available. Reserving
+                # a session while waiting for capacity can block a priority user
+                # behind an event that is itself waiting for that user to run.
+                await self._condition.wait_for(
+                    lambda: self.is_closed(session_id) or (
+                        session_id not in self._active_sessions
+                        and len(self._active_sessions) < self._global_concurrency
+                        and (is_user or self._waiting_users == 0)
+                    )
+                )
+                if self.is_closed(session_id):
+                    raise SessionDeletedError()
+            finally:
+                if is_user:
+                    self._waiting_users -= 1
+                    self._condition.notify_all()
+            self._active_sessions.add(session_id)
+
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._active_sessions.remove(session_id)
+                self._condition.notify_all()

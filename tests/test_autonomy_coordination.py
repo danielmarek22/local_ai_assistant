@@ -3,7 +3,8 @@ import json
 import unittest
 
 from app.autonomy import SessionTurnCoordinator
-from app.services.connection_hub import SessionConnectionHub
+from app.core.assistant_state import AssistantState
+from app.transport.connection_hub import SessionConnectionHub
 
 
 class FakeWebSocket:
@@ -14,7 +15,110 @@ class FakeWebSocket:
         self.sent.append(json.loads(value))
 
 
+class FailingWebSocket(FakeWebSocket):
+    async def send_text(self, value):
+        raise RuntimeError("socket disconnected")
+
+
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def start_turn(self, coordinator, kind, session, order, label, release=None):
+        async def run():
+            async with getattr(coordinator, kind)(session):
+                order.append(label)
+                if release is not None:
+                    await release.wait()
+
+        task = asyncio.create_task(run())
+
+        async def cleanup():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.addAsyncCleanup(cleanup)
+        # Let the task enter its context or reach the admission wait.
+        await asyncio.sleep(0)
+        return task
+
+    async def test_user_overtakes_event_waiting_for_capacity_in_same_session(self):
+        coordinator = SessionTurnCoordinator()
+        order = []
+        async with coordinator.user_turn("a"):
+            event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+            user = await self.start_turn(coordinator, "user_turn", "b", order, "user")
+            self.assertEqual(order, [])
+
+        await asyncio.wait_for(asyncio.gather(event, user), timeout=1)
+        self.assertEqual(order, ["user", "event"])
+
+    async def test_same_session_waiter_does_not_reserve_spare_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator(global_concurrency=2)
+                order = []
+                async with coordinator.user_turn("a"):
+                    same = await self.start_turn(coordinator, kind, "a", order, "same")
+                    other = await self.start_turn(coordinator, "user_turn", "b", order, "other")
+                    await asyncio.wait_for(other, timeout=1)
+                    self.assertEqual(order, ["other"])
+                    self.assertFalse(same.done())
+                await asyncio.wait_for(same, timeout=1)
+                self.assertEqual(order, ["other", "same"])
+
+    async def test_cancelling_waiter_allows_following_event(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                order = []
+                async with coordinator.user_turn("a"):
+                    waiter = await self.start_turn(coordinator, kind, "b", order, "cancelled")
+                    event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+                    waiter.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await waiter
+                    self.assertEqual(order, [])
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["event"])
+
+    async def test_cancelling_active_turn_releases_session_and_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                order = []
+                active = await self.start_turn(
+                    coordinator, kind, "a", order, "active", asyncio.Event(),
+                )
+                event = await self.start_turn(coordinator, "event_turn", "a", order, "event")
+                active.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await active
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["active", "event"])
+
+    async def test_cancelling_user_wakes_event_without_an_active_turn_finishing(self):
+        coordinator = SessionTurnCoordinator(global_concurrency=2)
+        order = []
+        async with coordinator.user_turn("a"):
+            user = await self.start_turn(coordinator, "user_turn", "a", order, "user")
+            event = await self.start_turn(coordinator, "event_turn", "b", order, "event")
+            self.assertEqual(order, [])
+            user.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await user
+            await asyncio.wait_for(event, timeout=1)
+            self.assertEqual(order, ["event"])
+
+    async def test_failed_turn_releases_session_and_capacity(self):
+        for kind in ("user_turn", "event_turn"):
+            with self.subTest(kind=kind):
+                coordinator = SessionTurnCoordinator()
+                with self.assertRaisesRegex(RuntimeError, "turn failed"):
+                    async with getattr(coordinator, kind)("a"):
+                        raise RuntimeError("turn failed")
+                order = []
+                event = await self.start_turn(coordinator, "event_turn", "a", order, "event")
+                await asyncio.wait_for(event, timeout=1)
+                self.assertEqual(order, ["event"])
+
     async def test_user_waiter_runs_before_next_event(self):
         coordinator = SessionTurnCoordinator()
         order = []
@@ -44,23 +148,84 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["event-1", "user", "event-2"])
 
     async def test_global_model_limit_prevents_cross_session_overlap(self):
-        coordinator = SessionTurnCoordinator(global_concurrency=1)
-        active = 0
-        maximum = 0
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                coordinator = SessionTurnCoordinator(global_concurrency=limit)
+                active = 0
+                maximum = 0
 
-        async def run(session):
-            nonlocal active, maximum
-            async with coordinator.user_turn(session):
-                active += 1
-                maximum = max(maximum, active)
-                await asyncio.sleep(0.01)
-                active -= 1
+                async def run(session):
+                    nonlocal active, maximum
+                    async with coordinator.user_turn(session):
+                        active += 1
+                        maximum = max(maximum, active)
+                        await asyncio.sleep(0.01)
+                        active -= 1
 
-        await asyncio.gather(run("a"), run("b"))
-        self.assertEqual(maximum, 1)
+                await asyncio.wait_for(
+                    asyncio.gather(*(run(session) for session in ("a", "b", "c", "d"))),
+                    timeout=1,
+                )
+                self.assertEqual(maximum, limit)
 
 
 class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acceptance_survives_dead_origin_and_precedes_terminal_replay(self):
+        hub = SessionConnectionHub()
+        dead = FailingWebSocket()
+        hub.register("session", "origin", dead)
+        accepted = {"type": "user_message_accepted", "message_id": 7, "is_retry": False}
+        await hub.send_websocket(dead, accepted)
+        await hub.send_websocket(dead, {"type": "assistant_end", "content": "Answer"})
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual(replacement.sent[0], accepted)
+        self.assertEqual(replacement.sent[1]["type"], "assistant_end")
+
+    async def test_acceptance_is_recoverable_even_after_successful_send_and_failed_replay(self):
+        hub = SessionConnectionHub()
+        origin = FakeWebSocket()
+        hub.register("session", "origin", origin)
+        accepted = {"type": "user_message_accepted", "message_id": 8, "is_retry": True}
+        await hub.send_websocket(origin, accepted)
+        failed = FailingWebSocket()
+        hub.register("session", "failed", failed)
+        await hub.replay_pending("failed")
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual(replacement.sent, [accepted])
+        other = FakeWebSocket()
+        hub.register("other", "other", other)
+        await hub.replay_pending("other")
+        self.assertEqual(other.sent, [])
+
+    async def test_reconnected_browser_gets_acceptance_without_acknowledging_other_tabs(self):
+        hub = SessionConnectionHub()
+        origin, replacement, other = FailingWebSocket(), FakeWebSocket(), FakeWebSocket()
+        hub.register("session", "origin", origin, client_id="browser-a")
+        hub.register("session", "replacement", replacement, client_id="browser-a")
+        hub.register("session", "other", other, client_id="browser-b")
+        accepted = {"type": "user_message_accepted", "message_id": 9, "is_retry": False}
+        await hub.send_websocket(origin, accepted)
+        self.assertEqual(replacement.sent, [accepted])
+        await hub.replay_pending("other")
+        self.assertEqual(other.sent, [])
+
+    async def test_latest_acceptance_replaces_previous_and_deletion_clears_it(self):
+        hub = SessionConnectionHub()
+        origin = FakeWebSocket()
+        hub.register("session", "origin", origin)
+        for message_id in (10, 11):
+            await hub.send_websocket(origin, {"type": "user_message_accepted", "message_id": message_id, "is_retry": False})
+        replacement = FakeWebSocket()
+        hub.register("session", "replacement", replacement)
+        await hub.replay_pending("replacement")
+        self.assertEqual([frame["message_id"] for frame in replacement.sent], [11])
+        await hub.close_session("session")
+        self.assertNotIn("session", hub._accepted_messages)
+
     async def test_turn_metadata_is_added_to_assistant_payloads(self):
         hub = SessionConnectionHub()
         ws = FakeWebSocket()
@@ -71,6 +236,123 @@ class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ws.sent[0]["turn_id"], "turn-1")
         self.assertEqual(ws.sent[0]["origin"], "user")
+
+    async def test_assistant_state_is_shared_across_session_connections(self):
+        hub = SessionConnectionHub()
+        first = FakeWebSocket()
+        refreshed = FakeWebSocket()
+        hub.register("session-1", "connection-1", first)
+        hub.register("session-1", "connection-2", refreshed)
+        hub.set_turn("connection-1", "turn-1", "user")
+
+        await hub.send_websocket(first, {
+            "type": "assistant_state",
+            "state": AssistantState.THINKING,
+        })
+
+        self.assertEqual(first.sent[0]["state"], "thinking")
+        self.assertEqual(refreshed.sent[0]["state"], "thinking")
+        self.assertEqual(refreshed.sent[0]["turn_id"], "turn-1")
+        self.assertEqual(
+            hub.current_assistant_state("session-1").state,
+            AssistantState.THINKING,
+        )
+
+    async def test_assistant_response_continues_on_refreshed_connection(self):
+        hub = SessionConnectionHub()
+        disconnected = FailingWebSocket()
+        refreshed = FakeWebSocket()
+        hub.register("session-1", "connection-1", disconnected)
+        hub.register("session-1", "connection-2", refreshed)
+        hub.set_turn("connection-1", "turn-1", "user")
+
+        await hub.send_websocket(disconnected, {
+            "type": "assistant_chunk",
+            "content": "Still here",
+        })
+        await hub.send_websocket(disconnected, {
+            "type": "assistant_end",
+            "content": "Still here after refresh.",
+        })
+
+        self.assertEqual(
+            [payload["type"] for payload in refreshed.sent],
+            ["assistant_chunk", "assistant_end"],
+        )
+        self.assertEqual(refreshed.sent[-1]["content"], "Still here after refresh.")
+        self.assertEqual(refreshed.sent[-1]["turn_id"], "turn-1")
+
+    async def test_completed_response_is_replayed_after_connection_gap(self):
+        hub = SessionConnectionHub()
+        disconnected = FailingWebSocket()
+        hub.register("session-1", "connection-1", disconnected)
+        hub.set_turn("connection-1", "turn-1", "user")
+
+        await hub.send_websocket(disconnected, {
+            "type": "assistant_chunk",
+            "content": "partial",
+        })
+        await hub.send_websocket(disconnected, {
+            "type": "assistant_end",
+            "content": "The complete response.",
+        })
+        hub.unregister("connection-1")
+
+        refreshed = FakeWebSocket()
+        hub.register("session-1", "connection-2", refreshed)
+        await hub.replay_pending("connection-2")
+
+        self.assertEqual(refreshed.sent, [{
+            "type": "assistant_end",
+            "content": "The complete response.",
+            "turn_id": "turn-1",
+            "origin": "user",
+        }])
+        self.assertEqual(hub._pending_assistant_frames, {})
+
+    async def test_finishing_interrupted_turn_resets_shared_state(self):
+        hub = SessionConnectionHub()
+        first = FakeWebSocket()
+        refreshed = FakeWebSocket()
+        hub.register("session-1", "connection-1", first)
+        hub.register("session-1", "connection-2", refreshed)
+        hub.set_turn("connection-1", "turn-1", "user")
+        await hub.send_websocket(first, {
+            "type": "assistant_state",
+            "state": AssistantState.THINKING,
+        })
+
+        await hub.finish_turn("connection-1", "turn-1")
+
+        self.assertEqual(
+            hub.current_assistant_state("session-1").state,
+            AssistantState.IDLE,
+        )
+        self.assertEqual(refreshed.sent[-1]["state"], "idle")
+        self.assertEqual(refreshed.sent[-1]["turn_id"], "turn-1")
+
+    async def test_old_turn_cleanup_does_not_clear_a_newer_state(self):
+        hub = SessionConnectionHub()
+        first = FakeWebSocket()
+        second = FakeWebSocket()
+        hub.register("session-1", "connection-1", first)
+        hub.register("session-1", "connection-2", second)
+        hub.set_turn("connection-1", "turn-1", "user")
+        await hub.send_websocket(first, {
+            "type": "assistant_state",
+            "state": AssistantState.THINKING,
+        })
+        hub.set_turn("connection-2", "turn-2", "integration_event")
+        await hub.send_websocket(second, {
+            "type": "assistant_state",
+            "state": AssistantState.SEARCHING,
+        })
+
+        await hub.finish_turn("connection-1", "turn-1")
+
+        current = hub.current_assistant_state("session-1")
+        self.assertEqual(current.state, AssistantState.SEARCHING)
+        self.assertEqual(current.turn_id, "turn-2")
 
     async def test_approval_is_bound_to_selected_connection(self):
         hub = SessionConnectionHub()
@@ -95,6 +377,24 @@ class ConnectionHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await hub.request_approval(
             "missing", {"tool": "shell__execute"}, timeout_seconds=0.01,
         ))
+
+    async def test_non_boolean_approval_decisions_fail_closed(self):
+        for value in ("false", "true", 0, 1, None, [], {}):
+            with self.subTest(value=value):
+                hub = SessionConnectionHub()
+                ws = FakeWebSocket()
+                hub.register("session-1", "connection-1", ws)
+                task = asyncio.create_task(hub.request_approval(
+                    "session-1", {"tool": "shell__execute"}, timeout_seconds=1,
+                ))
+                await asyncio.sleep(0)
+                approval_id = ws.sent[0]["approval_id"]
+
+                self.assertTrue(hub.resolve_approval("connection-1", {
+                    "approval_id": approval_id,
+                    "approved": value,
+                }))
+                self.assertFalse(await task)
 
 
 if __name__ == "__main__":

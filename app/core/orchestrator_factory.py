@@ -1,4 +1,5 @@
 import logging
+from contextlib import ExitStack
 
 from app.config import Config
 from app.llm.ollama_stream import OllamaClient
@@ -8,11 +9,11 @@ from app.storage.vector_store import VectorStore
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.memory_store import MemoryStore
 from app.memory.summary_store import SummaryStore
-from app.services.context_builder import ContextBuilder
-from app.services.image_summarizer import ImageSummarizer
-from app.services.summarizer import HistorySummarizer
+from app.core.context_builder import ContextBuilder
+from app.perception.image_summarizer import ImageSummarizer
+from app.memory.history_summarizer import HistorySummarizer
 from app.tools.web_search import SearXNGClient
-from app.services.search_summarizer import SearchResultSummarizer
+from app.tools.search_summarizer import SearchResultSummarizer
 from app.tools.web_search import WebSearchTool
 from app.tools.bash_execution import BashExecutionTool
 from app.integrations import (
@@ -30,14 +31,15 @@ from app.integrations import (
 )
 from app.autonomy import AutonomyRuntime, AutonomyStore
 from app.memory.memory_policy import SimpleMemoryPolicy
-from app.services.memory_action_handler import MemoryActionHandler
-from app.services.memory_retriever import MemoryRetriever
-from app.services.tool_executor import ToolExecutor
-from app.services.turn_finalizer import TurnFinalizer
-from app.services.avatar_controls import (
+from app.memory.action_handler import MemoryActionHandler
+from app.memory.retriever import MemoryRetriever
+from app.core.tool_executor import ToolExecutor
+from app.core.turn_finalizer import TurnFinalizer
+from app.avatar.controls import (
     build_prompt_with_avatar_controls,
     discover_gesture_catalog,
     discover_outfit_catalog,
+    normalize_expressions,
 )
 from app.beliefs import (
     BeliefCandidateExtractor,
@@ -50,6 +52,7 @@ from app.beliefs import (
     BeliefTurnPreparer,
     REACT_TOOL_BELIEF_VERSION,
 )
+from app.paths import DATA_DIR, STATIC_DIR, resolve_app_path
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -149,14 +152,24 @@ def _build_belief_components(
     return repository, context_provider, observers, belief_integration, preparer
 
 
-def build_orchestrator() -> Orchestrator:
+def build_orchestrator(config: Config | None = None) -> Orchestrator:
+    with ExitStack() as startup_resources:
+        orchestrator = _build_orchestrator(config, startup_resources)
+        startup_resources.pop_all()
+        return orchestrator
+
+
+def _build_orchestrator(
+    config: Config | None,
+    startup_resources: ExitStack,
+) -> Orchestrator:
     logger.info("Building orchestrator")
 
     # --------------------------------------------------
     # Configuration
     # --------------------------------------------------
     logger.info("Loading configuration")
-    config = Config()
+    config = config or Config()
 
     logger.debug(
         "Config summary: llm_model=%s, integrations=%s",
@@ -190,6 +203,7 @@ def build_orchestrator() -> Orchestrator:
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
     )
+    startup_resources.callback(llm.close)
 
     logger.debug(
         "LLM options: temperature=%.2f top_p=%.2f top_k=%s max_tokens=%d rep_pen=%s",
@@ -208,23 +222,36 @@ def build_orchestrator() -> Orchestrator:
     logger.info("Initializing database and stores")
 
     db = Database(
+        path=str(DATA_DIR / "assistant.db"),
         legacy_local_human_id=config.local_human["id"],
         legacy_local_human_name=config.local_human["display_name"],
     )
+    startup_resources.callback(db.close)
     autonomy_store = AutonomyStore(db.path)
-    vector_store = VectorStore()
+    startup_resources.callback(autonomy_store.close)
+    vector_store = VectorStore(path=str(DATA_DIR / "vectordb"))
+    startup_resources.callback(vector_store.close)
 
     agent_id = str(config.assistant.get("id", "default-agent")).strip() or "default-agent"
     assistant_name = str(config.assistant.get("display_name", "Astra")).strip() or "Astra"
     history_store = ChatHistoryStore(
         db,
         vector_store,
+        image_summary_timeout_s=config.context["image_summary_timeout_s"],
         local_human_id=config.local_human["id"],
         local_human_name=config.local_human["display_name"],
         local_assistant_id=agent_id,
         local_assistant_name=assistant_name,
+        episodic_max_distance=config.context["episodic_memory_max_distance"],
+        uploads_root=str(STATIC_DIR / "uploads"),
     )
-    memory_store = MemoryStore(db, vector_store)
+    memory_store = MemoryStore(
+        db,
+        vector_store,
+        max_distance=config.context["semantic_memory_max_distance"],
+        fallback_max_distance=config.context["semantic_memory_fallback_max_distance"],
+        fallback_limit=config.context["semantic_memory_fallback_limit"],
+    )
     summary_store = SummaryStore(db)
 
     logger.debug("Storage initialized: database, vector_store, history, memory, summary")
@@ -326,6 +353,7 @@ def build_orchestrator() -> Orchestrator:
         web_tool = WebSearchTool(
             client=web_client,
             summarizer=search_summarizer,
+            max_results=web_cfg["max_results"],
         )
 
         integrations.append(WebIntegration(web_tool))
@@ -337,7 +365,7 @@ def build_orchestrator() -> Orchestrator:
     shell_cfg = config.integrations.get("shell", {})
     if shell_cfg.get("enabled", True):
         integrations.append(ShellIntegration(
-            BashExecutionTool(timeout=int(shell_cfg.get("timeout", 15)))
+            BashExecutionTool(timeout=shell_cfg.get("timeout", 15))
         ))
         logger.info("Shell integration registered")
 
@@ -349,29 +377,30 @@ def build_orchestrator() -> Orchestrator:
     mindcraft_cfg = config.integrations.get("mindcraft", {})
     if mindcraft_cfg.get("enabled", False):
         mindcraft_client = MindcraftClient(
-            url=str(mindcraft_cfg.get("url", "http://localhost:8081")),
+            url=mindcraft_cfg.get("url", "http://localhost:8081"),
             agent_name=mindcraft_cfg.get("agent_name"),
-            connect_timeout=float(mindcraft_cfg.get("connect_timeout", 3.0)),
-            reconnect_delay_s=float(mindcraft_cfg.get("reconnect_delay_s", 2.0)),
-            reconnect_max_delay_s=float(mindcraft_cfg.get("reconnect_max_delay_s", 30.0)),
-            recent_output_limit=int(mindcraft_cfg.get("recent_output_limit", 3)),
+            connect_timeout=mindcraft_cfg.get("connect_timeout", 3.0),
+            reconnect_delay_s=mindcraft_cfg.get("reconnect_delay_s", 2.0),
+            reconnect_max_delay_s=mindcraft_cfg.get("reconnect_max_delay_s", 30.0),
+            recent_output_limit=mindcraft_cfg.get("recent_output_limit", 3),
         )
         integrations.append(MindcraftIntegration(
             mindcraft_client,
-            context_enabled=bool(mindcraft_cfg.get("context_enabled", True)),
-            events_enabled=bool(mindcraft_cfg.get("events_enabled", True)),
-            ambient_session_id=str(mindcraft_cfg.get("ambient_session_id", "")).strip() or None,
-            autonomous_events=tuple(mindcraft_cfg.get("autonomous_events", [
-                "critical_health", "died", "disconnected",
-            ])),
+            context_enabled=mindcraft_cfg.get("context_enabled", True),
+            events_enabled=mindcraft_cfg.get("events_enabled", True),
+            ambient_session_id=mindcraft_cfg.get("ambient_session_id"),
+            autonomous_events=tuple(mindcraft_cfg["autonomous_events"]),
             attachment_dir=str(
-                mindcraft_cfg.get("attachment_dir", "static/uploads/events/mindcraft")
+                resolve_app_path(
+                    mindcraft_cfg["attachment_dir"]
+                )
             ),
             operation_store=autonomy_store,
         ))
         logger.info("Mindcraft integration registered (url=%s)", mindcraft_client.url)
 
     integration_registry = IntegrationRegistry(integrations)
+    startup_resources.callback(integration_registry.close)
     tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
 
     # --------------------------------------------------
@@ -379,7 +408,7 @@ def build_orchestrator() -> Orchestrator:
     # --------------------------------------------------
     logger.info("Setting up context builder")
     gesture_catalog = discover_gesture_catalog()
-    allowed_expressions = avatar_controls_cfg.get("expressions")
+    allowed_expressions = normalize_expressions(avatar_controls_cfg.get("expressions"))
 
     # Executable capabilities are supplied only through native schemas in agent mode.
     base_system_prompt = config.assistant["system_prompt"]
@@ -415,6 +444,7 @@ def build_orchestrator() -> Orchestrator:
         memory_retriever=memory_retriever,
         turn_finalizer=turn_finalizer,
         gesture_catalog=gesture_catalog,
+        allowed_expressions=set(allowed_expressions),
         late_routing_enabled=native_late_routing_enabled,
         integration_context_limit=config.context["integration_context_limit"],
         agent_id=agent_id,
@@ -433,6 +463,8 @@ def build_orchestrator() -> Orchestrator:
         recovery_num_predict=int(
             config.orchestrator.get("recovery_num_predict", 192)
         ),
+        database=db,
+        vector_store=vector_store,
         belief_turn_preparer=(
             belief_turn_preparer
             if config.beliefs["processing_mode"] == "react_tool"

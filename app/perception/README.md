@@ -7,12 +7,16 @@ Input interpretation and preprocessing.
 - Parsing and normalizing user input
 - Multimodal input handling for text plus attachments
 - Defining shared attachment models and constructors
-- Preparing structured representations for planners
+- Preparing structured representations for orchestration and model context
 
 ## Current Notes
 
 - `attachments.py` contains the shared `Attachment` base type plus the current `ImageAttachment` implementation.
 - The current transport and prompt pipeline supports images, but the attachment model now has a cleaner seam for future types such as PDFs.
 - `state.py` is focused on `PerceptionState` and perception entries rather than attachment parsing details.
+- `frame_controller.py` translates validated frame values into perception updates and
+  autonomous vision events without depending on WebSocket models.
+- `vision_watchdog.py` owns local visual-event inference, while `image_summarizer.py`
+  creates retrieval-oriented descriptions of stored images.
 
 This layer translates *raw input* into *actionable signals*.

@@ -1,0 +1,6 @@
+# Selectable local speech backends.
+faster-whisper==1.2.1
+piper-tts==1.4.2
+pocket-tts==2.0.0
+# SciPy 1.15 is the last feature line supporting the documented Python 3.10 floor.
+scipy==1.15.3

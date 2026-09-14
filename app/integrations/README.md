@@ -37,6 +37,9 @@ capabilities bypass Mindcraft's planning model for supported commands, while
 `mindcraft__send_message` delegates complex objectives to that model. Long-running
 direct commands return pending operations and publish correlated success/failure events.
 General bot output remains passive context and is not treated as command completion.
+The declarative names, descriptions, and JSON schemas live in
+`mindcraft_capabilities.py`; `mindcraft.py` binds those contracts to the client-backed
+handlers and availability checks.
 
 The enhanced Mindcraft fork is feature-detected through a versioned handshake. It uses
 typed action requests, terminal operation recovery, exact Mineflayer events, semantic

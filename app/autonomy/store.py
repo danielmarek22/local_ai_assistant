@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.integrations import EventId, EventSpec, IntegrationEvent, ReplayPolicy
+from app.paths import DATA_DIR, resolve_app_path
+from app.storage.session_lifecycle import initialize_session_lifecycle, is_session_deleted, require_writable_session
 
 
 @dataclass(frozen=True)
@@ -35,25 +37,52 @@ class OperationRecord:
 class AutonomyStore:
     """Thread-safe durable journal for integration events and tool operations."""
 
-    def __init__(self, path: str = "data/assistant.db"):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
+    def __init__(self, path: str = str(DATA_DIR / "assistant.db")):
+        self.path = path if path == ":memory:" else str(resolve_app_path(path))
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._init_schema()
+        except Exception:
+            self._conn.close()
+            raise
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def is_session_deleted(self, session_id: str) -> bool:
+        with self._lock:
+            return is_session_deleted(self._conn, session_id)
+
+    def delete_session(self, session_id: str) -> None:
+        """Fence late events and retire queued work; retain the diagnostic journal."""
+        now = self._iso(datetime.now(timezone.utc))
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO deleted_sessions (session_id) VALUES (?)", (session_id,),
+            )
+            self._conn.execute(
+                "UPDATE integration_events SET status = 'discarded', error = 'Session deleted', "
+                "completed_at = ?, updated_at = ? WHERE session_id = ? "
+                "AND status IN ('pending', 'processing')", (now, now, session_id),
+            )
+            self._conn.execute(
+                "UPDATE integration_operations SET status = 'cancelled', updated_at = ? "
+                "WHERE session_id = ? AND status IN ('running', 'pending')", (now, session_id),
+            )
 
     def append_event(self, event: IntegrationEvent, spec: EventSpec) -> str:
         now = datetime.now(timezone.utc)
         occurred_at = self._iso(event.occurred_at)
         root_event_id = event.root_event_id or event.event_id
         with self._lock:
+            require_writable_session(self._conn, event.session_id)
             if event.deduplication_key and spec.coalesce_window_s > 0:
                 cutoff = self._iso(now - timedelta(seconds=spec.coalesce_window_s))
                 row = self._conn.execute(
@@ -126,6 +155,7 @@ class AutonomyStore:
                 """
                 SELECT event_id FROM integration_events
                 WHERE status = 'pending' AND session_id IS NOT NULL
+                  AND session_id NOT IN (SELECT session_id FROM deleted_sessions)
                 ORDER BY priority ASC, occurred_at ASC, event_id ASC
                 """
             ).fetchall()
@@ -140,6 +170,7 @@ class AutonomyStore:
                 SET status = 'processing', attempts = attempts + 1,
                     processing_started_at = ?, updated_at = ?
                 WHERE event_id = ? AND status = 'pending'
+                  AND session_id NOT IN (SELECT session_id FROM deleted_sessions)
                 """,
                 (now, now, event_id),
             )
@@ -228,6 +259,7 @@ class AutonomyStore:
     ) -> None:
         now = self._iso(datetime.now(timezone.utc))
         with self._lock:
+            require_writable_session(self._conn, session_id)
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO integration_operations (
@@ -256,7 +288,7 @@ class AutonomyStore:
                 self._conn.execute(
                     """
                     UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
-                    WHERE invocation_id = ?
+                    WHERE invocation_id = ? AND status != 'cancelled'
                     """,
                     (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
                 )
@@ -331,7 +363,7 @@ class AutonomyStore:
                 """
                 UPDATE integration_events SET status = ?, outcome_summary = ?,
                     notification_json = ?, error = ?, completed_at = ?, updated_at = ?
-                WHERE event_id = ?
+                WHERE event_id = ? AND status != 'discarded'
                 """,
                 (
                     status, summary,
@@ -343,6 +375,7 @@ class AutonomyStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            initialize_session_lifecycle(self._conn)
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS integration_events (
@@ -395,6 +428,16 @@ class AutonomyStore:
                 );
                 """
             )
+            self._conn.commit()
+            # Enforce the fence even when another SQLite connection deletes the
+            # session between an adapter's preflight check and its write.
+            for table in ("integration_events", "integration_operations"):
+                self._conn.execute(f"""
+                    CREATE TRIGGER IF NOT EXISTS {table}_reject_deleted_session
+                    BEFORE INSERT ON {table}
+                    WHEN EXISTS (SELECT 1 FROM deleted_sessions WHERE session_id = NEW.session_id)
+                    BEGIN SELECT RAISE(ABORT, 'Session deleted'); END
+                """)
             self._conn.commit()
 
     def _event_record(self, row: sqlite3.Row) -> EventRecord:

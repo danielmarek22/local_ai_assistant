@@ -56,6 +56,25 @@ class FakeIntegration:
 
 
 class IntegrationRegistryTests(unittest.TestCase):
+    def test_validation_feedback_uses_bounded_schema_hint_without_running_handler(self):
+        integration = FakeIntegration()
+        registered = integration.registered_tools()
+        hint = "Use a short label. " + "x" * 700
+        registered[0].spec.input_schema["properties"]["value"].update(
+            maxLength=2, description=hint,
+        )
+        integration.registered_tools = lambda: registered
+        registry = IntegrationRegistry([integration])
+        result = registry.invoke(
+            ToolCall(CapabilityId("demo", "run"), {"value": "private input not to echo"}),
+            InvocationContext("session", ""),
+        )
+        self.assertEqual(result.status.value, "error")
+        self.assertIn("must contain at most 2 characters", result.content)
+        self.assertTrue(result.content.endswith(hint[:500]))
+        self.assertNotIn("private input not to echo", result.content)
+        self.assertEqual(integration.calls, [])
+
     def test_event_ids_and_payloads_are_strictly_validated(self):
         integration = FakeIntegration()
         integration.registered_events = lambda: [EventSpec(

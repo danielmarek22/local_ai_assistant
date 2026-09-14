@@ -45,11 +45,6 @@ assistant:
       - surprised
       - neutral
 
-planner:
-  mode: llm   # options: rule | llm | hybrid
-  llm_enabled: true
-  timeout_ms: 4000
-  
 orchestrator:
   summary_trigger: 10
   # Slow local models may spend a significant part of this budget evaluating context.
@@ -61,7 +56,13 @@ orchestrator:
 context:
   history_limit: 6
   injected_memory_limit: 5
+  semantic_memory_max_distance: 0.70
+  # Used only when the normal cutoff returns no semantic memories.
+  semantic_memory_fallback_max_distance: 0.85
+  semantic_memory_fallback_limit: 2
+  episodic_memory_max_distance: 0.70
   integration_context_limit: 4000
+  image_summary_timeout_s: 15
 
 beliefs:
   enabled: true

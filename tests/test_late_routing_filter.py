@@ -1,6 +1,6 @@
 import unittest
 
-from app.core.thinking_filter import ThinkingDirectiveFilter
+from app.llm.thinking_filter import ThinkingDirectiveFilter
 
 
 class ThinkingDirectiveFilterTests(unittest.TestCase):

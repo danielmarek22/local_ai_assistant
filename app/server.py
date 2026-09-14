@@ -1,10 +1,9 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, HTTPException, Path as ApiPath, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, Request, WebSocket, WebSocketDisconnect
 import asyncio
-from typing import Annotated, Iterator, Any
-import hashlib
-import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated, Callable, Iterator, Any
 import logging
 import re
 import subprocess
@@ -12,8 +11,10 @@ import uuid
 import time
 import emoji
 from pathlib import Path
-from dataclasses import dataclass
-from contextlib import suppress
+from app.tts.delivery import AudioDelivery
+from app.tts.stream import SpeechStream
+from contextlib import asynccontextmanager, suppress
+from functools import partial
 from pydantic import BaseModel, Field
 from app.config import Config
 
@@ -21,6 +22,19 @@ from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
 from app.core.turn_input import InputModality
 from app.core.conversation import SessionKind, relay_sender
+from app.core.session_ids import SESSION_ID_MAX_LENGTH, SESSION_ID_PATTERN, validate_session_id
+from app.core.session_ids import SessionDeletedError
+from app.autonomy.coordinator import SessionTurnCoordinator
+from app.transport.websocket_protocol import (
+    RelayMessageFrame,
+    RetryMessageFrame,
+    ToolApprovalResponseFrame,
+    UserConfigFrame,
+    UserMessageFrame,
+    VisionFrame,
+    decode_client_frame,
+    validate_client_frame,
+)
 from app.core.events import (
     AssistantSpeechEvent,
     UserMessageAcceptedEvent,
@@ -32,15 +46,29 @@ from app.core.events import (
     AvatarOutfitEvent,
 )
 from app.logging import setup_logging_from_config
-from app.perception.attachments import Attachment, AudioAttachment, ImageAttachment, attachment_from_payload
-from app.integrations import EventAttachmentRef, EventId, IntegrationEvent
+from app.perception.attachments import (
+    MAX_IMAGE_ATTACHMENT_BYTES,
+    Attachment,
+    AudioAttachment,
+    attachment_from_payload,
+)
 from app.perception.keys import PerceptionKey
 from app.tts.factory import build_tts_engine
 from app.stt.factory import build_stt_engine
-from app.services.sentence_splitter import split_sentences
-from app.services.memory_reflector import MemoryReflector
-from app.services.vision_watchdog import VisionWatchdog
-from app.services.connection_hub import SessionConnectionHub
+from app.tts.sentence_splitter import split_sentences
+from app.memory.reflector import MemoryReflector
+from app.perception.frame_controller import PerceptionFrameController
+from app.perception.vision_watchdog import VisionWatchdog
+from app.transport.connection_hub import SessionConnectionHub
+from app.transport.websocket_connection import (
+    TOOL_APPROVAL_TIMEOUT_SECONDS,
+    WebSocketMessageInbox,
+    WebSocketMessageTooLarge,
+    flush_pending_chunks as _flush_pending_chunks,
+    request_tool_approval as _request_tool_approval,
+    send_turn_error as _send_turn_error,
+    send_ws_payload as _send_ws_payload,
+)
 from app.knowledge import (
     BeliefDetailDTO,
     BeliefListResponse,
@@ -52,32 +80,20 @@ from app.knowledge import (
 )
 from app.knowledge.models import BeliefFiltersDTO
 from app.beliefs.models import EpistemicStatus, VisibilityPolicy
-from app.core.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
+from app.llm.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
+from app.paths import STATIC_DIR, resolve_app_path
 
-config = Config()
-setup_logging_from_config(config.logging)
 logger = logging.getLogger("server")
+router = APIRouter()
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Ensure audio directory exists
-AUDIO_DIR = Path("static/audio")
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-logger.debug("Audio directory ready at %s", AUDIO_DIR.resolve())
-
-tts = None
-
-logger.info("Starting FastAPI server")
+AUDIO_DIR = STATIC_DIR / "audio"
+_GENERATED_AUDIO_NAME_RE = re.compile(r"^[0-9a-f]{32}\.wav$")
 
 _SENTINEL = object()
-_TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
-TOOL_APPROVAL_TIMEOUT_SECONDS = 300.0
-BACKGROUND_VISION_FRAME_TYPES = {"screen_frame", "webcam_frame"}
-VOICE_ATTACHMENT_FRAME_TYPE = "user_attached_frame"
-VISION_FRAME_TYPES = BACKGROUND_VISION_FRAME_TYPES | {VOICE_ATTACHMENT_FRAME_TYPE}
+MAX_ATTACHMENTS_PER_TURN = 8
+MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
 VOICE_INPUT_STT = "stt"
 VOICE_INPUT_NATIVE_AUDIO = "native_audio"
 _PYAV_INVALID_DATA_ERRNO = "1094995529"
@@ -99,9 +115,39 @@ _MARKDOWN_STRIKE_RE = re.compile(r"~~(.+?)~~")
 _MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+SessionIdPath = Annotated[
+    str,
+    ApiPath(
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        pattern=SESSION_ID_PATTERN,
+    ),
+]
+SessionIdQuery = Annotated[
+    str,
+    Query(
+        min_length=1,
+        max_length=SESSION_ID_MAX_LENGTH,
+        pattern=SESSION_ID_PATTERN,
+    ),
+]
 
-def _voice_input_path() -> str:
-    path = str(config.voice_input.get("path", VOICE_INPUT_STT)).strip().lower()
+
+def _runtime_app(request_or_ws: Request | WebSocket | None = None) -> FastAPI:
+    scoped_app = getattr(request_or_ws, "app", None)
+    return scoped_app if scoped_app is not None else app
+
+
+def _runtime_config(application: FastAPI | None = None) -> Config:
+    runtime_app = application or app
+    settings = getattr(runtime_app.state, "settings", None)
+    if settings is None:
+        raise RuntimeError("Application settings are unavailable outside the lifespan")
+    return settings
+
+
+def _voice_input_path(settings: Config) -> str:
+    path = str(settings.voice_input.get("path", VOICE_INPUT_STT)).strip().lower()
     if path in {"native", "audio", "gemma4"}:
         return VOICE_INPUT_NATIVE_AUDIO
     if path in {VOICE_INPUT_STT, VOICE_INPUT_NATIVE_AUDIO}:
@@ -110,8 +156,9 @@ def _voice_input_path() -> str:
     return VOICE_INPUT_STT
 
 
-def _native_audio_config() -> dict:
-    native_audio = config.voice_input.get("native_audio", {})
+def _native_audio_config(settings: Config | None = None) -> dict:
+    settings = settings or _runtime_config()
+    native_audio = settings.voice_input.get("native_audio", {})
     return native_audio if isinstance(native_audio, dict) else {}
 
 
@@ -167,8 +214,11 @@ def _convert_audio_to_wav(
     return result.stdout
 
 
-def _build_native_audio_attachment(audio_bytes: bytes) -> AudioAttachment:
-    native_audio = _native_audio_config()
+def _build_native_audio_attachment(
+    audio_bytes: bytes,
+    settings: Config | None = None,
+) -> AudioAttachment:
+    native_audio = _native_audio_config(settings)
     convert_to_wav = bool(native_audio.get("convert_to_wav", True))
 
     if convert_to_wav:
@@ -238,117 +288,107 @@ def resolve_session_id(
     requested_session_id: str | None,
     known_server_instance_id: str | None,
     server_instance_id: str,
-    requested_session_exists: bool = False,
 ) -> str:
+    if requested_session_id is not None:
+        requested_session_id = validate_session_id(requested_session_id)
+
     if session_mode == "open" and requested_session_id:
         return requested_session_id
 
     if (
         session_mode == "resume"
         and requested_session_id
-        and (
-            known_server_instance_id == server_instance_id
-            or requested_session_exists
-        )
+        and known_server_instance_id == server_instance_id
     ):
         return requested_session_id
 
-    return uuid.uuid4().hex[:8]
+    return _new_runtime_id()
 
 
-def parse_user_message(raw_text: str) -> tuple[str, bool | None, bool, list[Attachment]]:
-    try:
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return raw_text, None, False, []
+def _new_runtime_id() -> str:
+    """Return a collision-resistant identifier for internal runtime resources."""
+    return uuid.uuid4().hex
 
-    if not isinstance(payload, dict):
-        return raw_text, None, False, []
 
-    if payload.get("type") != "user_message":
-        return raw_text, None, False, []
-
-    forbidden_fields = {
-        "role", "sender_id", "sender_display_name", "sender_type", "input_source",
-        "target", "system", "tool", "tool_name", "tool_calls",
-    }
-    supplied_forbidden = sorted(forbidden_fields.intersection(payload))
-    if supplied_forbidden:
+def _validate_attachment_batch(
+    attachments: list[Attachment],
+    *,
+    max_count: int = MAX_ATTACHMENTS_PER_TURN,
+    max_total_bytes: int = MAX_TOTAL_ATTACHMENT_BYTES,
+) -> None:
+    if len(attachments) > max_count:
+        raise ValueError(f"A message may include at most {max_count} attachments")
+    total_bytes = sum(attachment.size_bytes or 0 for attachment in attachments)
+    if total_bytes > max_total_bytes:
         raise ValueError(
-            "User message contains server-controlled fields: " + ", ".join(supplied_forbidden)
+            f"Message attachments exceed the {max_total_bytes}-byte aggregate limit"
         )
 
-    text = payload.get("text")
-    if not isinstance(text, str):
-        raise ValueError("User message payload is missing text")
 
-    attachments_payload = payload.get("attachments")
-    if attachments_payload is None:
-        attachments: list[Attachment] = []
-    elif isinstance(attachments_payload, list):
-        attachments = [attachment_from_payload(item) for item in attachments_payload]
-    else:
-        raise ValueError("User message attachments must be a list")
+def parse_user_message(
+    raw_text: str,
+    *,
+    max_attachment_count: int = MAX_ATTACHMENTS_PER_TURN,
+    max_attachment_bytes: int = MAX_IMAGE_ATTACHMENT_BYTES,
+    max_total_attachment_bytes: int = MAX_TOTAL_ATTACHMENT_BYTES,
+) -> tuple[str, bool | None, bool, list[Attachment]]:
+    frame = decode_client_frame(raw_text)
+    if frame is None:
+        return raw_text, None, False, []
+    if not isinstance(frame, UserMessageFrame):
+        raise ValueError(f"Expected user_message frame, received {frame.type}")
+
+    text = frame.text
+    if len(frame.attachments) > max_attachment_count:
+        raise ValueError(
+            f"A message may include at most {max_attachment_count} attachments"
+        )
+    attachments = [
+        attachment_from_payload(item, max_bytes=max_attachment_bytes)
+        for item in frame.attachments
+    ]
+    _validate_attachment_batch(
+        attachments,
+        max_count=max_attachment_count,
+        max_total_bytes=max_total_attachment_bytes,
+    )
 
     if not text.strip() and not attachments:
         raise ValueError("User message must include text or at least one image attachment")
 
-    reasoning = payload.get("reasoning")
-    if reasoning is None:
-        reasoning_override = None
-    elif isinstance(reasoning, bool):
-        reasoning_override = reasoning
-    else:
-        raise ValueError("User message reasoning flag must be boolean")
-
-    instant_mode = payload.get("instant_mode", False)
-    if not isinstance(instant_mode, bool):
-        raise ValueError("User message instant_mode flag must be boolean")
-
-    return text, reasoning_override, instant_mode, attachments
+    return text, frame.reasoning, frame.instant_mode, attachments
 
 
-def parse_retry_message(payload: dict) -> tuple[int, bool | None, bool]:
-    if payload.get("type") != "retry_message":
-        raise ValueError("Invalid retry message type")
-    allowed_fields = {"type", "message_id", "reasoning", "instant_mode"}
-    unexpected = sorted(set(payload) - allowed_fields)
-    if unexpected:
-        raise ValueError("Retry message contains unsupported fields: " + ", ".join(unexpected))
-    message_id = payload.get("message_id")
-    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
-        raise ValueError("Retry message ID must be a positive integer")
-    reasoning = payload.get("reasoning")
-    if reasoning is not None and not isinstance(reasoning, bool):
-        raise ValueError("Retry reasoning flag must be boolean or null")
-    instant_mode = payload.get("instant_mode", False)
-    if not isinstance(instant_mode, bool):
-        raise ValueError("Retry instant_mode flag must be boolean")
-    return message_id, reasoning, instant_mode
+def parse_retry_message(
+    payload: dict | RetryMessageFrame,
+) -> tuple[int, bool | None, bool]:
+    frame = (
+        payload
+        if isinstance(payload, RetryMessageFrame)
+        else validate_client_frame(payload)
+    )
+    if not isinstance(frame, RetryMessageFrame):
+        raise ValueError(f"Expected retry_message frame, received {frame.type}")
+    return frame.message_id, frame.reasoning, frame.instant_mode
 
 
-def parse_relay_message(payload: dict, session_kind: SessionKind | str):
+def parse_relay_message(
+    payload: dict | RelayMessageFrame,
+    session_kind: SessionKind | str,
+):
     if SessionKind(session_kind) != SessionKind.MANUAL_GROUP:
         raise ValueError("Relay messages are only allowed in manual_group sessions")
-    allowed_fields = {"type", "sender_display_name", "sender_type", "text"}
-    unexpected = sorted(set(payload) - allowed_fields)
-    if unexpected:
-        raise ValueError("Relay message contains unsupported fields: " + ", ".join(unexpected))
-    if payload.get("type") != "relay_message":
-        raise ValueError("Invalid relay message type")
-    text = payload.get("text")
-    if not isinstance(text, str) or not text.strip():
+    frame = (
+        payload
+        if isinstance(payload, RelayMessageFrame)
+        else validate_client_frame(payload)
+    )
+    if not isinstance(frame, RelayMessageFrame):
+        raise ValueError(f"Expected relay_message frame, received {frame.type}")
+    if not frame.text.strip():
         raise ValueError("Relay message text must not be empty")
-    sender = relay_sender(payload.get("sender_type"), payload.get("sender_display_name"))
-    return text, sender
-
-
-@dataclass
-class TTSJob:
-    text: str
-    output_path: Path
-    result_future: asyncio.Future[None]
-    session_id: str
+    sender = relay_sender(frame.sender_type, frame.sender_display_name)
+    return frame.text, sender
 
 
 class ReflectRequest(BaseModel):
@@ -383,160 +423,13 @@ async def run_generator(gen: Iterator[Any]):
         yield item
 
 
-async def tts_worker(queue: asyncio.Queue):
-    """
-    Single TTS worker that serializes synth requests and keeps blocking work
-    off the asyncio event loop.
-    """
-    loop = asyncio.get_running_loop()
-    logger.info("TTS worker started")
-
-    while True:
-        job = await queue.get()
-        try:
-            if job is _TTS_STOP:
-                logger.info("TTS worker stopping")
-                return
-
-            if tts is None:
-                raise RuntimeError("TTS engine has not been initialized")
-
-            tts_start = time.perf_counter()
-            await loop.run_in_executor(
-                None,
-                tts.synthesize,
-                job.text,
-                job.output_path,
-            )
-
-            logger.debug(
-                "[%s] TTS complete (%.2f ms)",
-                job.session_id,
-                (time.perf_counter() - tts_start) * 1000,
-            )
-
-            if not job.result_future.done():
-                job.result_future.set_result(None)
-
-        except Exception as exc:
-            if isinstance(job, TTSJob) and not job.result_future.done():
-                job.result_future.set_exception(exc)
-            logger.exception("TTS worker failed to synthesize audio")
-
-        finally:
-            queue.task_done()
-
-
-async def synthesize_async(text: str, output_path: Path, session_id: str):
-    queue: asyncio.Queue = app.state.tts_queue
-    loop = asyncio.get_running_loop()
-    result_future: asyncio.Future[None] = loop.create_future()
-
-    await queue.put(
-        TTSJob(
-            text=text,
-            output_path=output_path,
-            result_future=result_future,
-            session_id=session_id,
-        )
-    )
-    await result_future
-
-
-async def _send_ws_payload(ws: WebSocket, payload: dict) -> None:
-    hub = getattr(app.state, "connection_hub", None)
-    if hub is not None:
-        await hub.send_websocket(ws, payload)
-    else:
-        await ws.send_text(json.dumps(payload))
-
-
-async def _flush_pending_chunks(ws: WebSocket, pending_chunks: list[str]) -> None:
-    for chunk in pending_chunks:
-        await _send_ws_payload(ws, {
-            "type": "assistant_chunk",
-            "content": chunk,
-        })
-    pending_chunks.clear()
-
-
-async def _send_turn_error(ws: WebSocket, message: str) -> None:
-    with suppress(Exception):
-        await _send_ws_payload(ws, {
-            "type": "assistant_state",
-            "state": AssistantState.IDLE,
-        })
-
-    with suppress(Exception):
-        await _send_ws_payload(ws, {
-            "type": "assistant_end",
-            "content": message,
-        })
-
-
-async def _request_tool_approval(
-    ws: WebSocket,
-    request: dict,
-    connection_id: str,
-    timeout_seconds: float = TOOL_APPROVAL_TIMEOUT_SECONDS,
-) -> bool:
-    approval_id = uuid.uuid4().hex
-    tool_name = str(request.get("tool", "unknown"))
-    title = str(request.get("title", "Approve action?"))
-    reason = str(request.get("reason", "This action requires human approval."))
-    detail_label = str(request.get("detail_label", "Details"))
-    detail = str(request.get("detail", ""))
-
-    logger.info("[%s] Requesting human approval for %s", connection_id, tool_name)
-    await _send_ws_payload(ws, {
-        "type": "tool_approval_request",
-        "approval_id": approval_id,
-        "tool": tool_name,
-        "title": title,
-        "reason": reason,
-        "detail_label": detail_label,
-        "detail": detail,
-        "timeout_seconds": timeout_seconds,
-    })
-
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            logger.warning("[%s] Tool approval timed out for %s", connection_id, tool_name)
-            return False
-
-        raw_message = await asyncio.wait_for(ws.receive(), timeout=remaining)
-        if raw_message.get("type") == "websocket.disconnect":
-            raise WebSocketDisconnect()
-
-        text_payload = raw_message.get("text")
-        if text_payload is None:
-            continue
-
-        try:
-            payload = json.loads(text_payload)
-        except json.JSONDecodeError:
-            continue
-
-        if not isinstance(payload, dict):
-            continue
-
-        if (
-            payload.get("type") != "tool_approval_response"
-            or payload.get("approval_id") != approval_id
-        ):
-            logger.debug("[%s] Ignoring websocket message while awaiting tool approval", connection_id)
-            continue
-
-        approved = bool(payload.get("approved"))
-        logger.info(
-            "[%s] Human %s capability %s",
-            connection_id,
-            "approved" if approved else "denied",
-            tool_name,
-        )
-        return approved
+async def synthesize_async(
+    text: str,
+    output_path: Path,
+    session_id: str,
+    application: FastAPI | None = None,
+):
+    await (application or app).state.audio_delivery.synthesize(text, output_path, session_id)
 
 
 def _build_session_init_payload(
@@ -548,6 +441,9 @@ def _build_session_init_payload(
     session_kind: SessionKind | str = SessionKind.DIRECT,
     local_human_display_name: str = "You",
     local_assistant_display_name: str = "Astra",
+    assistant_state: AssistantState | str = AssistantState.IDLE,
+    active_turn_id: str | None = None,
+    turn_origin: str | None = None,
 ) -> dict:
     return {
         "type": "session_init",
@@ -559,6 +455,9 @@ def _build_session_init_payload(
         "session_kind": SessionKind(session_kind).value,
         "local_human_display_name": local_human_display_name,
         "local_assistant_display_name": local_assistant_display_name,
+        "assistant_state": AssistantState(assistant_state).value,
+        "active_turn_id": active_turn_id,
+        "turn_origin": turn_origin,
     }
 
 
@@ -656,233 +555,158 @@ def _dedupe_attachments_by_hash(attachments: list[Attachment]) -> list[Attachmen
     return deduped
 
 
-def _persist_event_attachment(event_id: str, attachment: ImageAttachment) -> EventAttachmentRef:
-    event_dir = Path("static/uploads/events") / event_id
-    event_dir.mkdir(parents=True, exist_ok=True)
-    suffix = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-    }.get(attachment.mime_type, ".bin")
-    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(attachment.name).stem) or "attachment"
-    path = event_dir / f"{safe_stem}{suffix}"
-    payload = attachment.as_bytes()
-    path.write_bytes(payload)
-    return EventAttachmentRef(
-        name=attachment.name,
-        mime_type=attachment.mime_type,
-        storage_path=str(path),
-        sha256=attachment.sha256 or hashlib.sha256(payload).hexdigest(),
-        size_bytes=len(payload),
-    )
-
-
 async def _stream_orchestrator_events(
     ws: WebSocket,
     orchestrator,
     event_iterator: Iterator[Any],
     connection_id: str,
     original_attachment_count: int,
-    state_tracker: dict[str, str],
 ) -> None:
-    hub = getattr(app.state, "connection_hub", None)
+    application = _runtime_app(ws)
+    hub = getattr(application.state, "connection_hub", None)
     turn_id = uuid.uuid4().hex
     if hub is not None:
         hub.set_turn(connection_id, turn_id, "user")
+    try:
+        await _forward_orchestrator_events(
+            ws,
+            orchestrator,
+            event_iterator,
+            connection_id,
+            original_attachment_count,
+            application=application,
+        )
+    finally:
+        if hub is not None:
+            await hub.finish_turn(connection_id, turn_id)
+
+
+async def _forward_orchestrator_events(
+    ws: WebSocket,
+    orchestrator,
+    event_iterator: Iterator[Any],
+    connection_id: str,
+    original_attachment_count: int,
+    *,
+    application: FastAPI,
+) -> None:
     text_buffer = ""
     thinking_filter = ThinkingBlockFilter()
-    pending_chunks: list[str] = []
-    text_released = False
-    tts_enabled = True
     image_notice_sent = False
 
-    async for event in run_generator(event_iterator):
-        if not image_notice_sent:
-            notice_payload = _build_attachment_drop_notice_payload(
-                orchestrator=orchestrator,
-                original_attachment_count=original_attachment_count,
-            )
-            if notice_payload is not None:
-                await _send_ws_payload(ws, notice_payload)
-                image_notice_sent = True
+    async def send_speech(text):
+        audio_id = uuid.uuid4().hex
+        await synthesize_async(text, AUDIO_DIR / f"{audio_id}.wav", connection_id, application)
+        await _send_ws_payload(ws, {
+            "type": "assistant_audio", "url": f"/static/audio/{audio_id}.wav",
+        })
 
-        if isinstance(event, UserMessageAcceptedEvent):
-            await _send_ws_payload(ws, {
-                "type": "user_message_accepted",
-                "message_id": event.message_id,
-                "is_retry": event.is_retry,
-            })
-            continue
-
-        if isinstance(event, AssistantTurnFailureEvent):
-            pending_chunks.clear()
-            await _send_ws_payload(ws, {
-                "type": "assistant_retryable_error",
-                "user_message_id": event.user_message_id,
-                "message": event.message,
-                "attempts": event.attempts,
-            })
-            continue
-
-        if isinstance(event, AssistantStateEvent):
-            state_tracker["state"] = event.state
-            if not _should_forward_state(event.state):
-                logger.debug(
-                    "[%s] Holding assistant state at thinking until audio is ready",
-                    connection_id,
+    async with SpeechStream(send_speech) as speech:
+        async for event in run_generator(event_iterator):
+            if not image_notice_sent:
+                notice_payload = _build_attachment_drop_notice_payload(
+                    orchestrator=orchestrator,
+                    original_attachment_count=original_attachment_count,
                 )
+                if notice_payload is not None:
+                    await _send_ws_payload(ws, notice_payload)
+                    image_notice_sent = True
+
+            if isinstance(event, UserMessageAcceptedEvent):
+                await _send_ws_payload(ws, {
+                    "type": "user_message_accepted",
+                    "message_id": event.message_id,
+                    "is_retry": event.is_retry,
+                })
                 continue
 
-            logger.debug("[%s] Assistant state -> %s", connection_id, event.state)
-            await _send_ws_payload(ws, {
-                "type": "assistant_state",
-                "state": event.state,
-            })
-            continue
-
-        if isinstance(event, AvatarExpressionEvent):
-            logger.debug("[%s] Avatar expression -> %s", connection_id, event.expression)
-            await _send_ws_payload(ws, {
-                "type": "assistant_expression",
-                "expression": event.expression,
-            })
-            continue
-
-        if isinstance(event, AvatarAnimationEvent):
-            logger.debug("[%s] Avatar animation -> %s", connection_id, event.animation)
-            await _send_ws_payload(ws, {
-                "type": "assistant_animation",
-                "animation": event.animation,
-            })
-            continue
-
-        if isinstance(event, AvatarOutfitEvent):
-            logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
-            await _send_ws_payload(ws, {
-                "type": "assistant_outfit",
-                "outfit": event.outfit,
-                "url": event.url,
-            })
-            continue
-
-        if isinstance(event, AssistantThinkingEvent):
-            if event.text:
+            if isinstance(event, AssistantTurnFailureEvent):
                 await _send_ws_payload(ws, {
-                    "type": "assistant_thinking_chunk",
-                    "content": event.text,
+                    "type": "assistant_retryable_error",
+                    "user_message_id": event.user_message_id,
+                    "message": event.message,
+                    "attempts": event.attempts,
                 })
-            continue
+                continue
 
-        if isinstance(event, AssistantSpeechEvent):
-            if not event.is_final:
-                tts_chunk = thinking_filter.push(event.text)
-                text_buffer += tts_chunk
-
-                if text_released:
-                    await _send_ws_payload(ws, {
-                        "type": "assistant_chunk",
-                        "content": event.text,
-                    })
-                else:
-                    pending_chunks.append(event.text)
-
-                sentences, text_buffer = split_sentences(text_buffer)
-
-                if not tts_enabled:
+            if isinstance(event, AssistantStateEvent):
+                if not _should_forward_state(event.state):
+                    logger.debug(
+                        "[%s] Holding assistant state at thinking until audio is ready",
+                        connection_id,
+                    )
                     continue
 
-                for sentence in sentences:
-                    tts_text = _prepare_tts_text(sentence)
-                    if not tts_text:
-                        continue
-
-                    audio_id = uuid.uuid4().hex
-                    audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                    logger.debug(
-                        "[%s] TTS synth sentence (%d chars)",
-                        connection_id,
-                        len(tts_text),
-                    )
-
-                    try:
-                        await synthesize_async(
-                            text=tts_text,
-                            output_path=audio_path,
-                            session_id=connection_id,
-                        )
-                    except Exception:
-                        tts_enabled = False
-                        logger.warning(
-                            "[%s] TTS failed mid-turn; falling back to text-only streaming",
-                            connection_id,
-                        )
-                        if not text_released:
-                            await _flush_pending_chunks(ws, pending_chunks)
-                            text_released = True
-                        break
-
-                    await _send_ws_payload(ws, {
-                        "type": "assistant_audio",
-                        "url": f"/static/audio/{audio_id}.wav",
-                    })
-
-                    if not text_released:
-                        await _flush_pending_chunks(ws, pending_chunks)
-                        text_released = True
-
-            else:
-                text_buffer += thinking_filter.flush()
-                if tts_enabled:
-                    tts_text = _prepare_tts_text(text_buffer)
-                    if tts_text:
-                        audio_id = uuid.uuid4().hex
-                        audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                        logger.debug(
-                            "[%s] TTS final fragment (%d chars)",
-                            connection_id,
-                            len(tts_text),
-                        )
-
-                        try:
-                            await synthesize_async(
-                                text=tts_text,
-                                output_path=audio_path,
-                                session_id=connection_id,
-                            )
-                        except Exception:
-                            tts_enabled = False
-                            logger.warning(
-                                "[%s] TTS failed for final fragment; sending text without audio",
-                                connection_id,
-                            )
-                        else:
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_audio",
-                                "url": f"/static/audio/{audio_id}.wav",
-                            })
-
-                if not text_released:
-                    await _flush_pending_chunks(ws, pending_chunks)
-                    text_released = True
-
+                logger.debug("[%s] Assistant state -> %s", connection_id, event.state)
                 await _send_ws_payload(ws, {
-                    "type": "assistant_end",
-                    "content": event.text,
+                    "type": "assistant_state",
+                    "state": event.state,
                 })
+                continue
 
-                logger.info("[%s] Assistant turn completed", connection_id)
+            if isinstance(event, AvatarExpressionEvent):
+                logger.debug("[%s] Avatar expression -> %s", connection_id, event.expression)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_expression",
+                    "expression": event.expression,
+                })
+                continue
 
-    if hub is not None:
-        hub.set_turn(connection_id, None, None)
+            if isinstance(event, AvatarAnimationEvent):
+                logger.debug("[%s] Avatar animation -> %s", connection_id, event.animation)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_animation",
+                    "animation": event.animation,
+                })
+                continue
+
+            if isinstance(event, AvatarOutfitEvent):
+                logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_outfit",
+                    "outfit": event.outfit,
+                    "url": event.url,
+                })
+                continue
+
+            if isinstance(event, AssistantThinkingEvent):
+                if event.text:
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_thinking_chunk",
+                        "content": event.text,
+                    })
+                continue
+
+            if isinstance(event, AssistantSpeechEvent):
+                if not event.is_final:
+                    text_buffer += thinking_filter.push(event.text)
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_chunk", "content": event.text,
+                    })
+                    sentences, text_buffer = split_sentences(text_buffer)
+                    for sentence in sentences:
+                        speech.submit(_prepare_tts_text(sentence))
+                else:
+                    text_buffer += thinking_filter.flush()
+                    speech.submit(_prepare_tts_text(text_buffer))
+                    text_buffer = ""
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_end", "content": event.text,
+                    })
+                    logger.info("[%s] Assistant text turn completed", connection_id)
 
 
-async def _autonomy_output_sink(session_id: str, event, turn_id: str) -> None:
+async def _autonomy_output_sink(
+    session_id: str,
+    event,
+    turn_id: str,
+    *,
+    application: FastAPI | None = None,
+) -> None:
     if not isinstance(event, AssistantStateEvent):
         return
-    hub = getattr(app.state, "connection_hub", None)
+    runtime_app = application or app
+    hub = getattr(runtime_app.state, "connection_hub", None)
     if hub is not None:
         await hub.broadcast(session_id, {
             "type": "assistant_state",
@@ -896,8 +720,11 @@ async def _autonomy_notification_sink(
     session_id: str,
     notification: dict[str, object],
     turn_id: str,
+    *,
+    application: FastAPI | None = None,
 ) -> None:
-    hub = getattr(app.state, "connection_hub", None)
+    runtime_app = application or app
+    hub = getattr(runtime_app.state, "connection_hub", None)
     if hub is None or not hub.has_session(session_id):
         return
     message = str(notification.get("message", "")).strip()
@@ -909,11 +736,18 @@ async def _autonomy_notification_sink(
         "turn_id": turn_id,
         "origin": "integration_event",
     })
-    if notification.get("delivery") == "speech" and tts is not None:
+    await hub.broadcast(session_id, {
+        "type": "assistant_end",
+        "content": message,
+        "turn_id": turn_id,
+        "origin": "integration_event",
+    })
+
+    if notification.get("delivery") == "speech" and getattr(runtime_app.state, "audio_delivery", None) is not None:
         audio_id = uuid.uuid4().hex
         audio_path = AUDIO_DIR / f"{audio_id}.wav"
         try:
-            await synthesize_async(message, audio_path, session_id)
+            await synthesize_async(message, audio_path, session_id, runtime_app)
         except Exception:
             logger.exception("[%s] Autonomous notification TTS failed", session_id)
         else:
@@ -923,38 +757,79 @@ async def _autonomy_notification_sink(
                 "turn_id": turn_id,
                 "origin": "integration_event",
             })
-    await hub.broadcast(session_id, {
-        "type": "assistant_end",
-        "content": message,
-        "turn_id": turn_id,
-        "origin": "integration_event",
-    })
 
 
-async def _autonomy_approval_provider(session_id: str, request: dict[str, object]) -> bool:
-    hub = getattr(app.state, "connection_hub", None)
+async def _autonomy_approval_provider(
+    session_id: str,
+    request: dict[str, object],
+    *,
+    application: FastAPI | None = None,
+) -> bool:
+    runtime_app = application or app
+    hub = getattr(runtime_app.state, "connection_hub", None)
     if hub is None:
         return False
     return await hub.request_approval(
         session_id,
         request,
-        timeout_seconds=float(config.autonomy.get("approval_timeout_s", 300)),
+        timeout_seconds=float(_runtime_config(runtime_app).autonomy.get("approval_timeout_s", 300)),
     )
 
 
-@app.on_event("startup")
-async def startup_event():
-    global tts
+def _cleanup_generated_audio(audio_dir: Path) -> dict[str, int]:
+    """Delete only UUID-named audio artifacts owned by the TTS pipeline."""
+    deleted_count = 0
+    failed_count = 0
+    for path in audio_dir.iterdir():
+        if not _GENERATED_AUDIO_NAME_RE.fullmatch(path.name):
+            continue
+        if not path.is_file() and not path.is_symlink():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            failed_count += 1
+            logger.warning("Failed to remove generated audio file %s", path, exc_info=True)
+        else:
+            deleted_count += 1
+    return {"deleted_count": deleted_count, "failed_count": failed_count}
 
-    app.state.server_instance_id = uuid.uuid4().hex[:8]
-    app.state.connection_hub = SessionConnectionHub()
-    app.state.orchestrator = build_orchestrator()
-    app.state.memory_reflector = MemoryReflector(
-        llm=app.state.orchestrator.llm,
-        memory_store=app.state.orchestrator.memory_retriever.memory,
+
+async def _startup_application(
+    application: FastAPI,
+    settings: Config,
+    *,
+    orchestrator_builder: Callable[[Config], Any],
+    tts_builder: Callable[[dict], Any],
+    stt_builder: Callable[[dict], Any],
+) -> None:
+    application.state.settings = settings
+    logging_config = dict(settings.logging)
+    logging_config["dir"] = str(resolve_app_path(logging_config.get("dir", "logs")))
+    setup_logging_from_config(logging_config)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    audio_cleanup = _cleanup_generated_audio(AUDIO_DIR)
+    logger.info(
+        "Generated audio startup cleanup completed: deleted=%d failed=%d",
+        audio_cleanup["deleted_count"],
+        audio_cleanup["failed_count"],
     )
-    vision_config = config.raw.get("vision_watchdog", {})
-    app.state.vision_watchdog = VisionWatchdog(
+    logger.info("Starting FastAPI server")
+
+    application.state.server_instance_id = _new_runtime_id()
+    application.state.connection_hub = SessionConnectionHub()
+    application.state.orchestrator = orchestrator_builder(settings)
+    application.state.memory_reflector = MemoryReflector(
+        llm=application.state.orchestrator.llm,
+        memory_store=application.state.orchestrator.memory_retriever.memory,
+    )
+    application.state.memory_reflection_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="memory-reflection",
+    )
+    application.state.memory_reflection_future = None
+    vision_config = settings.vision_watchdog
+    application.state.vision_watchdog = VisionWatchdog(
         model=str(vision_config.get("model", "HuggingFaceTB/SmolVLM-256M-Instruct")),
         device=str(vision_config.get("device", "auto")),
         torch_dtype=str(vision_config.get("torch_dtype", "auto")),
@@ -968,54 +843,100 @@ async def startup_event():
     )
     logger.info(
         "Orchestrator initialized at startup (server_instance_id=%s)",
-        app.state.server_instance_id,
+        application.state.server_instance_id,
     )
 
-    tts = build_tts_engine(config.tts)
-    app.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
-    app.state.tts_worker_task = asyncio.create_task(tts_worker(app.state.tts_queue))
+    application.state.audio_delivery = AudioDelivery(
+        tts_builder(settings.tts), queue_size=TTS_QUEUE_MAXSIZE,
+    )
+    application.state.audio_delivery.start()
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
-    app.state.voice_input_path = _voice_input_path()
-    if app.state.voice_input_path == VOICE_INPUT_STT:
-        app.state.stt = build_stt_engine(config.stt)
+    application.state.voice_input_path = _voice_input_path(settings)
+    if application.state.voice_input_path == VOICE_INPUT_STT:
+        application.state.stt = stt_builder(settings.stt)
     else:
-        app.state.stt = None
-    logger.info("Voice input path configured as %s", app.state.voice_input_path)
-    autonomy_runtime = getattr(app.state.orchestrator, "autonomy_runtime", None)
+        application.state.stt = None
+    logger.info("Voice input path configured as %s", application.state.voice_input_path)
+    autonomy_runtime = getattr(application.state.orchestrator, "autonomy_runtime", None)
     if autonomy_runtime is not None:
-        autonomy_runtime.output_sink = _autonomy_output_sink
-        autonomy_runtime.notification_sink = _autonomy_notification_sink
-        autonomy_runtime.approval_provider = _autonomy_approval_provider
+        application.state.autonomy_runtime = autonomy_runtime
+        autonomy_runtime.output_sink = partial(_autonomy_output_sink, application=application)
+        autonomy_runtime.notification_sink = partial(
+            _autonomy_notification_sink,
+            application=application,
+        )
+        autonomy_runtime.approval_provider = partial(
+            _autonomy_approval_provider,
+            application=application,
+        )
         await autonomy_runtime.start()
-        app.state.autonomy_runtime = autonomy_runtime
         logger.info("Autonomy runtime started")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    queue = getattr(app.state, "tts_queue", None)
-    worker_task = getattr(app.state, "tts_worker_task", None)
-    orchestrator = getattr(app.state, "orchestrator", None)
-    autonomy_runtime = getattr(app.state, "autonomy_runtime", None)
+async def _shutdown_application(application: FastAPI) -> None:
+    deletion_tasks = list(getattr(application.state, "session_deletion_tasks", {}).values())
+    if deletion_tasks:
+        await asyncio.gather(*deletion_tasks, return_exceptions=True)
+    audio_delivery = getattr(application.state, "audio_delivery", None)
+    orchestrator = getattr(application.state, "orchestrator", None)
+    autonomy_runtime = getattr(application.state, "autonomy_runtime", None)
+    reflection_executor = getattr(application.state, "memory_reflection_executor", None)
 
-    if autonomy_runtime is not None:
-        await autonomy_runtime.close()
-    else:
-        close_orchestrator = getattr(orchestrator, "close", None)
-        if callable(close_orchestrator):
-            close_orchestrator()
+    try:
+        try:
+            if autonomy_runtime is not None:
+                await autonomy_runtime.close()
+        finally:
+            if reflection_executor is not None:
+                reflection_executor.shutdown(wait=True, cancel_futures=False)
+    finally:
+        try:
+            close_orchestrator = getattr(orchestrator, "close", None)
+            if callable(close_orchestrator):
+                close_orchestrator()
+        finally:
+            if audio_delivery is not None:
+                await audio_delivery.close()
 
-    if queue is not None:
-        await queue.put(_TTS_STOP)
 
-    if worker_task is not None:
-        with suppress(asyncio.CancelledError):
-            await worker_task
+def create_app(
+    settings: Config | None = None,
+    *,
+    orchestrator_builder: Callable[[Config], Any] = build_orchestrator,
+    tts_builder: Callable[[dict], Any] = build_tts_engine,
+    stt_builder: Callable[[dict], Any] = build_stt_engine,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        runtime_settings = settings or Config()
+        try:
+            await _startup_application(
+                application,
+                runtime_settings,
+                orchestrator_builder=orchestrator_builder,
+                tts_builder=tts_builder,
+                stt_builder=stt_builder,
+            )
+        except Exception:
+            with suppress(Exception):
+                await _shutdown_application(application)
+            raise
+
+        try:
+            yield
+        finally:
+            await _shutdown_application(application)
+
+    application = FastAPI(lifespan=lifespan)
+    application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    application.include_router(router)
+    return application
 
 
-@app.get("/api/sessions")
-async def list_sessions():
-    history_store = app.state.orchestrator.history
+@router.get("/api/sessions")
+async def list_sessions(request: Request = None):
+    runtime_app = _runtime_app(request)
+    history_store = runtime_app.state.orchestrator.history
     rows = history_store.list_sessions()
     sessions = [
         {
@@ -1031,15 +952,16 @@ async def list_sessions():
     return {"sessions": sessions}
 
 
-@app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    history_store = app.state.orchestrator.history
+@router.get("/api/sessions/{session_id}")
+async def get_session(session_id: SessionIdPath, request: Request = None):
+    runtime_app = _runtime_app(request)
+    history_store = runtime_app.state.orchestrator.history
     rows = history_store.get_all(session_id)
 
     if not rows and not history_store.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    summary = app.state.orchestrator.summary_store.get(session_id)
+    summary = runtime_app.state.orchestrator.summary_store.get(session_id)
     summary_text = summary[0] if summary else None
     return {
         "session_id": session_id,
@@ -1074,8 +996,9 @@ def _knowledge_service(
     *,
     require_beliefs: bool = True,
     require_memories: bool = False,
+    application: FastAPI | None = None,
 ) -> KnowledgeService:
-    orchestrator = app.state.orchestrator
+    orchestrator = (application or app).state.orchestrator
     repository = getattr(orchestrator, "belief_repository", None)
     provider = getattr(orchestrator, "belief_context_provider", None)
     memory_retriever = getattr(orchestrator, "memory_retriever", None)
@@ -1093,40 +1016,31 @@ def _knowledge_service(
     )
 
 
-SessionIdQuery = Annotated[
-    str,
-    Query(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[^\x00-\x1f\x7f]+$",
-    ),
-]
-
-
 def _require_known_session(service: KnowledgeService, session_id: str) -> None:
     if not service.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-@app.get("/api/knowledge/memories", response_model=SavedMemoryListResponse)
-async def list_saved_memories():
+@router.get("/api/knowledge/memories", response_model=SavedMemoryListResponse)
+async def list_saved_memories(request: Request = None):
     return _knowledge_service(
         require_beliefs=False,
         require_memories=True,
+        application=_runtime_app(request),
     ).list_saved_memories()
 
 
-@app.get(
+@router.get(
     "/api/knowledge/beliefs/effective",
     response_model=EffectiveBeliefsResponse,
 )
-async def get_effective_beliefs(session_id: SessionIdQuery):
-    service = _knowledge_service()
+async def get_effective_beliefs(session_id: SessionIdQuery, request: Request = None):
+    service = _knowledge_service(application=_runtime_app(request))
     _require_known_session(service, session_id)
     return service.effective_beliefs(session_id)
 
 
-@app.get("/api/knowledge/beliefs", response_model=BeliefListResponse)
+@router.get("/api/knowledge/beliefs", response_model=BeliefListResponse)
 async def list_beliefs_for_inspection(
     subject_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
     source_sender_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
@@ -1138,6 +1052,7 @@ async def list_beliefs_for_inspection(
     source_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0, le=100000)] = 0,
+    request: Request = None,
 ):
     filters = BeliefFiltersDTO(
         subject_id=subject_id,
@@ -1149,14 +1064,14 @@ async def list_beliefs_for_inspection(
         scope_session_id=scope_session_id,
         source_session_id=source_session_id,
     )
-    return _knowledge_service().list_beliefs(
+    return _knowledge_service(application=_runtime_app(request)).list_beliefs(
         filters=filters,
         limit=limit,
         offset=offset,
     )
 
 
-@app.get(
+@router.get(
     "/api/knowledge/beliefs/{belief_id}",
     response_model=BeliefDetailDTO,
 )
@@ -1165,52 +1080,126 @@ async def get_belief_for_inspection(
         str,
         ApiPath(min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$"),
     ],
+    request: Request = None,
 ):
-    detail = _knowledge_service().get_belief_detail(belief_id)
+    detail = _knowledge_service(application=_runtime_app(request)).get_belief_detail(belief_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Belief not found")
     return detail
 
 
-@app.get(
+@router.get(
     "/api/knowledge/belief-context",
     response_model=ContextPreviewResponse,
 )
-async def get_belief_context_preview(session_id: SessionIdQuery):
-    service = _knowledge_service()
+async def get_belief_context_preview(session_id: SessionIdQuery, request: Request = None):
+    service = _knowledge_service(application=_runtime_app(request))
     _require_known_session(service, session_id)
     return service.context_preview(session_id)
 
 
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    orchestrator = app.state.orchestrator
-    deleted_count = orchestrator.history.delete_session(session_id)
+def _session_coordinator(application: FastAPI) -> SessionTurnCoordinator:
+    runtime = getattr(application.state.orchestrator, "autonomy_runtime", None)
+    if runtime is not None:
+        return runtime.coordinator
+    coordinator = getattr(application.state, "turn_coordinator", None)
+    if coordinator is None:
+        coordinator = SessionTurnCoordinator()
+        application.state.turn_coordinator = coordinator
+    return coordinator
+
+
+async def _delete_session(application: FastAPI, session_id: str) -> dict:
+    orchestrator = application.state.orchestrator
+    await _session_coordinator(application).close_session(session_id)
+    runtime = getattr(orchestrator, "autonomy_runtime", None)
+    if runtime is not None:
+        runtime.store.delete_session(session_id)
+    deletion = await asyncio.to_thread(orchestrator.history.delete_session, session_id)
+    # History deletion atomically removes all canonical session-owned records.
+    # Keep adapter cleanup for injected runtimes as well.
     orchestrator.summary_store.delete(session_id)
     belief_repository = getattr(orchestrator, "belief_repository", None)
     if belief_repository is not None:
         belief_repository.delete_session(orchestrator.agent_id, session_id)
 
-    if deleted_count == 0:
+    hub = getattr(application.state, "connection_hub", None)
+    if hub is not None:
+        await hub.close_session(session_id)
+    return {
+        "deleted": True,
+        "session_id": session_id,
+        "cleanup_complete": deletion.cleanup_complete,
+        "cleanup_errors": list(deletion.cleanup_errors),
+    }
+
+
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: SessionIdPath, request: Request = None):
+    application = _runtime_app(request)
+    history = application.state.orchestrator.history
+    if not history.session_exists(session_id) and not history.is_session_deleted(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
+    tasks = getattr(application.state, "session_deletion_tasks", None)
+    if tasks is None:
+        tasks = {}
+        application.state.session_deletion_tasks = tasks
+    task = tasks.get(session_id)
+    if task is None:
+        task = asyncio.create_task(_delete_session(application, session_id))
+        tasks[session_id] = task
 
-    return {"deleted": True, "session_id": session_id}
+        def finished(completed):
+            tasks.pop(session_id, None)
+            if not completed.cancelled() and completed.exception() is not None:
+                logger.error("[%s] Session deletion failed: %s", session_id, completed.exception())
+
+        task.add_done_callback(finished)
+    # A disconnected HTTP caller must not interrupt deletion after closing admission.
+    return await asyncio.shield(task)
 
 
-@app.post("/api/admin/reflect")
-async def run_memory_reflection(payload: ReflectRequest):
-    reflector = getattr(app.state, "memory_reflector", None)
+@router.post("/api/admin/reflect")
+async def run_memory_reflection(payload: ReflectRequest, request: Request = None):
+    runtime_app = _runtime_app(request)
+    reflector = getattr(runtime_app.state, "memory_reflector", None)
     if reflector is None:
-        orchestrator = app.state.orchestrator
+        orchestrator = runtime_app.state.orchestrator
         reflector = MemoryReflector(
             llm=orchestrator.llm,
             memory_store=orchestrator.memory_retriever.memory,
         )
-        app.state.memory_reflector = reflector
+        runtime_app.state.memory_reflector = reflector
 
     logger.info("Manual memory reflection requested (days_old=%d)", payload.days_old)
 
-    result = reflector.reflect_and_prune(payload.days_old)
+    running_future = getattr(runtime_app.state, "memory_reflection_future", None)
+    if running_future is not None and not running_future.done():
+        raise HTTPException(status_code=409, detail="Memory reflection is already running")
+
+    reflection_executor = getattr(runtime_app.state, "memory_reflection_executor", None)
+    if reflection_executor is None:
+        reflection_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="memory-reflection",
+        )
+        runtime_app.state.memory_reflection_executor = reflection_executor
+
+    worker_future = reflection_executor.submit(
+        reflector.reflect_and_prune,
+        payload.days_old,
+    )
+    runtime_app.state.memory_reflection_future = worker_future
+    try:
+        while not worker_future.done():
+            await asyncio.sleep(0.05)
+        result = worker_future.result()
+    finally:
+        if (
+            worker_future.done()
+            and getattr(runtime_app.state, "memory_reflection_future", None) is worker_future
+        ):
+            runtime_app.state.memory_reflection_future = None
 
     if not result.get("success", True):
         raise HTTPException(
@@ -1224,9 +1213,9 @@ async def run_memory_reflection(payload: ReflectRequest):
     return result
 
 
-@app.get("/api/autonomy")
-async def get_autonomy_status():
-    runtime = getattr(app.state, "autonomy_runtime", None)
+@router.get("/api/autonomy")
+async def get_autonomy_status(request: Request = None):
+    runtime = getattr(_runtime_app(request).state, "autonomy_runtime", None)
     if runtime is None:
         return {"enabled": False, "paused": True, "queued": 0, "running": False}
     return runtime.status()
@@ -1236,20 +1225,21 @@ class AutonomyStateRequest(BaseModel):
     paused: bool
 
 
-@app.put("/api/autonomy")
-async def set_autonomy_status(payload: AutonomyStateRequest):
-    runtime = getattr(app.state, "autonomy_runtime", None)
+@router.put("/api/autonomy")
+async def set_autonomy_status(payload: AutonomyStateRequest, request: Request = None):
+    runtime = getattr(_runtime_app(request).state, "autonomy_runtime", None)
     if runtime is None:
         raise HTTPException(status_code=503, detail="Autonomy runtime is unavailable")
     await runtime.set_paused(payload.paused)
     return runtime.status()
 
 
-@app.websocket("/ws")
+@router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    connection_id = uuid.uuid4().hex[:8]
+    runtime_app = _runtime_app(ws)
+    connection_id = _new_runtime_id()
     start_ts = time.perf_counter()
-    server_instance_id = app.state.server_instance_id
+    server_instance_id = runtime_app.state.server_instance_id
     session_mode = ws.query_params.get("session_mode", "new")
     requested_session_id = ws.query_params.get("session_id")
     known_server_instance_id = ws.query_params.get("server_instance_id")
@@ -1259,18 +1249,33 @@ async def websocket_endpoint(ws: WebSocket):
     except ValueError:
         requested_session_kind = SessionKind.DIRECT
 
-    orchestrator = app.state.orchestrator
+    orchestrator = runtime_app.state.orchestrator
     history_store = orchestrator.history
-    session_id = resolve_session_id(
-        session_mode=session_mode,
-        requested_session_id=requested_session_id,
-        known_server_instance_id=known_server_instance_id,
-        server_instance_id=server_instance_id,
-        requested_session_exists=bool(
-            requested_session_id
-            and history_store.session_exists(requested_session_id)
-        ),
-    )
+    try:
+        client_id = ws.query_params.get("client_id")
+        if client_id is not None:
+            client_id = validate_session_id(client_id)
+        validated_requested_session_id = (
+            validate_session_id(requested_session_id)
+            if requested_session_id is not None
+            else None
+        )
+        session_id = resolve_session_id(
+            session_mode=session_mode,
+            requested_session_id=validated_requested_session_id,
+            known_server_instance_id=known_server_instance_id,
+            server_instance_id=server_instance_id,
+        )
+    except ValueError as exc:
+        logger.warning("[%s] Rejected WebSocket session ID: %s", connection_id, exc)
+        await ws.close(code=1008, reason=str(exc))
+        return
+
+    if (history_store.is_session_deleted(session_id)
+            or _session_coordinator(runtime_app).is_closed(session_id)):
+        await ws.accept()
+        await ws.close(code=4004, reason="Conversation deleted")
+        return
 
     if requested_session_id and session_id == requested_session_id:
         session_kind = history_store.get_session_kind(session_id)
@@ -1278,8 +1283,15 @@ async def websocket_endpoint(ws: WebSocket):
         session_kind = history_store.ensure_session(session_id, requested_session_kind)
 
     await ws.accept()
-    hub = app.state.connection_hub
-    hub.register(session_id, connection_id, ws)
+    hub = runtime_app.state.connection_hub
+    try:
+        if _session_coordinator(runtime_app).is_closed(session_id):
+            raise SessionDeletedError()
+        hub.register(session_id, connection_id, ws, client_id=client_id)
+    except SessionDeletedError:
+        await ws.close(code=4004, reason="Conversation deleted")
+        return
+    assistant_snapshot = hub.current_assistant_state(session_id)
     logger.info(
         "[%s] WebSocket connected (conversation_session=%s, mode=%s)",
         connection_id,
@@ -1289,7 +1301,7 @@ async def websocket_endpoint(ws: WebSocket):
     await _send_ws_payload(ws, _build_session_init_payload(
         server_instance_id=server_instance_id,
         session_id=session_id,
-        gesture_catalog=getattr(app.state.orchestrator, "gesture_catalog", {}),
+        gesture_catalog=getattr(runtime_app.state.orchestrator, "gesture_catalog", {}),
         outfit_catalog=getattr(
             getattr(orchestrator, "avatar_wardrobe", None), "catalog", {}
         ),
@@ -1299,24 +1311,30 @@ async def websocket_endpoint(ws: WebSocket):
         session_kind=session_kind,
         local_human_display_name=getattr(orchestrator, "local_human_name", "You"),
         local_assistant_display_name=getattr(orchestrator, "local_assistant_name", "Astra"),
+        assistant_state=assistant_snapshot.state,
+        active_turn_id=assistant_snapshot.turn_id,
+        turn_origin=assistant_snapshot.origin,
     ))
+    await hub.replay_pending(connection_id)
 
-    watchdog = getattr(app.state, "vision_watchdog", None)
+    watchdog = getattr(runtime_app.state, "vision_watchdog", None)
     event_loop = asyncio.get_running_loop()
-    assistant_state_tracker = {"state": AssistantState.IDLE}
-    last_screen_detection = 0.0
-    last_webcam_detection = 0.0
-    last_screen_hash: str | None = None
-    last_webcam_hash: str | None = None
+    perception_frames = PerceptionFrameController(
+        orchestrator=orchestrator,
+        watchdog=watchdog,
+        session_id=session_id,
+        connection_id=connection_id,
+    )
     pending_voice_attachments: list[Attachment] = []
     connection_instant_mode = False
     connection_reasoning_override: bool | None = None
+    inbox = WebSocketMessageInbox(ws)
     logger.debug("[%s] Reusing startup orchestrator", connection_id)
 
     def request_tool_approval(request: dict) -> bool:
         future = asyncio.run_coroutine_threadsafe(
             _request_tool_approval(
-                ws=ws,
+                inbox=inbox,
                 request=request,
                 connection_id=connection_id,
             ),
@@ -1328,124 +1346,15 @@ async def websocket_endpoint(ws: WebSocket):
             logger.exception("[%s] Tool approval failed; denying request", connection_id)
             return False
 
-    async def handle_vision_payload(payload: dict) -> Attachment | None:
-        nonlocal last_screen_detection
-        nonlocal last_webcam_detection
-        nonlocal last_screen_hash
-        nonlocal last_webcam_hash
-
-        frame_type = payload.get("type")
-        if frame_type == "screen_frame":
-            key = PerceptionKey.SCREEN_SCENE
-            source = "screen"
-        elif frame_type == "webcam_frame":
-            key = PerceptionKey.WEBCAM_SCENE
-            source = "webcam"
-        elif frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
-            key = None
-            source = "voice_attachment"
-        else:
-            return None
-
-        attachment_payload = payload.get("attachment")
-        if not isinstance(attachment_payload, dict):
-            raise ValueError(f"{frame_type} payload is missing attachment")
-
-        attachment = attachment_from_payload(attachment_payload)
-        base64_data = getattr(attachment, "base64_data", None)
-        image_hash = attachment.sha256
-        if image_hash is None:
-            raw_base64 = attachment_payload.get("base64_data") or attachment_payload.get("data") or ""
-            image_hash = hashlib.sha256(str(raw_base64).encode("utf-8")).hexdigest()
-
-        perception_payload = {
-            **attachment.to_perception_payload(),
-            "sha256": image_hash,
-            "source": source,
-        }
-        if base64_data:
-            perception_payload["base64_data"] = base64_data
-
-        if key is not None:
-            orchestrator.perception.update(
-                key,
-                perception_payload,
-            )
-
-        if frame_type == VOICE_ATTACHMENT_FRAME_TYPE:
-            return attachment
-
-        if frame_type == "screen_frame":
-            if image_hash == last_screen_hash:
-                return None
-            last_screen_hash = image_hash
-            last_detection = last_screen_detection
-            evaluate = watchdog.evaluate_screen if watchdog else None
-        else:
-            if image_hash == last_webcam_hash:
-                return None
-            last_webcam_hash = image_hash
-            last_detection = last_webcam_detection
-            evaluate = watchdog.evaluate_webcam if watchdog else None
-
-        now = time.monotonic()
-        if now - last_detection < 5.0:
-            return None
-
-        if evaluate is None:
-            logger.debug("[%s] Vision watchdog unavailable; stored %s perception only", connection_id, source)
-            return None
-
-        if not base64_data:
-            return None
-
-        if frame_type == "screen_frame":
-            last_screen_detection = now
-        else:
-            last_webcam_detection = now
-
-        should_react = await evaluate(base64_data)
-        if not should_react:
-            return None
-
-        if frame_type == "screen_frame":
-            event_text = (
-                "The local screen watchdog detected a clear visual event in the "
-                "latest screenshot. Proactively help the user, briefly and concretely."
-            )
-        else:
-            event_text = (
-                "The local webcam watchdog detected that the user may need attention. "
-                "Proactively check in briefly and helpfully."
-            )
-
-        runtime = getattr(orchestrator, "autonomy_runtime", None)
-        if runtime is None:
-            logger.warning("[%s] Vision event ignored because autonomy is unavailable", connection_id)
-            return None
-        event_id = str(uuid.uuid4())
-        event_attachment = _persist_event_attachment(event_id, attachment)
-        await runtime.publish(IntegrationEvent(
-            event=EventId("vision", "attention_detected"),
-            event_id=event_id,
-            session_id=session_id,
-            payload={
-                "source": source,
-                "description": event_text,
-                "sha256": image_hash,
-            },
-            deduplication_key=f"{source}:{image_hash}",
-            attachments=(event_attachment,),
-        ))
-        logger.info("[%s] Vision watchdog published autonomous %s event", connection_id, source)
-        return None
-
     try:
         while True:
             # receive() instead of receive_text() so we can handle both
             # text frames (keyboard) and binary frames (microphone audio).
-            raw_message = await ws.receive()
+            raw_message = await inbox.receive()
             hub.touch(connection_id)
+            if _session_coordinator(runtime_app).is_closed(session_id):
+                await ws.close(code=4004, reason="Conversation deleted")
+                break
 
             # Starlette surfaces disconnects as a message dict rather than
             # raising WebSocketDisconnect, so we must check before touching
@@ -1463,7 +1372,12 @@ async def websocket_endpoint(ws: WebSocket):
                 # the text branch and crash on raw_message["text"].
                 if raw_message.get("bytes") is not None:
                     audio_bytes = raw_message["bytes"]
-                    voice_input_path = getattr(app.state, "voice_input_path", _voice_input_path())
+                    settings = _runtime_config(runtime_app)
+                    voice_input_path = getattr(
+                        runtime_app.state,
+                        "voice_input_path",
+                        _voice_input_path(settings),
+                    )
 
                     if voice_input_path == VOICE_INPUT_NATIVE_AUDIO:
                         logger.info(
@@ -1477,6 +1391,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 None,
                                 _build_native_audio_attachment,
                                 audio_bytes,
+                                settings,
                             )
                         except Exception:
                             logger.exception("[%s] Native audio preparation failed", connection_id)
@@ -1484,7 +1399,7 @@ async def websocket_endpoint(ws: WebSocket):
                             await _send_turn_error(ws, "Audio preparation failed.")
                             continue
 
-                        native_audio = _native_audio_config()
+                        native_audio = _native_audio_config(settings)
                         display_text = str(native_audio.get("display_text", "Voice message"))
                         user_text = str(
                             native_audio.get(
@@ -1505,7 +1420,7 @@ async def websocket_endpoint(ws: WebSocket):
                         input_modality = InputModality.VOICE
 
                     else:
-                        stt = getattr(app.state, "stt", None)
+                        stt = getattr(runtime_app.state, "stt", None)
                         if stt is None:
                             pending_voice_attachments = []
                             await _send_turn_error(ws, "STT is not available.")
@@ -1569,62 +1484,41 @@ async def websocket_endpoint(ws: WebSocket):
                 # ── TEXT PATH ─────────────────────────────────────────────
                 else:
                     text_payload = raw_message["text"]
-                    try:
-                        parsed_payload = json.loads(text_payload)
-                    except json.JSONDecodeError:
-                        parsed_payload = None
+                    client_frame = decode_client_frame(text_payload)
 
                     if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "tool_approval_response"
-                        and hub.resolve_approval(connection_id, parsed_payload)
+                        isinstance(client_frame, ToolApprovalResponseFrame)
+                        and hub.resolve_approval(connection_id, client_frame)
                     ):
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") in VISION_FRAME_TYPES
-                    ):
-                        attachment = await handle_vision_payload(parsed_payload)
+                    if isinstance(client_frame, VisionFrame):
+                        attachment = await perception_frames.handle(
+                            client_frame.type,
+                            client_frame.attachment,
+                        )
                         if attachment is not None:
                             pending_voice_attachments.append(attachment)
                             pending_voice_attachments = _dedupe_attachments_by_hash(
                                 pending_voice_attachments
                             )[-4:]
+                            _validate_attachment_batch(pending_voice_attachments)
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "user_config"
-                    ):
-                        instant_value = parsed_payload.get("instant_mode")
-                        if not isinstance(instant_value, bool):
-                            raise ValueError("User config instant_mode flag must be boolean")
-                        connection_instant_mode = instant_value
-                        if "reasoning" in parsed_payload:
-                            reasoning_value = parsed_payload.get("reasoning")
-                            if reasoning_value is None:
-                                connection_reasoning_override = None
-                            elif isinstance(reasoning_value, bool):
-                                connection_reasoning_override = reasoning_value
-                            else:
-                                raise ValueError("User config reasoning flag must be boolean or null")
+                    if isinstance(client_frame, UserConfigFrame):
+                        connection_instant_mode = client_frame.instant_mode
+                        if "reasoning" in client_frame.model_fields_set:
+                            connection_reasoning_override = client_frame.reasoning
                         continue
 
-                    if (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "relay_message"
-                    ):
-                        user_text, turn_sender = parse_relay_message(parsed_payload, session_kind)
+                    if isinstance(client_frame, RelayMessageFrame):
+                        user_text, turn_sender = parse_relay_message(client_frame, session_kind)
                         reasoning_override = connection_reasoning_override
                         instant_mode = connection_instant_mode
                         attachments = []
-                    elif (
-                        isinstance(parsed_payload, dict)
-                        and parsed_payload.get("type") == "retry_message"
-                    ):
+                    elif isinstance(client_frame, RetryMessageFrame):
                         existing_user_message_id, reasoning_override, instant_mode = (
-                            parse_retry_message(parsed_payload)
+                            parse_retry_message(client_frame)
                         )
                         retry_row = orchestrator.history.get_retryable_user_message(
                             session_id, existing_user_message_id
@@ -1649,6 +1543,7 @@ async def websocket_endpoint(ws: WebSocket):
                             *attachments,
                         ]
                     )
+                    _validate_attachment_batch(attachments)
                     pending_voice_attachments = []
 
                 original_attachment_count = len(attachments)
@@ -1675,9 +1570,7 @@ async def websocket_endpoint(ws: WebSocket):
                 )
                 logger.debug("[%s] User input text: %r", connection_id, user_text)
 
-                runtime = getattr(orchestrator, "autonomy_runtime", None)
-                turn_context = runtime.coordinator.user_turn(session_id) if runtime else None
-                if turn_context is None:
+                async with _session_coordinator(runtime_app).user_turn(session_id):
                     await _stream_orchestrator_events(
                         ws, orchestrator,
                         orchestrator.handle_user_input(
@@ -1689,24 +1582,12 @@ async def websocket_endpoint(ws: WebSocket):
                             session_kind=session_kind,
                             existing_user_message_id=existing_user_message_id,
                         ),
-                        connection_id, original_attachment_count, assistant_state_tracker,
+                        connection_id, original_attachment_count,
                     )
-                else:
-                    async with turn_context:
-                        await _stream_orchestrator_events(
-                            ws, orchestrator,
-                            orchestrator.handle_user_input(
-                                session_id, user_text, think_override=reasoning_override,
-                                instant_mode=instant_mode, attachments=attachments,
-                                input_modality=input_modality,
-                                tool_approval_callback=request_tool_approval,
-                                sender=turn_sender,
-                                session_kind=session_kind,
-                                existing_user_message_id=existing_user_message_id,
-                            ),
-                            connection_id, original_attachment_count, assistant_state_tracker,
-                        )
 
+            except SessionDeletedError:
+                await ws.close(code=4004, reason="Conversation deleted")
+                break
             except WebSocketDisconnect:
                 raise
             except ValueError as exc:
@@ -1715,14 +1596,15 @@ async def websocket_endpoint(ws: WebSocket):
                     ws,
                     f"Couldn't process that message: {exc}",
                 )
-                assistant_state_tracker["state"] = AssistantState.IDLE
             except Exception:
                 logger.exception("[%s] Turn failed; keeping websocket alive", connection_id)
                 await _send_turn_error(
                     ws,
                     "Sorry, something went wrong while processing that message. Please try again.",
                 )
-                assistant_state_tracker["state"] = AssistantState.IDLE
+
+    except WebSocketMessageTooLarge as exc:
+        logger.warning("[%s] Closed oversized WebSocket message: %s", connection_id, exc)
 
     except WebSocketDisconnect:
         logger.info(
@@ -1738,7 +1620,10 @@ async def websocket_endpoint(ws: WebSocket):
         hub.unregister(connection_id)
         logger.debug("[%s] WebSocket cleanup complete", connection_id)
 
-@app.get("/")
+@router.get("/")
 async def get_index():
     logger.debug("Serving index.html")
-    return FileResponse("static/index.html")
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+app = create_app()

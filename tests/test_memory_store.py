@@ -1,20 +1,43 @@
 import unittest
-from unittest.mock import patch
+import sqlite3
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import main as main_module
 from app.storage.database import Database
-from app.memory.memory_store import MemoryStore
+from app.memory.memory_store import MemoryIndexSyncError, MemoryStore
 
 
 class FakeCollection:
     def __init__(self):
         self.ids = []
         self.docs = []
+        self.metadatas = []
         self.distances = []
         self.deleted_ids = []
 
     def add(self, ids, documents, metadatas):
         self.ids.extend(ids)
         self.docs.extend(documents)
+        self.metadatas.extend(metadatas)
         self.distances.extend(metadata.get("distance", 0.2) for metadata in metadatas)
+
+    def upsert(self, ids, documents, metadatas):
+        retained = [
+            (mem_id, doc, metadata, distance)
+            for mem_id, doc, metadata, distance in zip(
+                self.ids, self.docs, self.metadatas, self.distances
+            )
+            if mem_id not in ids
+        ]
+        self.ids = [record[0] for record in retained]
+        self.docs = [record[1] for record in retained]
+        self.metadatas = [record[2] for record in retained]
+        self.distances = [record[3] for record in retained]
+        self.add(ids, documents, metadatas)
+
+    def get(self, include=None):
+        return {"ids": list(self.ids)}
 
     def query(self, query_texts, n_results, where=None):
         # Fake search behavior: return everything we have up to n_results
@@ -28,13 +51,16 @@ class FakeCollection:
         if ids:
             self.deleted_ids.extend(ids)
             filtered_records = [
-                (mem_id, doc, distance)
-                for mem_id, doc, distance in zip(self.ids, self.docs, self.distances)
+                (mem_id, doc, metadata, distance)
+                for mem_id, doc, metadata, distance in zip(
+                    self.ids, self.docs, self.metadatas, self.distances
+                )
                 if mem_id not in ids
             ]
             self.ids = [record[0] for record in filtered_records]
             self.docs = [record[1] for record in filtered_records]
-            self.distances = [record[2] for record in filtered_records]
+            self.metadatas = [record[2] for record in filtered_records]
+            self.distances = [record[3] for record in filtered_records]
 
 
 class FakeVectorStore:
@@ -44,6 +70,74 @@ class FakeVectorStore:
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_orphan_strict_match_does_not_suppress_canonical_fallback(self):
+        orphan = self.store.add("Orphan")
+        self.store.add("Available fallback")
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM memory WHERE id = ?", (orphan,))
+        self.store.collection.distances = [0.1, 0.75]
+        self.assertEqual(self.store.get_relevant("query"), ["Available fallback"])
+
+    def test_candidate_ids_and_scores_are_required_and_duplicates_are_not_replayed(self):
+        memory_id = self.store.add("Canonical")
+        for result, expected in (
+            ({"documents": [["Unverifiable"]], "distances": [[0.1]]}, []),
+            ({"ids": [[memory_id]], "distances": [[float("nan")]]}, []),
+            ({"ids": [[memory_id]], "distances": [["0.1"]]}, []),
+            ({"ids": [[memory_id, memory_id]], "distances": [[0.1, 0.2]]}, ["Canonical"]),
+        ):
+            with self.subTest(result=result), patch.object(self.store.collection, "query", return_value=result):
+                self.assertEqual(self.store.get_relevant("query"), expected)
+
+    def test_failed_vector_delete_does_not_recall_deleted_canonical_memory(self):
+        memory_id = self.store.add("Deleted fact")
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("Offline")):
+            with self.assertRaises(MemoryIndexSyncError):
+                self.store.delete_memories([memory_id])
+        self.assertEqual(self.store.get_relevant("fact"), [])
+
+    def test_retrieval_uses_current_canonical_text_instead_of_vector_document(self):
+        memory_id = self.store.add("Old fact")
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE memory SET content = 'Corrected fact' WHERE id = ?", (memory_id,))
+        self.assertEqual(self.store.get_relevant("fact"), ["Corrected fact"])
+
+    def test_consolidation_rolls_back_deletes_and_all_additions_on_insert_failure(self):
+        old = self.store.add("Original")
+        with self.db.transaction() as conn:
+            conn.execute("""CREATE TRIGGER reject_bad_memory BEFORE INSERT ON memory
+                WHEN NEW.content = 'Rejected' BEGIN SELECT RAISE(ABORT, 'Rejected'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.apply_consolidation([old], [
+                {"content": "First replacement", "category": "general", "importance": 2},
+                {"content": "Rejected", "category": "general", "importance": 2},
+            ])
+        self.assertEqual([row["id"] for row in self.store.get_all()], [old])
+        self.assertEqual(self.vector_store.semantic_collection.ids, [old])
+
+    def test_consolidation_commits_canonical_batch_despite_vector_failures_then_repairs(self):
+        old = self.store.add("Original")
+        collection = self.vector_store.semantic_collection
+        with patch.object(collection, "upsert", side_effect=RuntimeError("Unavailable")) as upsert, \
+                patch.object(collection, "delete", side_effect=RuntimeError("Unavailable")) as delete:
+            with self.assertLogs("memory_store", level="ERROR"):
+                result = self.store.apply_consolidation([old], [
+                    {"content": "Replacement", "category": "general", "importance": 2},
+                ])
+            upsert.assert_called_once()
+            delete.assert_called_once()
+        self.assertFalse(result["index_sync_complete"])
+        self.assertEqual(len(result["index_sync_errors"]), 2)
+        self.assertEqual([row["content"] for row in self.store.get_all()], ["Replacement"])
+        self.store.reconcile_index()
+        self.assertEqual(collection.ids, result["created_ids"])
+
+    def test_consolidation_rejects_missing_source_without_partial_deletion(self):
+        old = self.store.add("Original")
+        with self.assertRaisesRegex(ValueError, "source memory changed"):
+            self.store.apply_consolidation([old, "already-deleted"], [])
+        self.assertEqual([row["id"] for row in self.store.get_all()], [old])
+
     def setUp(self):
         self.db = Database(path=":memory:")
         self.vector_store = FakeVectorStore()
@@ -82,6 +176,33 @@ class MemoryStoreTests(unittest.TestCase):
 
         self.assertEqual(results, ["Relevant memory"])
 
+    def test_get_relevant_uses_bounded_fallback_when_strict_matches_are_empty(self):
+        self.store.add("Nearest memory")
+        self.store.add("Second-nearest memory")
+        self.store.add("Too-distant memory")
+        self.vector_store.semantic_collection.distances = [0.72, 0.81, 0.91]
+
+        results = self.store.get_relevant("broad profile question", limit=3)
+
+        self.assertEqual(results, ["Nearest memory", "Second-nearest memory"])
+
+    def test_get_relevant_does_not_use_fallback_when_strict_match_exists(self):
+        self.store.add("Strict match")
+        self.store.add("Fallback-only match")
+        self.vector_store.semantic_collection.distances = [0.69, 0.75]
+
+        results = self.store.get_relevant("specific question", limit=2)
+
+        self.assertEqual(results, ["Strict match"])
+
+    def test_get_relevant_rejects_candidates_beyond_fallback_ceiling(self):
+        self.store.add("Unrelated memory")
+        self.vector_store.semantic_collection.distances = [0.86]
+
+        results = self.store.get_relevant("unrelated question", limit=1)
+
+        self.assertEqual(results, [])
+
     def test_get_stale_with_zero_days_returns_all_memories(self):
         self.store.add("Memory A", category="general", importance=1)
         self.store.add("Memory B", category="general", importance=2)
@@ -102,6 +223,64 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(deleted_count, 1)
         self.assertEqual(self.store.get_all(limit=10), [])
         self.assertEqual(self.vector_store.semantic_collection.deleted_ids, [memory_id])
+
+    def test_failed_index_write_reports_canonical_save_and_reconciliation_repairs_it(self):
+        with patch.object(self.store.collection, "upsert", side_effect=RuntimeError("offline")):
+            with self.assertRaises(MemoryIndexSyncError) as raised:
+                self.store.add("Saved canonically", category="fact", importance=2)
+
+        self.assertEqual(raised.exception.operation, "upsert")
+        self.assertEqual(raised.exception.canonical_changes, 1)
+        canonical = self.store.list_for_inspection()
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(canonical[0]["content"], "Saved canonically")
+        self.assertEqual(self.store.collection.ids, [])
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report, {
+            "canonical_count": 1,
+            "upserted_count": 1,
+            "removed_count": 0,
+        })
+        self.assertEqual(self.store.collection.ids, [canonical[0]["id"]])
+
+    def test_reconciliation_updates_canonical_entries_and_removes_orphans(self):
+        memory_id = self.store.add("Current content", category="fact", importance=3)
+        self.store.collection.upsert(
+            ids=[memory_id, "orphan"],
+            documents=["Stale content", "No canonical row"],
+            metadatas=[
+                {"category": "old", "importance": 1},
+                {"category": "old", "importance": 1},
+            ],
+        )
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report["removed_count"], 1)
+        self.assertEqual(self.store.collection.ids, [memory_id])
+        self.assertEqual(self.store.collection.docs, ["Current content"])
+        self.assertEqual(
+            self.store.collection.metadatas,
+            [{"category": "fact", "importance": 3}],
+        )
+
+    def test_failed_index_delete_reports_committed_canonical_deletion(self):
+        memory_id = self.store.add("Delete canonically")
+
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("offline")):
+            with self.assertRaises(MemoryIndexSyncError) as raised:
+                self.store.delete_memories([memory_id])
+
+        self.assertEqual(raised.exception.operation, "delete")
+        self.assertEqual(raised.exception.canonical_changes, 1)
+        self.assertEqual(self.store.list_for_inspection(), [])
+        self.assertIn(memory_id, self.store.collection.ids)
+
+        report = self.store.reconcile_index()
+        self.assertEqual(report["removed_count"], 1)
+        self.assertEqual(self.store.collection.ids, [])
 
     def test_inspection_returns_actual_schema_in_stable_order_without_mutation(self):
         rows = [
@@ -153,6 +332,85 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_inspection_empty_storage_returns_empty_list(self):
         self.assertEqual(self.store.list_for_inspection(), [])
+
+
+class ReconcileIndexesCommandTests(unittest.TestCase):
+    def test_cli_dispatches_reconciliation_and_prints_json_report(self):
+        report = {
+            "semantic": {"canonical_count": 1, "upserted_count": 1, "removed_count": 0},
+            "episodic": {"canonical_count": 2, "upserted_count": 2, "removed_count": 1},
+        }
+        config = SimpleNamespace(logging={})
+
+        with patch.object(main_module, "Config", return_value=config), patch.object(
+            main_module, "setup_logging_from_config"
+        ), patch.object(
+            main_module, "reconcile_indexes", return_value=report
+        ) as reconcile, patch("builtins.print") as print_output:
+            exit_code = main_module.main(["reconcile-indexes"])
+
+        self.assertEqual(exit_code, 0)
+        reconcile.assert_called_once_with(config)
+        print_output.assert_called_once_with(
+            '{"episodic": {"canonical_count": 2, "removed_count": 1, '
+            '"upserted_count": 2}, "semantic": {"canonical_count": 1, '
+            '"removed_count": 0, "upserted_count": 1}}'
+        )
+
+    def test_command_reconciles_both_indexes_without_building_orchestrator(self):
+        connection = Mock()
+        database = SimpleNamespace(conn=connection, close=Mock())
+        semantic = Mock()
+        semantic.reconcile_index.return_value = {
+            "canonical_count": 2,
+            "upserted_count": 2,
+            "removed_count": 1,
+        }
+        episodic = Mock()
+        episodic.reconcile_index.return_value = {
+            "canonical_count": 4,
+            "upserted_count": 4,
+            "removed_count": 0,
+        }
+        config = SimpleNamespace(
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+        )
+
+        with patch.object(main_module, "Database", return_value=database), patch.object(
+            main_module, "VectorStore", return_value=object()
+        ), patch.object(
+            main_module, "MemoryStore", return_value=semantic
+        ), patch.object(
+            main_module, "ChatHistoryStore", return_value=episodic
+        ):
+            report = main_module.reconcile_indexes(config)
+
+        self.assertEqual(report["semantic"]["removed_count"], 1)
+        self.assertEqual(report["episodic"]["canonical_count"], 4)
+        semantic.reconcile_index.assert_called_once_with()
+        episodic.reconcile_index.assert_called_once_with()
+        database.close.assert_called_once_with()
+
+    def test_command_closes_database_when_reconciliation_fails(self):
+        connection = Mock()
+        database = SimpleNamespace(conn=connection, close=Mock())
+        config = SimpleNamespace(
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+        )
+        semantic = Mock()
+        semantic.reconcile_index.side_effect = RuntimeError("index unavailable")
+
+        with patch.object(main_module, "Database", return_value=database), patch.object(
+            main_module, "VectorStore", return_value=object()
+        ), patch.object(
+            main_module, "MemoryStore", return_value=semantic
+        ), patch.object(main_module, "ChatHistoryStore", return_value=Mock()):
+            with self.assertRaisesRegex(RuntimeError, "index unavailable"):
+                main_module.reconcile_indexes(config)
+
+        database.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

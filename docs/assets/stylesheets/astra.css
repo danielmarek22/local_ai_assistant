@@ -208,6 +208,49 @@
   text-align: center;
 }
 
+.astra-art-placeholder {
+  margin: 2.8rem 0;
+}
+
+.astra-art-placeholder__frame {
+  display: grid;
+  min-height: 15rem;
+  place-content: center;
+  gap: 0.65rem;
+  padding: 2rem;
+  border: 2px dashed rgba(99, 218, 255, 0.34);
+  border-radius: 1.1rem;
+  background:
+    radial-gradient(circle at 22% 20%, rgba(57, 216, 255, 0.13), transparent 32%),
+    radial-gradient(circle at 78% 80%, rgba(167, 123, 255, 0.14), transparent 36%),
+    var(--astra-panel);
+  text-align: center;
+}
+
+.astra-art-placeholder__frame span {
+  color: var(--md-accent-fg-color);
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.astra-art-placeholder__frame strong {
+  font-size: 1.25rem;
+}
+
+.astra-art-placeholder__frame code {
+  justify-self: center;
+  padding: 0.32rem 0.65rem;
+  border-radius: 999px;
+}
+
+.astra-art-placeholder figcaption {
+  margin-top: 0.55rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
 .astra-site-illustration--hero img {
   width: 100%;
   height: auto;

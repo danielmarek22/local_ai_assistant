@@ -61,7 +61,9 @@ Restart Astra after changing the voice state or engine. The model and voice are 
 1. Watch startup logs for the PocketTTS model and voice-state messages.
 2. Send a short message in the browser.
 3. Confirm Astra returns text and the browser plays the generated speech.
-4. Inspect `static/audio/` if text succeeds but no audio is heard.
+4. Inspect `static/audio/` if text succeeds but no audio is heard. Generated UUID-named
+   `.wav` files are cleared whenever Astra starts; reference files with other names are
+   preserved.
 
 ## Troubleshooting
 

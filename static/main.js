@@ -96,7 +96,18 @@ uiManager.onScreenCapturePolicyChange(() => {
 });
 
 const handlers = {
-    onSessionInit: ({ serverInstanceId, sessionId, gestureCatalog, outfitCatalog, currentOutfit, sessionKind, localHumanDisplayName, localAssistantDisplayName }) => {
+    onSessionInit: ({
+        serverInstanceId,
+        sessionId,
+        gestureCatalog,
+        outfitCatalog,
+        currentOutfit,
+        sessionKind,
+        localHumanDisplayName,
+        localAssistantDisplayName,
+        assistantState: restoredAssistantState,
+        activeTurnId,
+    }) => {
         currentServerInstanceId = serverInstanceId;
         currentSessionId = sessionId;
         currentSessionKind = sessionKind || 'direct';
@@ -108,6 +119,9 @@ const handlers = {
         void knowledgeInspector.setActiveSession(sessionId);
         avatarManager.setGestureCatalog(gestureCatalog || {});
         avatarManager.setOutfitCatalog(outfitCatalog || {}, currentOutfit);
+        assistantState = restoredAssistantState || 'idle';
+        avatarManager.setActiveTurn(activeTurnId || null);
+        syncAssistantPresentation();
         persistSessionContext();
     },
     onState: (state, turnId = null) => {
@@ -525,8 +539,10 @@ uiManager.onReflect(async () => {
     try {
         const result = await client.reflectMemories(0);
         uiManager.setReflectStatus(
-            `Dream complete: ${result.deleted_count} deleted, ${result.created_count} created.`,
-            'success',
+            result.index_sync_complete === false
+                ? `Dream saved: ${result.deleted_count} deleted, ${result.created_count} created. Memory search needs repair before these changes are fully searchable.`
+                : `Dream complete: ${result.deleted_count} deleted, ${result.created_count} created.`,
+            result.index_sync_complete === false ? 'error' : 'success',
         );
     } catch (error) {
         console.error(error);
@@ -585,7 +601,7 @@ uiManager.onHistoryDelete(async (sessionId) => {
     uiManager.setHistoryStatus('');
 
     try {
-        await client.deleteSession(sessionId);
+        const deletion = await client.deleteSession(sessionId);
 
         if (sessionId === currentSessionId) {
             clearSessionContext();
@@ -593,6 +609,12 @@ uiManager.onHistoryDelete(async (sessionId) => {
         }
 
         await refreshHistory();
+        if (!deletion.cleanup_complete) {
+            uiManager.setHistoryStatus(
+                'Conversation deleted, but some stored files or search data could not be cleaned up.',
+                'warning'
+            );
+        }
     } catch (error) {
         console.error(error);
         uiManager.setHistoryStatus('Failed to delete that conversation.', 'error');

@@ -10,30 +10,34 @@ The roadmap is a dependency map, not a promise carved into an ancient GPU. Astra
 ```mermaid
 flowchart TD
     M0[0 · Docs and stabilization]
-    M1[1 · Embodiment polish]
-    M2[2 · Information access]
-    M3[3 · Planner and agency]
-    M4[4 · Safe agency]
-    M5[5 · Threaded conversations]
-    M6[6 · Mindcraft v2]
-    M7[7 · Perception]
-    M8[8 · Identity and social]
-    M9[9 · Executive Astra]
+    M1[1 · Runtime profiles]
+    M2[2 · Embodiment + 3D world]
+    M3[3 · Information access]
+    M4[4 · Planner and agency]
+    M5[5 · Safe agency]
+    M6[6 · Threaded conversations]
+    M7[7 · Mindcraft v2]
+    M8[8 · Integration ecosystem]
+    M9[9 · Perception]
+    M10[10 · Identity and social]
+    M11[11 · Executive Astra]
     R[∞ · Research hell]
 
     M0 --> M1
-    M0 --> M2
-    M0 --> M3
+    M1 --> M2
     M1 --> M3
-    M2 --> M3
+    M1 --> M4
+    M2 --> M4
     M3 --> M4
-    M3 --> M5
+    M4 --> M5
     M4 --> M6
-    M4 --> M7
-    M5 --> M8
-    M6 --> M8
+    M5 --> M7
+    M5 --> M9
+    M6 --> M10
     M7 --> M8
-    M8 --> M9 --> R
+    M8 --> M10
+    M9 --> M10
+    M10 --> M11 --> R
 ```
 
 <div class="astra-roadmap" markdown>
@@ -55,21 +59,91 @@ Make the system understandable and dependable before feeding it additional tenta
 
 **Done when:** an interrupted or restored conversation behaves predictably, failures are visible rather than silent, and future-you can find the right subsystem without an archaeological expedition.
 
-## 1 · Embodiment polish
+</div>
 
-Make Astra feel present before making her dramatically more capable. Voice, expression, motion, and timing should support the conversation instead of looking like several unrelated demos sharing one browser tab.
+<figure class="astra-site-illustration">
+  <img src="../assets/images/astra-roadmap.png" alt="Astra reconnects glowing cables under a desk beside a roadmap claiming everything is under control">
+  <figcaption>Documentation and stabilization: everything is 100% under control.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 1 · Runtime profiles and demo mode
+
+Separate Astra's operating profiles cleanly. One profile provides a deliberately boring, safe way to show the real project in interviews and portfolio recordings; another turns the existing avatar frontend into a presentation layer for an external agent. These should be explicit runtime configurations—not a spreading colony of mode checks.
+
+### Demo / professional profile
+
+**The work**
+
+- provide a clean web-based, text-only interface without the VRM avatar;
+- use a neutral system prompt and a fresh disposable database;
+- exclude personal memories, beliefs, and private conversation history;
+- expose a curated, low-risk tool set and safe sample tasks;
+- make reset-to-clean-state immediate and reliable;
+- optionally provide scripted showcase scenarios for research, planning, beliefs, and asynchronous work;
+- exercise the real Planner, belief, tool, and runtime architecture underneath the professional presentation.
+
+### Relay / frontend-only profile
+
+**The work**
+
+- accept normalized messages and presentation cues from an external agent;
+- render the external agent through Astra's existing chat, voice, expression, animation, and avatar frontend;
+- keep Astra's local Planner, memory, beliefs, and tool execution disabled unless a capability is deliberately delegated;
+- preserve the external source and conversation identity instead of recording relayed output as native Astra reasoning;
+- define a small transport contract for text, streaming state, emotion, speech, interruption, and errors;
+- make connection loss, cancellation, and reconnection visible and predictable;
+- clearly indicate when the frontend is operating as a relay rather than the full local assistant.
+
+**Done when:** the project can start in either a clean professional demo profile or a frontend-only relay profile, and neither mode can accidentally inherit Astra's private state or ambiguous ownership of an external agent's messages.
+
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 1</span>
+    <strong>Runtime Profiles</strong>
+    <code>astra-demo-mode.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra operates a suspiciously serious switchboard labelled Personal, Demo, and Relay while hiding the cat ears just out of frame.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 2 · Embodiment and 3D environment
+
+Make Astra feel present before making her dramatically more capable. Voice, expression, motion, timing, and a persistent 3D space should behave as one embodiment system instead of several unrelated demos sharing a browser tab.
 
 **The work**
 
 - smooth speech playback, interruption, and sentence timing;
 - coordinate expressions, gestures, gaze, and speaking state;
 - make outfit and avatar controls semantic rather than asset-specific;
+- create a loadable 3D environment with explicit scene, lighting, camera, and coordinate ownership;
+- place and move Astra reliably within the environment rather than treating the avatar as a fixed overlay;
+- add semantic environment locations and interactions such as standing, sitting, looking at, and moving toward scene anchors;
+- keep environment assets replaceable without coupling cognitive code to mesh names or file paths;
+- define loading, performance, and missing-asset fallbacks for the scene;
 - improve loading, reconnecting, and silent-state feedback;
 - keep embodiment optional so text-only operation remains healthy.
 
-**Done when:** ordinary conversation feels coherent in voice and motion, and turning the avatar off does not break the assistant underneath it.
+**Done when:** ordinary conversation feels coherent in voice and motion, Astra can inhabit a stable replaceable 3D scene, and turning the avatar or environment off does not break the assistant underneath it.
 
-## 2 · Information access
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 2</span>
+    <strong>Embodiment and 3D Environment</strong>
+    <code>astra-embodiment.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra assembles her own tiny apartment from floating 3D assets while rehearsing expressions in an increasingly judgmental mirror.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 3 · Information access
 
 Give Astra reliable ways to look things up without confusing retrieved text with truth. Search should be inspectable, source-aware, bounded, and cheap enough to use deliberately.
 
@@ -85,14 +159,18 @@ Give Astra reliable ways to look things up without confusing retrieved text with
 
 </div>
 
-<figure class="astra-site-illustration">
-  <img src="../assets/images/astra-roadmap.png" alt="Astra reconnects glowing cables under a desk beside a roadmap claiming everything is under control">
-  <figcaption>Documentation and stabilization: everything is 100% under control.</figcaption>
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 3</span>
+    <strong>Information Access</strong>
+    <code>astra-information-access.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra follows a trail of citations through a library while refusing to eat an entire webpage.</figcaption>
 </figure>
 
 <div class="astra-roadmap" markdown>
 
-## 3 · Planner and agency
+## 4 · Planner and agency
 
 Move from “the model suggested a tool-shaped sentence” to a real planning contract. Astra should choose from declared capabilities, observe results, revise a plan, and know when to stop.
 
@@ -106,7 +184,20 @@ Move from “the model suggested a tool-shaped sentence” to a real planning co
 
 **Done when:** a multi-step request can finish, fail, or ask for help without inventing a success or wandering forever.
 
-## 4 · Safe agency
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 4</span>
+    <strong>Planner and Agency</strong>
+    <code>astra-planner.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra commands a conspiracy board whose red string has somehow become executable.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 5 · Safe agency
 
 Capability without boundaries is merely an exciting incident report. This milestone makes consequential actions explicit, reviewable, and limited by application-owned policy.
 
@@ -120,7 +211,20 @@ Capability without boundaries is merely an exciting incident report. This milest
 
 **Done when:** the model cannot grant itself permission, a stopped action stays stopped, and it is possible to explain exactly what Astra did and why.
 
-## 5 · Threaded conversation architecture
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 5</span>
+    <strong>Safe Agency</strong>
+    <code>astra-safe-agency.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra approaches a large red button while a clipboard, three warning signs, and future-you watch nervously.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 6 · Threaded conversation architecture
 
 Replace a collection of isolated, OpenAI-style chat sessions with one canonical conversational continuity and optional work threads. Detailed task work gets room to breathe without flooding Astra's primary history forever.
 
@@ -152,7 +256,20 @@ flowchart LR
 
 **Done when:** Astra has one unmistakable primary continuity, a substantial task can run in a scoped thread, and its outcome returns as compact state without dragging the entire working transcript into every future prompt.
 
-## 6 · Mindcraft v2
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 6</span>
+    <strong>Threaded Conversations</strong>
+    <code>astra-threaded-conversations.png</code>
+  </div>
+  <figcaption>Suggested scene: one Astra calmly holds the main thread while several chaotic work threads orbit her like yarn.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 7 · Mindcraft v2
 
 Turn the Minecraft experiment into a first-class embodied integration rather than a particularly elaborate remote-control trick. The world becomes a test environment for planning, feedback, interruption, and consequences.
 
@@ -175,7 +292,37 @@ Turn the Minecraft experiment into a first-class embodied integration rather tha
 
 <div class="astra-roadmap" markdown>
 
-## 7 · Perception
+## 8 · Integration ecosystem
+
+Turn one-off integrations into a reusable edge around Astra. Mindcraft provides the first serious environment test; this milestone generalizes the lessons into adapters for additional games, services, and external applications.
+
+**The work**
+
+- define a transport-neutral adapter contract for context, capabilities, actions, events, and results;
+- keep game- and service-specific behavior outside Astra's cognitive core;
+- discover and register integrations without hardcoding them into the Planner;
+- map external actions onto Astra's validated capability and approval model;
+- standardize connection, cancellation, timeout, recovery, and session lifecycle behavior;
+- evaluate compatibility with open-source integration ecosystems, including published Neuro game integrations;
+- reuse or adapt existing integrations where their architecture and licensing make that practical;
+- document which state is transient environment context and which information may become durable memory or belief.
+
+**Done when:** a new game or service can be connected through a documented adapter boundary, reuse an existing open-source integration where appropriate, and fail without leaking environment-specific machinery into Astra's core.
+
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 8</span>
+    <strong>Integration Ecosystem</strong>
+    <code>astra-integrations.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra confidently plugs an alarming pile of incompatible game controllers into one universal adapter.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 9 · Perception
 
 Let Astra notice useful changes without continuously throwing expensive vision models at the universe. Perception should create compact, timestamped state that downstream systems can reason about.
 
@@ -189,7 +336,20 @@ Let Astra notice useful changes without continuously throwing expensive vision m
 
 **Done when:** Astra can notice a relevant change, explain what signal it came from, and ignore an unchanged room without melting the GPU.
 
-## 8 · Identity and social
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 9</span>
+    <strong>Perception</strong>
+    <code>astra-perception.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra examines a wall of screens, notices one pixel change, and pointedly ignores the other 8,294,399.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 10 · Identity and social
 
 Make identity a formal part of the system. Astra should understand who is speaking, which conversation owns which context, and where personal memories or beliefs may safely appear.
 
@@ -203,7 +363,20 @@ Make identity a formal part of the system. Astra should understand who is speaki
 
 **Done when:** Astra can participate in a multi-person conversation without mixing up speakers, leaking private context, or rewriting everyone into one suspiciously agreeable person.
 
-## 9 · Executive Astra
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 10</span>
+    <strong>Identity and Social</strong>
+    <code>astra-identity-social.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra hosts model play date while carefully attaching name tags and provenance labels to everyone.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
+
+## 11 · Executive Astra
 
 Give Astra a useful long horizon: projects, commitments, follow-ups, and gentle initiative. “Executive” means helping the user keep direction—not acquiring a tiny suit and scheduling a board meeting, although neither is ruled out.
 
@@ -216,6 +389,19 @@ Give Astra a useful long horizon: projects, commitments, follow-ups, and gentle 
 - preserve a clear distinction between a suggestion and an authorized action.
 
 **Done when:** Astra can help maintain a real project over time, surface the right unfinished thread, and remain quiet when there is nothing useful to add.
+
+</div>
+
+<figure class="astra-art-placeholder">
+  <div class="astra-art-placeholder__frame">
+    <span>ART SLOT · MILESTONE 11</span>
+    <strong>Executive Astra</strong>
+    <code>astra-executive.png</code>
+  </div>
+  <figcaption>Suggested scene: Astra wears the tiny suit, chairs the tiny board meeting, and somehow has the only sensible calendar.</figcaption>
+</figure>
+
+<div class="astra-roadmap" markdown>
 
 ## ∞ · Research hell
 

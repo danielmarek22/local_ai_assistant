@@ -10,7 +10,7 @@ from app.integrations.contracts import (
     ToolResult,
     ToolSpec,
 )
-from app.services.memory_action_handler import MemoryActionHandler
+from app.memory.action_handler import MemoryActionHandler
 from app.tools.bash_execution import BashExecutionTool
 from app.tools.web_search import WebSearchTool
 
@@ -79,12 +79,12 @@ class MemoryIntegration:
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "The fact or instruction to persist in memory.",
+                            "description": "The durable event, decision, instruction, or narrative to persist.",
                             "minLength": 1,
                         },
                         "category": {
                             "type": "string",
-                            "description": "Optional memory category, such as general or preference.",
+                            "description": "Optional memory category, such as general, decision, or event.",
                         },
                         "importance": {
                             "type": "integer",

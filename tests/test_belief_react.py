@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from app.beliefs import (
     BeliefRepository,
@@ -22,7 +23,7 @@ from app.integrations import (
 )
 from app.integrations.beliefs import BeliefIntegration
 from app.integrations.builtins import MemoryIntegration
-from app.services.tool_executor import ToolExecutor
+from app.core.tool_executor import ToolExecutor
 from app.storage.database import Database
 
 
@@ -164,6 +165,36 @@ class ReactBeliefToolTests(unittest.TestCase):
             )
         ), [])
 
+    def test_polish_possessive_exposes_tool_and_persists_for_actual_sender(self):
+        text = "Moje koty to Luna i Oreo."
+        authoritative = turn(text=text)
+        context = self.context(authoritative)
+        self.assertEqual(context.prepared_belief_turn.grounded_subject_references(), ("Moje",))
+        self.assertEqual(len(self.registry.get_native_tools(invocation_context=context)), 1)
+        payload = assertion(text, "Luna and Oreo")
+        payload["assertions"][0].update(
+            subject_reference="Moje", predicate="pet_names",
+            value=["Luna", "Oreo"], expiry_policy="NO_AUTOMATIC_EXPIRY",
+        )
+        result = self.registry.invoke(ToolCall(CapabilityId("beliefs", "update"), payload), context)
+        self.assertEqual(result.status.value, "success", result.content)
+        stored = self.repository.get_visible("astra", "session-a", now=NOW)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].subject_id, authoritative.sender_id)
+        self.assertEqual(stored[0].value, ["Luna", "Oreo"])
+
+    def test_polish_conjunction_neither_exposes_nor_authorizes_a_self_report(self):
+        text = "Przecież już dużo razy o nich wspominałem, Luna i Oreo."
+        authoritative = turn(text=text)
+        context = self.context(authoritative)
+        self.assertEqual(context.prepared_belief_turn.grounded_subject_references(), ())
+        self.assertEqual(self.registry.get_native_tools(invocation_context=context), [])
+        payload = assertion(text)
+        payload["assertions"][0]["subject_reference"] = "i"
+        result = self.registry.invoke(ToolCall(CapabilityId("beliefs", "update"), payload), context)
+        self.assertEqual(result.status.value, "error")
+        self.assertEqual(self.repository.get_visible("astra", "session-a", now=NOW), [])
+
     def test_eligibility_accepts_supported_participants_and_rejects_runtime_sources(self):
         eligible = (
             turn(),
@@ -286,6 +317,83 @@ class ReactBeliefToolTests(unittest.TestCase):
         self.assertFalse(self.repository.has_application(
             "astra", 1, REACT_TOOL_BELIEF_VERSION
         ))
+
+    def test_placeholder_invalidation_rejects_before_repository_and_corrected_batch_applies_once(self):
+        authoritative = turn()
+        context = self.context(authoritative)
+        self.assertEqual(context.prepared_belief_turn.permitted_invalidation_ids, frozenset())
+        self.assertIn("invalidations: []", context.prepared_belief_turn.tool_catalog_message())
+        for invalidation in (
+            {"target_belief_id": None, "evidence_excerpt": authoritative.user_text},
+            {"target_belief_id": "", "evidence_excerpt": authoritative.user_text},
+            {"evidence_excerpt": authoritative.user_text},
+        ):
+            with self.subTest(invalidation=invalidation):
+                payload = assertion()
+                payload["invalidations"] = [invalidation]
+                with patch.object(self.repository, "has_application") as accessed:
+                    rejected = self.registry.invoke(
+                        ToolCall(CapabilityId("beliefs", "update"), payload), context,
+                    )
+                    accessed.assert_not_called()
+                self.assertEqual(rejected.status.value, "error")
+                self.assertEqual(rejected.diagnostics["error_code"], "NATIVE_SCHEMA_VALIDATION")
+                self.assertFalse(rejected.diagnostics["repository_accessed"])
+                self.assertIn("invalidations: []", rejected.content)
+                self.assertEqual(self.repository.get_visible("astra", "session-a", now=NOW), [])
+                self.assertFalse(self.repository.has_application("astra", 1, REACT_TOOL_BELIEF_VERSION))
+        corrected = ToolCall(CapabilityId("beliefs", "update"), assertion())
+        self.assertEqual(self.registry.invoke(corrected, context).status.value, "success")
+        self.assertEqual(self.registry.invoke(corrected, context).status.value, "success")
+        self.assertEqual(len(self.repository.get_visible("astra", "session-a", now=NOW)), 1)
+
+    def test_null_invalidation_array_has_empty_array_repair_guidance(self):
+        payload = assertion()
+        payload["invalidations"] = None
+        rejected = self.invoke(turn(), payload)
+        self.assertEqual(rejected.status.value, "error")
+        self.assertFalse(rejected.diagnostics["repository_accessed"])
+        self.assertIn("invalidations: []", rejected.content)
+
+    def test_invented_target_does_not_silently_apply_other_assertions(self):
+        payload = assertion()
+        payload["invalidations"] = [{"target_belief_id": "invented", "evidence_excerpt": turn().user_text}]
+        rejected = self.invoke(turn(), payload)
+        self.assertEqual(rejected.status.value, "error")
+        self.assertEqual(rejected.diagnostics["category"], "frozen_catalog_validation")
+        self.assertEqual(self.repository.get_visible("astra", "session-a", now=NOW), [])
+        self.assertFalse(self.repository.has_application("astra", 1, REACT_TOOL_BELIEF_VERSION))
+
+    def test_existing_correction_pass_receives_repair_hint_and_applies_complete_batch(self):
+        from app.core.response_generator import ResponseGenerator
+
+        authoritative = turn()
+        context = self.context(authoritative)
+        phases = []
+
+        def chat(**kwargs):
+            phases.append(kwargs["generation_phase"])
+            if len(phases) == 1:
+                payload = assertion()
+                payload["invalidations"] = [{"target_belief_id": None, "evidence_excerpt": authoritative.user_text}]
+            elif len(phases) == 2:
+                observation = next(m["content"] for m in reversed(kwargs["messages"]) if m["role"] == "tool")
+                self.assertIn("invalidations.0.target_belief_id", observation)
+                self.assertIn("invalidations: []", observation)
+                self.assertEqual(self.repository.get_visible("astra", "session-a", now=NOW), [])
+                self.assertIs(kwargs["think_override"], False)
+                payload = assertion()
+            else:
+                return {"content": "The update was applied."}
+            return {"tool_calls": [{"function": {"name": "beliefs__update", "arguments": payload}}]}
+
+        generator = ResponseGenerator(SimpleNamespace(chat_buffered=chat), ToolExecutor(self.registry), Mock())
+        list(generator.stream_late_routed_response(
+            authoritative.session_id, [], authoritative.user_text,
+            authoritative_turn=authoritative, prepared_belief_turn=context.prepared_belief_turn,
+        ))
+        self.assertEqual(phases, ["initial", "correction", "continuation"])
+        self.assertEqual(len(self.repository.get_visible("astra", "session-a", now=NOW)), 1)
 
     def test_multiple_valid_assertions_commit_as_one_atomic_application(self):
         authoritative = turn(text="I am testing Astra and I am in Warsaw")

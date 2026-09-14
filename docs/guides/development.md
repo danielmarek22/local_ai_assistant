@@ -34,8 +34,54 @@ Python tests use `unittest`, in-memory SQLite, and lightweight fakes for externa
 Run the full Python suite:
 
 ```bash
-venv_app/bin/python -m unittest discover -s tests -v
+venv_app/bin/python -m pip install -r requirements-test.txt
+venv_app/bin/python -m unittest discover -s tests -v --buffer
 ```
+
+Run all browser-side module tests with Node.js 20:
+
+```bash
+node --test tests/*.mjs
+```
+
+CI runs the Python suite on 3.10 and 3.12 using the lightweight, exact-pinned
+`requirements-test.txt` set. The full exact-pinned runtime in `requirements.txt`
+composes core, media, and integration manifests; those production dependencies are not
+installed by unit-test jobs.
+
+The test runner buffers stdout and stderr for successful tests so expected fault-injection
+logs do not obscure the result. If a test fails, its captured output is printed with the
+failure automatically.
+
+Tests that exercise the real logging configuration should do so in an isolated process,
+or call `app.logging.reset_logging()` during cleanup. The reset closes only handlers
+installed by ASTRA, restores the previous root and trace logger levels, and permits a
+fresh configuration. It is not part of normal application shutdown because logging is
+owned by the process rather than one application lifespan.
+
+The initial lint gate intentionally covers only high-confidence syntax errors and
+undefined names, keeping adoption separate from broad formatting cleanup:
+
+```bash
+venv_app/bin/ruff check --select E9,F63,F7,F82 app tests main.py
+```
+
+## Incremental type checks
+
+CI runs strict mypy checks on both supported Python versions. `mypy.ini` lists the
+initial scope: session IDs, turn coordination, session deletion guards, vector
+candidate validation, and the speech interface, delivery queue, and per-turn speech stream. Run it locally:
+
+```bash
+venv_app/bin/python -m mypy --config-file mypy.ini
+```
+
+Imported modules outside this list supply type information but their errors are not
+reported. This is an incremental gate, not whole-application type coverage; callers
+and backend implementations outside the list are not independently checked. Expand
+the list as boundaries gain explicit contracts, keeping strict checks enabled rather
+than adding blanket error suppressions. Runtime validation and regression tests remain
+necessary for external data and asynchronous behavior.
 
 ## Documentation expectations
 

@@ -1,7 +1,13 @@
 import { CONFIG } from './config.js';
-import { marked } from 'https://cdn.jsdelivr.net/npm/marked@13.0.2/lib/marked.esm.js';
-import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.1.6/+esm';
-import { extractBase64Payload, extractImageFilesFromDataTransfer, insertTextAtCursor, isImageFile } from './attachment-utils.mjs';
+import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
+import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
+import {
+    extractBase64Payload,
+    extractImageFilesFromDataTransfer,
+    insertTextAtCursor,
+    isImageFile,
+    repairImageBase64Payload,
+} from './attachment-utils.mjs';
 
 marked.setOptions({
     gfm: true,
@@ -529,9 +535,9 @@ export class UIManager {
             senderDisplayName: this.localHumanDisplayName,
             senderType: 'human',
             inputSource: 'local_voice',
+            awaitingMessageId: true,
         });
         msgDiv.classList.add('from-stt');
-        msgDiv.dataset.awaitingMessageId = 'true';
     }
 
     // ============================================================
@@ -766,7 +772,10 @@ export class UIManager {
 
             reader.onload = () => {
                 const result = typeof reader.result === 'string' ? reader.result : '';
-                const base64Data = extractBase64Payload(result);
+                const base64Data = repairImageBase64Payload(
+                    extractBase64Payload(result),
+                    file.type,
+                );
                 if (!base64Data) {
                     reject(new Error('Image did not produce base64 data'));
                     return;
@@ -1185,12 +1194,12 @@ export class UIManager {
     appendUserMessage(text, attachments = []) {
         this.currentThinkingMessageDiv = null;
         this.currentAiMessageDiv = null;
-        const msgDiv = this.createMessageDiv('user', text, attachments, {
+        this.createMessageDiv('user', text, attachments, {
             senderDisplayName: this.localHumanDisplayName,
             senderType: 'human',
             inputSource: 'local_text',
+            awaitingMessageId: true,
         });
-        msgDiv.dataset.awaitingMessageId = 'true';
     }
 
     appendRelayMessage(text, senderDisplayName, senderType) {
@@ -1200,6 +1209,7 @@ export class UIManager {
             senderDisplayName,
             senderType,
             inputSource: 'manual_relay',
+            awaitingMessageId: true,
         });
     }
 
@@ -1242,6 +1252,8 @@ export class UIManager {
             this.activeRetryMessageId = String(messageId);
             return;
         }
+        // Reconnect can replay an acknowledgement already applied to this history.
+        if (this.findUserMessageById(messageId)) return;
         const message = this.chatHistory.querySelector('.message.user[data-awaiting-message-id="true"]');
         if (!message) return;
         message.dataset.messageId = String(messageId);
@@ -1462,6 +1474,9 @@ export class UIManager {
         msgDiv.dataset.senderType = senderType;
         msgDiv.dataset.inputSource = inputSource;
         if (metadata.messageId) msgDiv.dataset.messageId = String(metadata.messageId);
+        if (metadata.awaitingMessageId && !metadata.messageId) {
+            msgDiv.dataset.awaitingMessageId = 'true';
+        }
         if (metadata.retryableFailure?.message) {
             msgDiv.dataset.retryError = metadata.retryableFailure.message;
             msgDiv.dataset.retryAttempts = String(metadata.retryableFailure.attempts || 1);
@@ -1641,6 +1656,7 @@ export class UIManager {
                 senderType: message.dataset.senderType || '',
                 inputSource: message.dataset.inputSource || '',
                 messageId: Number(message.dataset.messageId) || null,
+                awaitingMessageId: message.dataset.awaitingMessageId === 'true',
                 retryableFailure: message.dataset.retryError ? {
                     message: message.dataset.retryError,
                     attempts: Number(message.dataset.retryAttempts) || 1,

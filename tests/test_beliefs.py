@@ -28,8 +28,8 @@ from app.core.conversation import InputSource, SenderType
 from app.core.orchestrator_factory import _build_belief_components
 from app.core.turn_completion import CompletedUserTurn
 from app.llm.ollama_stream import OllamaClient
-from app.services.context_builder import ContextBuilder
-from app.services.turn_finalizer import TurnFinalizer
+from app.core.context_builder import ContextBuilder
+from app.core.turn_finalizer import TurnFinalizer
 from app.storage.database import Database
 from app.beliefs.models import (
     BeliefMutation,
@@ -2271,6 +2271,9 @@ class FakeHistory:
     def get_recent(self, session_id=None, limit=10):
         return self.rows[-limit:]
 
+    def get_summary_batch(self, session_id, after_message_id, limit):
+        return [row for row in self.rows if row["id"] > after_message_id and row["role"] in ("user", "assistant")][:limit]
+
 
 class FakeSummaryStore:
     def get(self, _session_id):
@@ -2281,7 +2284,7 @@ class FakeSummaryStore:
 
 
 class FakeSummarizer:
-    def summarize(self, _messages):
+    def summarize(self, _messages, *, previous_summary=None):
         raise AssertionError("summary should not run")
 
 

@@ -1,5 +1,36 @@
 import { CONFIG } from './config.js';
 
+export const CLIENT_FRAME_TYPES = Object.freeze([
+    'relay_message',
+    'retry_message',
+    'screen_frame',
+    'tool_approval_response',
+    'user_attached_frame',
+    'user_config',
+    'user_message',
+    'webcam_frame',
+]);
+
+export const SERVER_FRAME_TYPES = Object.freeze([
+    'assistant_animation',
+    'assistant_audio',
+    'assistant_chunk',
+    'assistant_end',
+    'assistant_expression',
+    'assistant_outfit',
+    'assistant_retryable_error',
+    'assistant_state',
+    'assistant_thinking_chunk',
+    'session_init',
+    'stt_silence',
+    'stt_transcript',
+    'tool_approval_request',
+    'user_message_accepted',
+    'user_notice',
+]);
+
+const SERVER_FRAME_TYPE_SET = new Set(SERVER_FRAME_TYPES);
+
 export function buildKnowledgeBeliefsUrl(filters = {}) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(filters)) {
@@ -17,6 +48,15 @@ export class NetworkClient {
         this.reconnectTimer = null;
         this.isExplicitlyClosed = false;
         this.connectionOptions = {};
+        this.clientId = globalThis.crypto?.randomUUID?.()
+            || `browser-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+            const key = 'astra.websocket-client-id';
+            this.clientId = sessionStorage.getItem(key) || this.clientId;
+            sessionStorage.setItem(key, this.clientId);
+        } catch {
+            // Reconnect still works when browser storage is unavailable.
+        }
     }
 
     connect(options = this.connectionOptions) {
@@ -25,6 +65,7 @@ export class NetworkClient {
 
         try {
             const wsUrl = new URL(CONFIG.SYSTEM.WS_URL, window.location.href);
+            wsUrl.searchParams.set('client_id', this.clientId);
             if (this.connectionOptions.sessionId) {
                 wsUrl.searchParams.set('session_id', this.connectionOptions.sessionId);
             }
@@ -47,13 +88,26 @@ export class NetworkClient {
                 console.log('WS Connected');
                 if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 
-                if (this.handlers.onState) this.handlers.onState('idle');
             };
 
             socket.onclose = (event) => {
                 if (this.ws !== socket) return;
                 if (this.isExplicitlyClosed) return;
 
+                if (event.code === 4004) {
+                    this.connectionOptions = {
+                        sessionMode: 'new',
+                        sessionKind: this.connectionOptions.sessionKind || 'direct',
+                    };
+                }
+
+                if (event.code === 1009 && this.handlers.onUserNotice) {
+                    this.handlers.onUserNotice({
+                        scope: 'last_user_message',
+                        tone: 'warning',
+                        message: event.reason || 'That message was too large to process.',
+                    });
+                }
                 console.warn(`WS Closed (Code: ${event.code}). Reconnecting in ${CONFIG.SYSTEM.RECONNECT_INTERVAL_MS}ms...`);
                 this.scheduleReconnect();
             };
@@ -67,6 +121,10 @@ export class NetworkClient {
             socket.onmessage = (event) => {
                 if (this.ws !== socket) return;
                 const data = JSON.parse(event.data);
+                if (!data || typeof data !== 'object' || !SERVER_FRAME_TYPE_SET.has(data.type)) {
+                    console.warn('Ignored undeclared server frame.');
+                    return;
+                }
 
                 if (data.type === 'session_init' && this.handlers.onSessionInit) {
                     this.handlers.onSessionInit({
@@ -78,6 +136,9 @@ export class NetworkClient {
                         sessionKind: data.session_kind || 'direct',
                         localHumanDisplayName: data.local_human_display_name || 'You',
                         localAssistantDisplayName: data.local_assistant_display_name || 'Astra',
+                        assistantState: data.assistant_state || 'idle',
+                        activeTurnId: data.active_turn_id || null,
+                        turnOrigin: data.turn_origin || null,
                     });
                 }
                 else if (data.type === 'assistant_state' && this.handlers.onState) {

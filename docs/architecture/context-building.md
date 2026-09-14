@@ -69,3 +69,11 @@ Manual group messages are rendered inside server-produced `PARTICIPANT_MESSAGE` 
 ## Configuration
 
 `context.history_limit` bounds recent messages. `orchestrator.summary_trigger` controls how many new messages may accumulate before `TurnFinalizer` refreshes the rolling summary. Keep the history limit at least as large as the summary interval if every unsummarized message must always be available.
+
+Semantic memories normally pass `context.semantic_memory_max_distance`. If that strict
+selection is empty, up to `context.semantic_memory_fallback_limit` nearest candidates
+may pass the wider `context.semantic_memory_fallback_max_distance` ceiling. The fallback
+never supplements an existing strict match.
+
+Past-conversation vector matches use the separate
+`context.episodic_memory_max_distance` ceiling and do not use the semantic fallback.

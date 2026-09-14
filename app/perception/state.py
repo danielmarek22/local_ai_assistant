@@ -20,7 +20,7 @@ class PerceptionState:
     """
     Shared, continuously updated world model.
     Written by perception producers.
-    Read by planner / orchestrator.
+    Read by orchestration consumers.
     """
 
     def __init__(self):
@@ -41,10 +41,7 @@ class PerceptionState:
             return self._entries.get(key.value)
 
     def snapshot(self) -> Dict[str, Any]:
-        """
-        Planner-safe snapshot.
-        Returns plain values so planner code does not depend on PerceptionEntry.
-        """
+        """Return a detached snapshot containing plain perception values."""
         with self._lock:
             return {
                 key: entry.value

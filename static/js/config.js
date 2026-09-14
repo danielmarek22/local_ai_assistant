@@ -1,6 +1,6 @@
 export const CONFIG = {
     SYSTEM: {
-        // Points to your Python server
+        // Locally served WebSocket endpoint.
         WS_URL: "ws://localhost:8000/ws",
         RECONNECT_INTERVAL_MS: 3000
     },
@@ -8,9 +8,8 @@ export const CONFIG = {
         MODEL_PATH: '/static/avatar.vrm',
         EXPRESSIONS: ['happy', 'angry', 'sad', 'relaxed', 'surprised', 'neutral'],
         
-        // --- UPDATED: Animation Arrays ---
+        // State animation variants are selected at random.
         ANIMATIONS: {
-            // Add multiple paths to the arrays
             idle:       [
                 '/static/animations/Idle/Idle_1.fbx', 
                 '/static/animations/Idle/Idle_2.fbx',

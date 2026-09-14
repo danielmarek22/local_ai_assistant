@@ -1,0 +1,2 @@
+# Optional transports used by external runtime integrations.
+python-socketio[client]==5.16.3

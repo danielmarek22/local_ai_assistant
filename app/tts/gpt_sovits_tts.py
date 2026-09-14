@@ -14,10 +14,13 @@ class GPTSoVITSTTS(TTS):
         prompt_text: str = "",
         text_lang: str = "en",
         prompt_lang: str = "en",
+        connect_timeout: float = 5.0,
+        read_timeout: float = 20.0,
     ):
         """
         Initializes the GPT-SoVITS TTS engine via its local API v2.
         """
+        self.request_timeout = (connect_timeout, read_timeout)
         self.api_url = api_url
         self.ref_audio_path = ref_audio_path
         self.prompt_text = prompt_text
@@ -41,7 +44,7 @@ class GPTSoVITSTTS(TTS):
 
         try:
             logger.info("Sending text to GPT-SoVITS API...")
-            response = requests.get(self.api_url, params=params)
+            response = requests.get(self.api_url, params=params, timeout=self.request_timeout)
             response.raise_for_status()
 
             with open(output_path, "wb") as f:

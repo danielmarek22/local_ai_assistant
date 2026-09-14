@@ -6,7 +6,16 @@ import unicodedata
 from app.beliefs.models import AllowedSubject, SubjectKind
 
 
-_FIRST_PERSON_REFERENCES = {"i", "i m", "i ve", "i d", "my", "me", "myself"}
+_FIRST_PERSON_REFERENCES = {
+    "i m", "i ve", "i d", "i ll", "my", "me", "myself",
+    "ja", "mnie", "mi", "mną", "mój", "moja", "moje", "moi",
+    "mojego", "mojej", "mojemu", "moją", "moim", "moich", "moimi",
+}
+_FIRST_PERSON_PATTERN = re.compile(
+    r"(?<!\w)(?:(?i:I['\N{RIGHT SINGLE QUOTATION MARK}](?:m|ve|d|ll)|"
+    r"my|me|myself|ja|mnie|mi|mną|mój|moja|moje|moi|mojego|mojej|mojemu|"
+    r"moją|moim|moich|moimi)|I)(?!\w)"
+)
 _UNRESOLVED_REFERENCES = {
     "he", "her", "hers", "him", "his", "it", "its", "she", "their", "theirs",
     "them", "they", "you", "your", "yours",
@@ -67,7 +76,7 @@ def resolve_subject_reference(
     """Resolve a textual referent to exactly one application-owned subject."""
     if not subject_reference:
         raise ValueError("Conversational ASSERT requires subject_reference")
-    if subject_reference not in user_text:
+    if not re.search(r"(?<!\w)" + re.escape(subject_reference) + r"(?!\w)", user_text):
         raise ValueError("Belief subject_reference is not an exact source-message substring")
 
     normalized_reference = _normalize_reference(subject_reference)
@@ -75,7 +84,8 @@ def resolve_subject_reference(
         raise ValueError("Belief subject_reference is empty after normalization")
     allowed_by_id = {subject.subject_id: subject for subject in allowed_subjects}
 
-    if normalized_reference in _FIRST_PERSON_REFERENCES:
+    # Bare English I is case-sensitive: Polish "i" means "and".
+    if subject_reference == "I" or normalized_reference in _FIRST_PERSON_REFERENCES:
         source = allowed_by_id.get(source_sender_id)
         if source is None or source.subject_kind not in {SubjectKind.PERSON, SubjectKind.AGENT}:
             raise ValueError("Authoritative source sender is not an allowed participant subject")
@@ -95,6 +105,30 @@ def resolve_subject_reference(
     if len(matches) != 1:
         raise ValueError("Belief subject_reference is unknown or ambiguous")
     return next(iter(matches.values()))
+
+
+def grounded_subject_reference(
+    text: str, subject: AllowedSubject, allowed_subjects: list[AllowedSubject],
+    source_sender_id: str,
+) -> str | None:
+    """Offer only exact references that the mutation validator also accepts."""
+    candidates = []
+    if subject.subject_id == source_sender_id:
+        candidates.extend(match.group(0) for match in _FIRST_PERSON_PATTERN.finditer(text))
+    for label in _subject_labels(subject):
+        candidates.extend(
+            match.group(0) for match in re.finditer(
+                r"(?<!\w)" + re.escape(label) + r"(?!\w)", text, re.IGNORECASE,
+            )
+        )
+    for reference in candidates:
+        try:
+            resolved = resolve_subject_reference(reference, text, allowed_subjects, source_sender_id)
+        except ValueError:
+            continue
+        if resolved.subject_id == subject.subject_id:
+            return reference
+    return None
 
 
 def _subject_labels(subject: AllowedSubject) -> tuple[str, ...]:

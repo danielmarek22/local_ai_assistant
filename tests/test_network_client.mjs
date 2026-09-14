@@ -21,6 +21,27 @@ class FakeWebSocket {
 globalThis.WebSocket = FakeWebSocket;
 globalThis.window = { location: { href: 'http://localhost:8000/' } };
 
+test('browser identity survives reconnect and a page refresh', () => {
+    const stored = new Map();
+    globalThis.sessionStorage = {
+        getItem: key => stored.get(key) || null,
+        setItem: (key, value) => stored.set(key, value),
+    };
+    try {
+        const first = new NetworkClient({});
+        first.connect();
+        const identity = new URL(first.ws.url).searchParams.get('client_id');
+        first.connect();
+        assert.equal(new URL(first.ws.url).searchParams.get('client_id'), identity);
+        const refreshed = new NetworkClient({});
+        refreshed.connect();
+        assert.equal(new URL(refreshed.ws.url).searchParams.get('client_id'), identity);
+        assert.ok(identity);
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});
+
 
 test('session kind is sent on connection and restored from session init', () => {
     let initialized = null;
@@ -39,6 +60,83 @@ test('session kind is sent on connection and restored from session init', () => 
     assert.equal(initialized.sessionKind, 'manual_group');
     assert.equal(initialized.localHumanDisplayName, 'Local Person');
     assert.equal(initialized.localAssistantDisplayName, 'Astra Custom');
+});
+
+test('deleted conversation reconnects as a new session instead of reopening its id', () => {
+    const client = new NetworkClient({});
+    client.scheduleReconnect = () => {};
+    client.connect({sessionMode: 'resume', sessionId: 'deleted', serverInstanceId: 'old', sessionKind: 'manual_group'});
+    client.ws.onclose({code: 4004, reason: 'Conversation deleted'});
+    assert.deepEqual(client.connectionOptions, {sessionMode: 'new', sessionKind: 'manual_group'});
+    client.connect();
+    const url = new URL(client.ws.url);
+    assert.equal(url.searchParams.get('session_mode'), 'new');
+    assert.equal(url.searchParams.has('session_id'), false);
+});
+
+test('socket open does not invent an idle assistant state', () => {
+    const states = [];
+    const client = new NetworkClient({ onState: (state) => { states.push(state); } });
+    client.connect();
+
+    client.ws.onopen();
+
+    assert.deepEqual(states, []);
+});
+
+test('session initialization restores assistant state and active turn', () => {
+    let initialized = null;
+    const client = new NetworkClient({
+        onSessionInit: (payload) => { initialized = payload; },
+    });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'session_init',
+        server_instance_id: 'server-1',
+        session_id: 'session-1',
+        assistant_state: 'thinking',
+        active_turn_id: 'turn-7',
+        turn_origin: 'user',
+    }) });
+
+    assert.equal(initialized.assistantState, 'thinking');
+    assert.equal(initialized.activeTurnId, 'turn-7');
+    assert.equal(initialized.turnOrigin, 'user');
+});
+
+
+test('oversized websocket closure reports the server reason before reconnecting', () => {
+    let notice = null;
+    let reconnectScheduled = false;
+    const client = new NetworkClient({
+        onUserNotice: (payload) => { notice = payload; },
+    });
+    client.scheduleReconnect = () => { reconnectScheduled = true; };
+    client.connect();
+
+    client.ws.onclose({ code: 1009, reason: 'Binary frame exceeds the limit' });
+
+    assert.deepEqual(notice, {
+        scope: 'last_user_message',
+        tone: 'warning',
+        message: 'Binary frame exceeds the limit',
+    });
+    assert.equal(reconnectScheduled, true);
+});
+
+
+test('undeclared server frames are ignored', () => {
+    let state = null;
+    const client = new NetworkClient({ onState: (value) => { state = value; } });
+    client.connect();
+
+    client.ws.onmessage({ data: JSON.stringify({
+        type: 'assistant_state_v2',
+        state: 'thinking',
+    }) });
+
+    assert.equal(state, null);
 });
 
 

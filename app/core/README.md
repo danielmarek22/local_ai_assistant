@@ -20,7 +20,17 @@ Core orchestration logic of the assistant.
 - Conversation sessions have a durable `direct` or `manual_group` kind. Manual relay
   identities are derived from normalized sender type and display name; renaming a
   participant creates a new identity in the v1 roster-free model.
-- `MemoryRetriever`, `MemoryActionHandler`, `TurnFinalizer`, and `StreamProcessor` keep the turn loop smaller and easier to change.
+- `ContextBuilder`, `ToolExecutor`, and `TurnFinalizer` keep cross-feature turn
+  coordination close to the orchestrator without placing it in feature packages.
+- `ResponseGenerator` owns direct streaming, native tool-loop phases, correction and
+  recovery policy, and avatar/text event emission. The orchestrator constructs it with
+  explicit dependencies for each generation and retains input acceptance, authoritative
+  turn identity, retrieval, assistant persistence, and finalization. Generation receives
+  only a tool-trace writer, not the history store or orchestrator itself. Model/tool
+  resources remain application-owned; a generator does not close them.
+- `app/avatar/stream_processor.py` evaluates balanced bracket candidates against the configured avatar
+  allowlists and removes invalid candidates. Escaped brackets and brackets inside
+  fenced code, inline code, Markdown links, images, and references remain ordinary text.
 - Agent-mode turns expose registered native capabilities; `instant_mode` streams a direct response without capability schemas.
 - A frozen `AuthoritativeTurnContext` is created immediately after participant-message
   persistence and explicitly accompanies eligible turn-scoped tools. It contains the
@@ -34,6 +44,7 @@ Core orchestration logic of the assistant.
   belief correction and tool-free recovery disable thinking and use bounded budgets.
 - User and integration-event turns share a coordinator, so a local model is never used by overlapping turns.
 - Autonomous final text is journaled internally; only `runtime__notify` produces a visible notification.
-- The dormant planner remains available for future repurposing but is not part of the active turn path.
+- The roadmap's high-level planner will be designed around validated capabilities and
+  bounded observe-act-revise loops; no legacy turn planner sits on the active path.
 
 Think of this as the *spinal cord* of the system.

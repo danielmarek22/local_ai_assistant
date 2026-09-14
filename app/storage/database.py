@@ -1,5 +1,11 @@
 import sqlite3
+import threading
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
+
+from app.paths import DATA_DIR, resolve_app_path
+from app.storage.session_lifecycle import initialize_session_lifecycle
 
 
 def _create_beliefs_table(conn: sqlite3.Connection, table_name: str = "beliefs") -> None:
@@ -53,6 +59,7 @@ def initialize_belief_schema(
     legacy_local_human_id: str = "local-human",
     legacy_local_human_name: str = "You",
 ) -> None:
+    initialize_session_lifecycle(conn)
     existing = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'beliefs'"
     ).fetchone()
@@ -170,20 +177,49 @@ def _migrate_legacy_beliefs(
 class Database:
     def __init__(
         self,
-        path: str = "data/assistant.db",
+        path: str = str(DATA_DIR / "assistant.db"),
         *,
         legacy_local_human_id: str = "local-human",
         legacy_local_human_name: str = "You",
     ):
-        self.path = path
+        self.path = path if path == ":memory:" else str(resolve_app_path(path))
         self.legacy_local_human_id = legacy_local_human_id
         self.legacy_local_human_name = legacy_local_human_name
-        Path("data").mkdir(exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
+        self._lock = threading.RLock()
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self._init_schema()
+        except Exception:
+            self.conn.close()
+            raise
+
+    def close(self) -> None:
+        with self._lock:
+            self.conn.close()
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Serialize a complete read operation on the shared connection."""
+        with self._lock:
+            yield self.conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize and atomically commit or roll back a write operation."""
+        with self._lock:
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.rollback()
+                raise
+            else:
+                self.conn.commit()
 
     def _init_schema(self):
         cursor = self.conn.cursor()
@@ -292,7 +328,6 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_chat_attachments_session_id ON chat_attachments(session_id)"
         )
 
-        # UPDATED: id is TEXT, added last_accessed_at
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS memory (
             id TEXT PRIMARY KEY,
@@ -309,9 +344,20 @@ class Database:
             session_id TEXT PRIMARY KEY,
             summary TEXT NOT NULL,
             last_turn_count INTEGER DEFAULT 0,
+            last_message_id INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+
+        summary_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(conversation_summary)")}
+        if "last_message_id" not in summary_columns:
+            # Legacy counts index a moving/filtered window and cannot safely be
+            # translated to IDs. Preserve the summary and replay from the start.
+            cursor.execute("ALTER TABLE conversation_summary ADD COLUMN last_message_id INTEGER NOT NULL DEFAULT 0")
+
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_chat_history_summary_cursor
+            ON chat_history(session_id, id)
+            WHERE excluded_from_context = 0 AND role IN ('user', 'assistant')""")
 
         self.conn.commit()
         initialize_belief_schema(

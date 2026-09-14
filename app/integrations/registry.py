@@ -188,9 +188,15 @@ class IntegrationRegistry:
         except ValidationError as exc:
             path = ".".join(str(part) for part in exc.absolute_path)
             location = f" at {path}" if path else ""
+            reason = self._native_validation_reason(exc)
+            # Schema-owned guidance describes the failing field without invoking
+            # a handler or weakening validation. Do not use submitted values as hints.
+            hint = exc.schema.get("description") if isinstance(exc.schema, Mapping) else None
+            if isinstance(hint, str) and hint.strip():
+                reason += f". {hint[:500]}"
             return ToolResult.error(
                 f"Invalid arguments for {call.capability}{location}: "
-                f"{self._native_validation_reason(exc)}",
+                f"{reason}",
                 diagnostics={
                     "category": "native_schema_validation",
                     "error_code": "NATIVE_SCHEMA_VALIDATION",

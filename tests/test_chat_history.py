@@ -2,12 +2,14 @@ import tempfile
 import unittest
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from app.memory.chat_history import ChatHistoryStore
+from app.perception.image_summarizer import ImageSummarizer
 from app.perception.state import ImageAttachment
 from app.storage.database import Database
 from app.core.conversation import SenderAttribution, SenderType, InputSource, SessionKind
-from app.services.turn_finalizer import TurnFinalizer
+from app.core.turn_finalizer import TurnFinalizer
 
 
 class FakeCollection:
@@ -25,6 +27,13 @@ class FakeCollection:
                 }
             )
 
+    def upsert(self, ids, documents, metadatas):
+        self.records = [record for record in self.records if record["id"] not in ids]
+        self.add(ids, documents, metadatas)
+
+    def get(self, include=None):
+        return {"ids": [record["id"] for record in self.records]}
+
     def query(self, query_texts, n_results, where=None):
         records = self.records
         if where and "session_id" in where and "$ne" in where["session_id"]:
@@ -35,11 +44,15 @@ class FakeCollection:
             ]
 
         return {
+            "ids": [[record["id"] for record in records[:n_results]]],
             "documents": [[record["document"] for record in records[:n_results]]],
             "distances": [[record["metadata"].get("distance", 0.2) for record in records[:n_results]]],
         }
 
-    def delete(self, where=None):
+    def delete(self, ids=None, where=None):
+        if ids:
+            self.records = [record for record in self.records if record["id"] not in ids]
+            return
         self.deleted_wheres.append(where)
         if where and "session_id" in where:
             session_id = where["session_id"]
@@ -56,15 +69,88 @@ class FakeVectorStore:
 
 
 class FakeImageSummarizer:
-    def __init__(self):
+    def __init__(self, result="Screenshot of the settings screen showing the speech toggle enabled."):
         self.calls = []
+        self.result = result
 
-    def summarize(self, attachment, message_text: str = "") -> str:
-        self.calls.append((attachment.name, message_text))
-        return "Screenshot of the settings screen showing the speech toggle enabled."
+    def summarize(self, attachment, message_text: str = "", *, timeout_s: float = 15.0):
+        self.calls.append((attachment.name, message_text, timeout_s))
+        return self.result
+
+
+class FailingImageSummarizer(FakeImageSummarizer):
+    def summarize(self, attachment, message_text: str = "", *, timeout_s: float = 15.0):
+        self.calls.append((attachment.name, message_text, timeout_s))
+        raise TimeoutError("summary timed out")
+
+
+class FakeImageLLM:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+        self.last_chat_dropped_current_images = False
+
+    def chat(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        return self.response
 
 
 class ChatHistoryStoreTests(unittest.TestCase):
+    def test_deleted_session_is_not_recalled_when_vector_cleanup_fails(self):
+        self.store.add("deleted", "user", "Deleted conversation")
+        with patch.object(self.store.collection, "delete", side_effect=RuntimeError("Offline")):
+            with self.assertLogs("chat_history", level="ERROR"):
+                result = self.store.delete_session("deleted")
+        self.assertFalse(result.cleanup_complete)
+        self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
+    def test_episodic_reads_canonical_text_exclusion_and_session_instead_of_metadata(self):
+        old = self.store.add("old", "user", "Outdated text")
+        current = self.store.add("current", "user", "Current session text")
+        excluded = self.store.add("excluded", "user", "Excluded text")
+        tombstoned = self.store.add("tombstoned", "user", "Deleted but not cleaned yet")
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE chat_history SET content = 'Corrected text' WHERE id = ?", (old,))
+            conn.execute("UPDATE chat_history SET excluded_from_context = 1 WHERE id = ?", (excluded,))
+            conn.execute("INSERT INTO deleted_sessions (session_id) VALUES ('tombstoned')")
+        # Deliberately lie about the session and document in the index.
+        self.store.collection.upsert(
+            ids=[f"message:{value}" for value in (old, current, excluded, tombstoned)],
+            documents=["Stale vector text"] * 4,
+            metadatas=[{"session_id": "lie"}] * 4,
+        )
+        self.assertEqual(self.store.search_past_conversations("query", "current", limit=10),
+                         ["USER: Corrected text"])
+
+    def test_attachment_candidate_uses_current_summary_and_requires_visible_parent(self):
+        message_id = self.store.add("old", "user", "Look at this", attachments=[ImageAttachment(
+            name="screen.png", mime_type="image/png", base64_data="aGVsbG8=",
+        )])
+        self.store.summarize_pending_attachments(message_id)
+        attachment_id = self.store.get_all("old")[0]["attachments"][0].attachment_id
+        result = {"ids": [[f"attachment:{attachment_id}"]], "distances": [[0.1]],
+                  "documents": [["Stale image summary"]]}
+        with patch.object(self.store.collection, "query", return_value=result):
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE chat_attachments SET summary_text = 'Corrected image summary' WHERE id = ?", (attachment_id,))
+            docs = self.store.search_past_conversations("query", "current")
+            self.assertEqual(len(docs), 1)
+            self.assertIn("Corrected image summary", docs[0])
+            self.assertNotIn("Stale", docs[0])
+            self.assertEqual(self.store.search_past_conversations("query", "old"), [])
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE chat_history SET excluded_from_context = 1 WHERE id = ?", (message_id,))
+            self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
+    def test_unknown_or_missing_episodic_ids_are_not_trusted(self):
+        for result in (
+            {"documents": [["Unverifiable text"]], "distances": [[0.1]]},
+            {"ids": [["legacy-uuid", "message:999999", "attachment:999999", "message:01"]],
+             "documents": [["Unverifiable text"]] * 4, "distances": [[0.1] * 4]},
+        ):
+            with self.subTest(result=result), patch.object(self.store.collection, "query", return_value=result):
+                self.assertEqual(self.store.search_past_conversations("query", "current"), [])
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -79,7 +165,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
             image_summarizer=self.image_summarizer,
         )
 
-    def test_add_persists_image_summary_to_sqlite_and_vectordb(self):
+    def test_deferred_image_summary_updates_sqlite_and_vectordb(self):
         attachment = ImageAttachment(
             name="settings.png",
             mime_type="image/png",
@@ -102,14 +188,31 @@ class ChatHistoryStoreTests(unittest.TestCase):
         row = cursor.fetchone()
 
         self.assertIsNotNone(row)
+        self.assertIsNone(row["summary_text"])
+        self.assertEqual(self.image_summarizer.calls, [])
+        self.assertEqual(
+            {record["id"] for record in self.vector_store.episodic_collection.records},
+            {f"message:{message_id}"},
+        )
+
+        summarized_count = self.store.summarize_pending_attachments(message_id)
+
+        self.assertEqual(summarized_count, 1)
+        row = self.db.conn.execute(
+            "SELECT summary_text FROM chat_attachments WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
         self.assertEqual(
             row["summary_text"],
             "Screenshot of the settings screen showing the speech toggle enabled.",
         )
-        self.assertEqual(
-            self.image_summarizer.calls,
-            [("settings.png", "Please remember this screen")],
-        )
+        self.assertEqual(len(self.image_summarizer.calls), 1)
+        attachment_name, message_text, timeout_s = self.image_summarizer.calls[0]
+        self.assertEqual((attachment_name, message_text), (
+            "settings.png", "Please remember this screen"
+        ))
+        self.assertGreater(timeout_s, 0)
+        self.assertLessEqual(timeout_s, 15.0)
 
         history_rows = self.store.get_all("session-1")
         self.assertEqual(len(history_rows), 1)
@@ -124,6 +227,10 @@ class ChatHistoryStoreTests(unittest.TestCase):
             if record["metadata"].get("source") == "image_attachment"
         ]
         self.assertEqual(len(image_docs), 1)
+        self.assertEqual(
+            {record["id"] for record in self.vector_store.episodic_collection.records},
+            {f"message:{message_id}", f"attachment:{history_rows[0]['attachments'][0].attachment_id}"},
+        )
         self.assertIn(
             "Image summary: Screenshot of the settings screen showing the speech toggle enabled.",
             image_docs[0]["document"],
@@ -137,6 +244,108 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertTrue(
             any("speech toggle enabled" in document for document in results)
         )
+
+    def test_episodic_retrieval_uses_configured_distance_ceiling(self):
+        near = self.store.add("old-a", "user", "Near past conversation")
+        far = self.store.add("old-b", "user", "Far past conversation")
+        self.vector_store.episodic_collection.upsert(
+            ids=[f"message:{near}", f"message:{far}"],
+            documents=["Near past conversation", "Far past conversation"],
+            metadatas=[
+                {"session_id": "old-a", "distance": 0.69},
+                {"session_id": "old-b", "distance": 0.71},
+            ],
+        )
+
+        results = self.store.search_past_conversations(
+            "past conversation",
+            current_session="current-session",
+            limit=2,
+        )
+
+        self.assertEqual(results, ["USER: Near past conversation"])
+
+    def test_none_or_timeout_summary_does_not_fail_persisted_attachment(self):
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        for index, summarizer in enumerate(
+            (FakeImageSummarizer(None), FailingImageSummarizer()),
+            start=1,
+        ):
+            with self.subTest(summarizer=type(summarizer).__name__):
+                self.store.image_summarizer = summarizer
+                session_id = f"summary-failure-{index}"
+                message_id = self.store.add(
+                    session_id,
+                    "user",
+                    "Keep the image",
+                    attachments=[attachment],
+                )
+                with self.assertLogs("chat_history", level="WARNING"):
+                    summarized_count = self.store.summarize_pending_attachments(message_id)
+
+                self.assertEqual(summarized_count, 0)
+                stored = self.store.get_all(session_id)[0]["attachments"][0]
+                self.assertIsNone(stored.summary_text)
+
+    def test_image_summary_batch_uses_one_total_timeout_budget(self):
+        self.store.image_summarizer = FakeImageSummarizer(None)
+        attachments = [
+            ImageAttachment(
+                name=f"image-{index}.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )
+            for index in range(2)
+        ]
+        message_id = self.store.add(
+            "budget-session", "user", "Two images", attachments=attachments
+        )
+
+        with patch(
+            "app.memory.chat_history.time.monotonic",
+            side_effect=[0.0, 0.0, 20.0],
+        ), self.assertLogs("chat_history", level="WARNING"):
+            summarized_count = self.store.summarize_pending_attachments(message_id)
+
+        self.assertEqual(summarized_count, 0)
+        self.assertEqual(len(self.store.image_summarizer.calls), 1)
+
+    def test_image_summarizer_applies_dedicated_timeout_without_retries(self):
+        llm = FakeImageLLM({"content": "  A blue settings panel.  "})
+        summarizer = ImageSummarizer(llm)
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        result = summarizer.summarize(attachment, timeout_s=7.5)
+
+        self.assertEqual(result, "A blue settings panel.")
+        self.assertEqual(llm.calls[0][1]["timeout_override"], 7.5)
+        self.assertEqual(llm.calls[0][1]["max_retries_override"], 0)
+
+    def test_image_summarizer_treats_invalid_response_as_missing_summary(self):
+        summarizer = ImageSummarizer(FakeImageLLM(None))
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        with self.assertLogs("image_summarizer", level="WARNING"):
+            result = summarizer.summarize(attachment)
+
+        self.assertIsNone(result)
 
     def test_delete_session_removes_attachment_rows_files_and_vector_docs(self):
         attachment = ImageAttachment(
@@ -159,7 +368,8 @@ class ChatHistoryStoreTests(unittest.TestCase):
 
         deleted_count = self.store.delete_session("session-1")
 
-        self.assertEqual(deleted_count, 1)
+        self.assertEqual(deleted_count.deleted_count, 1)
+        self.assertTrue(deleted_count.cleanup_complete)
         self.assertEqual(self.store.get_all("session-1"), [])
         self.assertFalse(attachment_dir.exists())
 
@@ -174,6 +384,121 @@ class ChatHistoryStoreTests(unittest.TestCase):
             [{"session_id": "session-1"}],
         )
         self.assertEqual(self.vector_store.episodic_collection.records, [])
+
+    def test_failed_index_write_preserves_canonical_message_for_reconciliation(self):
+        with self.assertLogs("chat_history", level="ERROR") as logs, patch.object(
+            self.store.collection, "upsert", side_effect=RuntimeError("offline")
+        ):
+            message_id = self.store.add("session-1", "user", "Saved canonically")
+
+        self.assertEqual(self.store.get_all("session-1")[0]["id"], message_id)
+        self.assertEqual(self.store.collection.records, [])
+        self.assertIn("saved canonically", logs.output[0])
+
+        report = self.store.reconcile_index()
+
+        self.assertEqual(report, {
+            "canonical_count": 1,
+            "upserted_count": 1,
+            "removed_count": 0,
+        })
+        self.assertEqual(self.store.collection.records[0]["id"], f"message:{message_id}")
+
+    def test_reconciliation_rebuilds_attachments_and_removes_orphans(self):
+        message_id = self.store.add(
+            "session-1",
+            "user",
+            "Remember this",
+            attachments=[ImageAttachment(
+                name="settings.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )],
+        )
+        self.store.summarize_pending_attachments(message_id)
+        attachment_id = self.store.get_all("session-1")[0]["attachments"][0].attachment_id
+        self.store.collection.records = [{
+            "id": "legacy-random-id",
+            "document": "Stale copy",
+            "metadata": {"session_id": "session-1"},
+        }]
+
+        report = self.store.reconcile_index(batch_size=1)
+
+        self.assertEqual(report, {
+            "canonical_count": 2,
+            "upserted_count": 2,
+            "removed_count": 1,
+        })
+        self.assertEqual(
+            {record["id"] for record in self.store.collection.records},
+            {f"message:{message_id}", f"attachment:{attachment_id}"},
+        )
+
+    def test_delete_session_reports_partial_cleanup_and_attempts_every_target(self):
+        message_id = self.store.add(
+            "session-1",
+            "user",
+            "Has a file",
+            attachments=[ImageAttachment(
+                name="settings.png",
+                mime_type="image/png",
+                base64_data="aGVsbG8=",
+                size_bytes=5,
+            )],
+        )
+        attachment_dir = Path(self.temp_dir.name) / "session-1" / str(message_id)
+
+        with self.assertLogs("chat_history", level="ERROR"), patch.object(
+            self.store.collection, "delete", side_effect=RuntimeError("offline")
+        ), patch(
+            "app.memory.chat_history.shutil.rmtree", side_effect=OSError("busy")
+        ) as remove_tree:
+            result = self.store.delete_session("session-1")
+
+        self.assertEqual(result.deleted_count, 1)
+        self.assertEqual(result.cleanup_errors, ("vector_index", "attachments"))
+        self.assertEqual(self.store.get_all("session-1"), [])
+        self.assertTrue(attachment_dir.exists())
+        remove_tree.assert_called_once()
+
+        retry = self.store.delete_session("session-1")
+        self.assertFalse(retry.deleted)
+        self.assertTrue(retry.cleanup_complete)
+        self.assertFalse(attachment_dir.exists())
+
+    def test_unsafe_session_id_cannot_escape_upload_root(self):
+        outside_dir = tempfile.TemporaryDirectory(dir=Path(self.temp_dir.name).parent)
+        self.addCleanup(outside_dir.cleanup)
+        outside_path = Path(outside_dir.name)
+        marker = outside_path / "keep.txt"
+        marker.write_text("keep")
+        unsafe_session_id = f"../{outside_path.name}"
+        attachment = ImageAttachment(
+            name="settings.png",
+            mime_type="image/png",
+            base64_data="aGVsbG8=",
+            size_bytes=5,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+            self.store.add(
+                unsafe_session_id,
+                "user",
+                "Do not persist this",
+                attachments=[attachment],
+            )
+
+        with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+            self.store.delete_session(unsafe_session_id)
+
+        self.assertEqual(marker.read_text(), "keep")
+        stored_count = self.db.conn.execute(
+            "SELECT COUNT(*) AS count FROM chat_sessions WHERE session_id = ?",
+            (unsafe_session_id,),
+        ).fetchone()["count"]
+        self.assertEqual(stored_count, 0)
 
     def test_additive_migration_and_legacy_sender_defaults(self):
         db_path = Path(self.temp_dir.name) / "legacy.db"
@@ -265,7 +590,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(record["metadata"]["sender_id"], sender.sender_id)
         self.assertEqual(record["metadata"]["input_source"], "manual_relay")
 
-        self.assertEqual(self.store.delete_session("group-1"), 1)
+        self.assertEqual(self.store.delete_session("group-1").deleted_count, 1)
         self.assertEqual(self.store.get_session_kind("group-1"), SessionKind.DIRECT)
 
     def test_add_can_create_authoritative_group_session_on_first_message(self):
@@ -305,7 +630,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
 
         class Summarizer:
             def __init__(self): self.messages = None
-            def summarize(self, messages):
+            def summarize(self, messages, *, previous_summary=None):
                 self.messages = messages
                 return "Alice said she is in Warsaw."
 

@@ -14,9 +14,8 @@ The system is composed of several loosely-coupled subsystems:
 
 - **Core orchestration** – per-turn coordination, action routing, logging
 - **LLM interface** – model loading, prompting, and inference
-- **Planners** – decide *what* the assistant should do next
 - **Memory & storage** – conversation history, attachments, semantic memory, summaries, and persistence
-- **Tools & services** – external capabilities exposed to the planner
+- **Tools & services** – validated external capabilities exposed to the orchestrator
 - **UI & server** – user interaction layer
 
 Each major subsystem lives in its own directory under `app/` and is documented individually.
@@ -58,6 +57,11 @@ inspection remain future work.
 - `app/server.py` – HTTP / UI server bootstrap
 - `app/config/assistant.yaml` – main configuration file
 
+Runtime dependencies are exact-pinned and grouped by ownership. Install the complete
+runtime with `python -m pip install -r requirements.txt`, or follow the
+[getting-started guide](docs/getting-started.md) for reduced core/media/integration
+installations.
+
 ## Philosophy
 
 This project is intentionally **not** a polished product.  
@@ -65,7 +69,7 @@ It is a research playground for:
 
 - Agent architectures
 - Memory policies
-- Planner / tool separation
+- Capability routing and tool isolation
 - Running LLMs efficiently on consumer hardware
 
 Expect iteration, forks, and refactors.
@@ -106,11 +110,13 @@ notes are available in the [documentation guide](docs/guides/documentation.md).
 
 ## Running Tests
 
-The project includes a unit test suite under `tests/` covering planner logic, context construction, orchestrator turn flow, image attachment persistence, session management, tool execution, and vector-backed memory behavior.  
+The project includes a unit test suite under `tests/` covering context construction, orchestrator turn flow, image attachment persistence, session management, tool execution, and vector-backed memory behavior.
 From the project root, run:
 
 ```bash
+python -m pip install -r requirements-test.txt
 python -m unittest discover -s tests -v
+node --test tests/*.mjs
 ```
 
 For a deeper breakdown of test scope and how to add more coverage, see `tests/README.md`.

@@ -8,7 +8,8 @@ Large Language Model integration layer.
 - Prompt formatting
 - Inference calls
 - Abstraction over different backends (local models, APIs)
-- Per-request inference overrides for planner/summarizer-style calls
+- Per-request inference overrides for structured helper calls
+- Backend-specific image capability detection and deterministic fallback policy
 
 ## Current Interface
 
@@ -21,3 +22,9 @@ The shared `LLMClient` contract currently exposes:
 client's default model options.
 
 This layer should hide all backend-specific details from the rest of the system.
+
+`image_fallback.py` owns the pure policy for recognizing image-related HTTP failures,
+disabling transport retries for image requests, and generating progressively reduced
+message candidates. `ollama_stream.py` remains responsible for HTTP and client state.
+`thinking_filter.py` separates streamed reasoning markers from visible model output;
+it is model-output normalization rather than turn orchestration.

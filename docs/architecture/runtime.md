@@ -23,8 +23,8 @@ sequenceDiagram
     User->>UI: Send text, voice, or images
     UI->>API: Structured WebSocket payload
     API->>O: handle_user_input(session_id, ...)
-    O->>H: Retrieve semantic + episodic context
     O->>H: Persist authoritative user turn
+    O->>H: Retrieve optional semantic + episodic context
     O->>C: Build complete model message list
     C-->>O: System, history, current input
     O->>L: Buffered routing inference
@@ -81,6 +81,32 @@ The server translates those events into WebSocket payloads. The UI controls play
 - Invalid client payloads fail before orchestration.
 - Capability schemas are validated before invocation.
 - A failed optional context provider does not stop the turn.
+- User input is durable before retrieval; semantic and episodic query failures are
+  isolated independently, preserving successful context from the other provider.
 - Empty model output is replaced with a deterministic visible fallback.
 - The runtime returns the assistant to an idle state even when inference fails.
 - User-visible tool side effects may require explicit approval.
+
+## Speech delivery deadlines
+
+Text chunks and `assistant_end` no longer wait for speech synthesis. Audio may arrive
+before or after text completion; the browser maintains its own playback queue.
+Autonomous speech notifications follow the same text-first ordering.
+
+Each synthesis caller has a 30-second deadline covering queue admission and completion.
+The serial backend call also has a 30-second deadline. GPT-SoVITS additionally uses
+5-second connection and 20-second read timeouts. A turn can queue eight pending speech
+fragments; saturation or synthesis failure drops remaining optional speech while text
+continues. After text generation ends, speech drains for at most 30 seconds before its
+consumer is cancelled. Turn ownership is retained during that bounded drain to avoid
+misattributing late audio to another turn. Application audio shutdown drains for at most
+five seconds, then rejects remaining jobs.
+
+An in-process engine cannot be forcibly interrupted by cancelling an async wait.
+If its execution deadline expires, speech is disabled until application restart;
+subsequent calls fail promptly instead of starting overlapping synthesis. At most one
+abandoned daemon synthesis thread remains per audio owner, and late output is removed.
+It does not participate in Python's default-executor shutdown. This bounds waiting and
+normal shutdown, but cannot recover native code that holds the interpreter lock or
+release a stuck engine's memory before process exit. Hard termination and automatic
+backend recovery would require process isolation.
