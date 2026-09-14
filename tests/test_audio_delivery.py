@@ -93,3 +93,83 @@ class AudioDeliveryTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await asyncio.wait_for(asyncio.gather(job, delivery.close()), 2)
         self.assertTrue(delivery.worker_task.done())
+
+    async def test_stalled_engine_times_out_quarantines_and_removes_late_audio(self):
+        import tempfile
+        release = threading.Event()
+        finished = threading.Event()
+        self.addCleanup(release.set)
+        calls = []
+        def synthesize(text, path):
+            calls.append(text)
+            release.wait(3)
+            path.write_bytes(b"late audio")
+            finished.set()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "late.wav"
+            delivery = AudioDelivery(SimpleNamespace(synthesize=synthesize), timeout=0.05)
+            delivery.start()
+            with self.assertRaises(asyncio.TimeoutError):
+                await delivery.synthesize("stalled", path, "session")
+            # Let the worker's own deadline expire, not just the caller's deadline.
+            await asyncio.sleep(0.08)
+            with self.assertRaisesRegex(RuntimeError, "restart required"):
+                await delivery.synthesize("next", path, "session")
+            await asyncio.wait_for(delivery.close(), 0.5)
+            self.assertEqual(calls, ["stalled"])
+            release.set()
+            for _ in range(100):
+                if finished.is_set() and not path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(finished.is_set())
+            self.assertFalse(path.exists())
+
+    async def test_saturated_queue_and_shutdown_are_bounded(self):
+        release = threading.Event()
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        self.addCleanup(release.set)
+        calls = []
+        def synthesize(text, path):
+            calls.append(text)
+            loop.call_soon_threadsafe(started.set)
+            release.wait(3)
+        delivery = AudioDelivery(SimpleNamespace(synthesize=synthesize), queue_size=1,
+                                 timeout=0.2, shutdown_timeout=0.03)
+        delivery.start()
+        jobs = [asyncio.create_task(delivery.synthesize("first", Path("unused"), "s"))]
+        await asyncio.wait_for(started.wait(), 1)
+        jobs.extend(asyncio.create_task(delivery.synthesize(text, Path("unused"), "s"))
+                    for text in ("queued", "blocked"))
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(delivery.close(), 0.5)
+        results = await asyncio.wait_for(asyncio.gather(*jobs, return_exceptions=True), 0.5)
+        self.assertTrue(all(isinstance(result, Exception) for result in results))
+        self.assertEqual(calls, ["first"])
+        self.assertTrue(delivery.worker_task.done())
+        self.assertTrue(delivery._queue.empty())
+        release.set()
+
+    def test_stalled_engine_does_not_hold_process_exit_open(self):
+        import subprocess
+        import sys
+        code = '''
+import asyncio
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from app.tts.delivery import AudioDelivery
+async def main():
+    delivery = AudioDelivery(SimpleNamespace(synthesize=lambda *args: threading.Event().wait()),
+                             timeout=0.02, shutdown_timeout=0.02)
+    delivery.start()
+    try:
+        await delivery.synthesize("stalled", Path("unused"), "session")
+    except asyncio.TimeoutError:
+        pass
+    await delivery.close()
+asyncio.run(main())
+'''
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)

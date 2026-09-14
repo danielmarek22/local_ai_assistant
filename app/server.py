@@ -12,6 +12,7 @@ import time
 import emoji
 from pathlib import Path
 from app.tts.delivery import AudioDelivery
+from app.tts.stream import SpeechStream
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pydantic import BaseModel, Field
@@ -591,189 +592,108 @@ async def _forward_orchestrator_events(
 ) -> None:
     text_buffer = ""
     thinking_filter = ThinkingBlockFilter()
-    pending_chunks: list[str] = []
-    text_released = False
-    tts_enabled = True
     image_notice_sent = False
 
-    async for event in run_generator(event_iterator):
-        if not image_notice_sent:
-            notice_payload = _build_attachment_drop_notice_payload(
-                orchestrator=orchestrator,
-                original_attachment_count=original_attachment_count,
-            )
-            if notice_payload is not None:
-                await _send_ws_payload(ws, notice_payload)
-                image_notice_sent = True
+    async def send_speech(text):
+        audio_id = uuid.uuid4().hex
+        await synthesize_async(text, AUDIO_DIR / f"{audio_id}.wav", connection_id, application)
+        await _send_ws_payload(ws, {
+            "type": "assistant_audio", "url": f"/static/audio/{audio_id}.wav",
+        })
 
-        if isinstance(event, UserMessageAcceptedEvent):
-            await _send_ws_payload(ws, {
-                "type": "user_message_accepted",
-                "message_id": event.message_id,
-                "is_retry": event.is_retry,
-            })
-            continue
-
-        if isinstance(event, AssistantTurnFailureEvent):
-            pending_chunks.clear()
-            await _send_ws_payload(ws, {
-                "type": "assistant_retryable_error",
-                "user_message_id": event.user_message_id,
-                "message": event.message,
-                "attempts": event.attempts,
-            })
-            continue
-
-        if isinstance(event, AssistantStateEvent):
-            if not _should_forward_state(event.state):
-                logger.debug(
-                    "[%s] Holding assistant state at thinking until audio is ready",
-                    connection_id,
+    async with SpeechStream(send_speech) as speech:
+        async for event in run_generator(event_iterator):
+            if not image_notice_sent:
+                notice_payload = _build_attachment_drop_notice_payload(
+                    orchestrator=orchestrator,
+                    original_attachment_count=original_attachment_count,
                 )
+                if notice_payload is not None:
+                    await _send_ws_payload(ws, notice_payload)
+                    image_notice_sent = True
+
+            if isinstance(event, UserMessageAcceptedEvent):
+                await _send_ws_payload(ws, {
+                    "type": "user_message_accepted",
+                    "message_id": event.message_id,
+                    "is_retry": event.is_retry,
+                })
                 continue
 
-            logger.debug("[%s] Assistant state -> %s", connection_id, event.state)
-            await _send_ws_payload(ws, {
-                "type": "assistant_state",
-                "state": event.state,
-            })
-            continue
-
-        if isinstance(event, AvatarExpressionEvent):
-            logger.debug("[%s] Avatar expression -> %s", connection_id, event.expression)
-            await _send_ws_payload(ws, {
-                "type": "assistant_expression",
-                "expression": event.expression,
-            })
-            continue
-
-        if isinstance(event, AvatarAnimationEvent):
-            logger.debug("[%s] Avatar animation -> %s", connection_id, event.animation)
-            await _send_ws_payload(ws, {
-                "type": "assistant_animation",
-                "animation": event.animation,
-            })
-            continue
-
-        if isinstance(event, AvatarOutfitEvent):
-            logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
-            await _send_ws_payload(ws, {
-                "type": "assistant_outfit",
-                "outfit": event.outfit,
-                "url": event.url,
-            })
-            continue
-
-        if isinstance(event, AssistantThinkingEvent):
-            if event.text:
+            if isinstance(event, AssistantTurnFailureEvent):
                 await _send_ws_payload(ws, {
-                    "type": "assistant_thinking_chunk",
-                    "content": event.text,
+                    "type": "assistant_retryable_error",
+                    "user_message_id": event.user_message_id,
+                    "message": event.message,
+                    "attempts": event.attempts,
                 })
-            continue
+                continue
 
-        if isinstance(event, AssistantSpeechEvent):
-            if not event.is_final:
-                tts_chunk = thinking_filter.push(event.text)
-                text_buffer += tts_chunk
-
-                if text_released:
-                    await _send_ws_payload(ws, {
-                        "type": "assistant_chunk",
-                        "content": event.text,
-                    })
-                else:
-                    pending_chunks.append(event.text)
-
-                sentences, text_buffer = split_sentences(text_buffer)
-
-                if not tts_enabled:
+            if isinstance(event, AssistantStateEvent):
+                if not _should_forward_state(event.state):
+                    logger.debug(
+                        "[%s] Holding assistant state at thinking until audio is ready",
+                        connection_id,
+                    )
                     continue
 
-                for sentence in sentences:
-                    tts_text = _prepare_tts_text(sentence)
-                    if not tts_text:
-                        continue
-
-                    audio_id = uuid.uuid4().hex
-                    audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                    logger.debug(
-                        "[%s] TTS synth sentence (%d chars)",
-                        connection_id,
-                        len(tts_text),
-                    )
-
-                    try:
-                        await synthesize_async(
-                            text=tts_text,
-                            output_path=audio_path,
-                            session_id=connection_id,
-                            application=application,
-                        )
-                    except Exception:
-                        tts_enabled = False
-                        logger.warning(
-                            "[%s] TTS failed mid-turn; falling back to text-only streaming",
-                            connection_id,
-                        )
-                        if not text_released:
-                            await _flush_pending_chunks(ws, pending_chunks)
-                            text_released = True
-                        break
-
-                    await _send_ws_payload(ws, {
-                        "type": "assistant_audio",
-                        "url": f"/static/audio/{audio_id}.wav",
-                    })
-
-                    if not text_released:
-                        await _flush_pending_chunks(ws, pending_chunks)
-                        text_released = True
-
-            else:
-                text_buffer += thinking_filter.flush()
-                if tts_enabled:
-                    tts_text = _prepare_tts_text(text_buffer)
-                    if tts_text:
-                        audio_id = uuid.uuid4().hex
-                        audio_path = AUDIO_DIR / f"{audio_id}.wav"
-
-                        logger.debug(
-                            "[%s] TTS final fragment (%d chars)",
-                            connection_id,
-                            len(tts_text),
-                        )
-
-                        try:
-                            await synthesize_async(
-                                text=tts_text,
-                                output_path=audio_path,
-                                session_id=connection_id,
-                                application=application,
-                            )
-                        except Exception:
-                            tts_enabled = False
-                            logger.warning(
-                                "[%s] TTS failed for final fragment; sending text without audio",
-                                connection_id,
-                            )
-                        else:
-                            await _send_ws_payload(ws, {
-                                "type": "assistant_audio",
-                                "url": f"/static/audio/{audio_id}.wav",
-                            })
-
-                if not text_released:
-                    await _flush_pending_chunks(ws, pending_chunks)
-                    text_released = True
-
+                logger.debug("[%s] Assistant state -> %s", connection_id, event.state)
                 await _send_ws_payload(ws, {
-                    "type": "assistant_end",
-                    "content": event.text,
+                    "type": "assistant_state",
+                    "state": event.state,
                 })
+                continue
 
-                logger.info("[%s] Assistant turn completed", connection_id)
+            if isinstance(event, AvatarExpressionEvent):
+                logger.debug("[%s] Avatar expression -> %s", connection_id, event.expression)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_expression",
+                    "expression": event.expression,
+                })
+                continue
+
+            if isinstance(event, AvatarAnimationEvent):
+                logger.debug("[%s] Avatar animation -> %s", connection_id, event.animation)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_animation",
+                    "animation": event.animation,
+                })
+                continue
+
+            if isinstance(event, AvatarOutfitEvent):
+                logger.info("[%s] Avatar outfit -> %s", connection_id, event.outfit)
+                await _send_ws_payload(ws, {
+                    "type": "assistant_outfit",
+                    "outfit": event.outfit,
+                    "url": event.url,
+                })
+                continue
+
+            if isinstance(event, AssistantThinkingEvent):
+                if event.text:
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_thinking_chunk",
+                        "content": event.text,
+                    })
+                continue
+
+            if isinstance(event, AssistantSpeechEvent):
+                if not event.is_final:
+                    text_buffer += thinking_filter.push(event.text)
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_chunk", "content": event.text,
+                    })
+                    sentences, text_buffer = split_sentences(text_buffer)
+                    for sentence in sentences:
+                        speech.submit(_prepare_tts_text(sentence))
+                else:
+                    text_buffer += thinking_filter.flush()
+                    speech.submit(_prepare_tts_text(text_buffer))
+                    text_buffer = ""
+                    await _send_ws_payload(ws, {
+                        "type": "assistant_end", "content": event.text,
+                    })
+                    logger.info("[%s] Assistant text turn completed", connection_id)
 
 
 async def _autonomy_output_sink(
@@ -816,7 +736,14 @@ async def _autonomy_notification_sink(
         "turn_id": turn_id,
         "origin": "integration_event",
     })
-    if notification.get("delivery") == "speech" and getattr(runtime_app.state, "tts", None) is not None:
+    await hub.broadcast(session_id, {
+        "type": "assistant_end",
+        "content": message,
+        "turn_id": turn_id,
+        "origin": "integration_event",
+    })
+
+    if notification.get("delivery") == "speech" and getattr(runtime_app.state, "audio_delivery", None) is not None:
         audio_id = uuid.uuid4().hex
         audio_path = AUDIO_DIR / f"{audio_id}.wav"
         try:
@@ -830,12 +757,6 @@ async def _autonomy_notification_sink(
                 "turn_id": turn_id,
                 "origin": "integration_event",
             })
-    await hub.broadcast(session_id, {
-        "type": "assistant_end",
-        "content": message,
-        "turn_id": turn_id,
-        "origin": "integration_event",
-    })
 
 
 async def _autonomy_approval_provider(

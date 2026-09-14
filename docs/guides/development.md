@@ -70,7 +70,7 @@ venv_app/bin/ruff check --select E9,F63,F7,F82 app tests main.py
 
 CI runs strict mypy checks on both supported Python versions. `mypy.ini` lists the
 initial scope: session IDs, turn coordination, session deletion guards, vector
-candidate validation, and the speech interface and delivery queue. Run it locally:
+candidate validation, and the speech interface, delivery queue, and per-turn speech stream. Run it locally:
 
 ```bash
 venv_app/bin/python -m mypy --config-file mypy.ini
