@@ -137,7 +137,7 @@ class ServerLifecycleTests(unittest.TestCase):
             async with application.router.lifespan_context(application):
                 self.assertIs(application.state.settings, settings)
                 self.assertIs(application.state.orchestrator, orchestrator)
-                self.assertIs(application.state.tts, fake_tts)
+                self.assertIs(application.state.audio_delivery.engine, fake_tts)
                 self.assertIs(application.state.stt, fake_stt)
                 self.assertEqual(len(application.state.server_instance_id), 32)
                 int(application.state.server_instance_id, 16)
@@ -225,7 +225,7 @@ class ServerLifecycleTests(unittest.TestCase):
                 server_module.asyncio.run(exercise_lifespan())
 
         self.assertTrue(orchestrator.closed)
-        self.assertTrue(application.state.tts_worker_task.done())
+        self.assertTrue(application.state.audio_delivery.worker_task.done())
         with self.assertRaisesRegex(RuntimeError, "cannot schedule new futures"):
             application.state.memory_reflection_executor.submit(lambda: None)
 

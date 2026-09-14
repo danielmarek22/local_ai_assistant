@@ -22,6 +22,12 @@ Core orchestration logic of the assistant.
   participant creates a new identity in the v1 roster-free model.
 - `ContextBuilder`, `ToolExecutor`, and `TurnFinalizer` keep cross-feature turn
   coordination close to the orchestrator without placing it in feature packages.
+- `ResponseGenerator` owns direct streaming, native tool-loop phases, correction and
+  recovery policy, and avatar/text event emission. The orchestrator constructs it with
+  explicit dependencies for each generation and retains input acceptance, authoritative
+  turn identity, retrieval, assistant persistence, and finalization. Generation receives
+  only a tool-trace writer, not the history store or orchestrator itself. Model/tool
+  resources remain application-owned; a generator does not close them.
 - `app/avatar/stream_processor.py` evaluates balanced bracket candidates against the configured avatar
   allowlists and removes invalid candidates. Escaped brackets and brackets inside
   fenced code, inline code, Markdown links, images, and references remain ordinary text.

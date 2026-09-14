@@ -17,6 +17,13 @@ on live WebSocket objects or transport-specific send/receive behavior.
 Approval decision parsing remains with the connection hub because it is part of the
 WebSocket request/response lifecycle rather than a standalone domain service.
 
+Speech synthesis is delegated to `app/tts/delivery.py`. `AudioDelivery` owns queue
+admission, the serial worker, job futures, and draining shutdown. The server lifespan
+starts and closes that owner rather than manipulating queue/sentinel/task state.
+The transport bridge still determines sentence boundaries, output frame order, and
+text fallback when synthesis raises. Backend deadlines and independent text completion
+remain separate stabilization work (Finding 37).
+
 Assistant state is runtime state rather than durable chat history. The connection hub
 owns its session-scoped snapshot so refreshed clients can restore the current state and
 active turn from `session_init`; completed or interrupted turns reset that snapshot.

@@ -1113,7 +1113,7 @@ class OrchestratorTests(unittest.TestCase):
             return True
 
         events, observation = consume_generator(
-            orch._execute_late_tool_call(
+            orch._response_generator()._execute_late_tool_call(
                 session_id=self.SESSION_ID,
                 call=call,
                 user_text="run command",
@@ -1384,7 +1384,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(speech_texts[-1], "Answer.")
         self.assertEqual(history.records[1][2], "Answer.")
 
-    @patch("app.core.orchestrator.trace_event")
+    @patch("app.core.response_generator.trace_event")
     def test_trace_logs_reasoning_response_alongside_visible_response(self, trace_event_mock):
         (
             orch,

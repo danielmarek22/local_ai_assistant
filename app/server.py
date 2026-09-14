@@ -11,7 +11,7 @@ import uuid
 import time
 import emoji
 from pathlib import Path
-from dataclasses import dataclass
+from app.tts.delivery import AudioDelivery
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pydantic import BaseModel, Field
@@ -89,7 +89,6 @@ AUDIO_DIR = STATIC_DIR / "audio"
 _GENERATED_AUDIO_NAME_RE = re.compile(r"^[0-9a-f]{32}\.wav$")
 
 _SENTINEL = object()
-_TTS_STOP = object()
 TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
 MAX_ATTACHMENTS_PER_TURN = 8
@@ -391,14 +390,6 @@ def parse_relay_message(
     return frame.text, sender
 
 
-@dataclass
-class TTSJob:
-    text: str
-    output_path: Path
-    result_future: asyncio.Future[None]
-    session_id: str
-
-
 class ReflectRequest(BaseModel):
     days_old: int = Field(default=14, ge=0)
 
@@ -431,69 +422,13 @@ async def run_generator(gen: Iterator[Any]):
         yield item
 
 
-async def tts_worker(queue: asyncio.Queue, tts_engine):
-    """
-    Single TTS worker that serializes synth requests and keeps blocking work
-    off the asyncio event loop.
-    """
-    loop = asyncio.get_running_loop()
-    logger.info("TTS worker started")
-
-    while True:
-        job = await queue.get()
-        try:
-            if job is _TTS_STOP:
-                logger.info("TTS worker stopping")
-                return
-
-            if tts_engine is None:
-                raise RuntimeError("TTS engine has not been initialized")
-
-            tts_start = time.perf_counter()
-            await loop.run_in_executor(
-                None,
-                tts_engine.synthesize,
-                job.text,
-                job.output_path,
-            )
-
-            logger.debug(
-                "[%s] TTS complete (%.2f ms)",
-                job.session_id,
-                (time.perf_counter() - tts_start) * 1000,
-            )
-
-            if not job.result_future.done():
-                job.result_future.set_result(None)
-
-        except Exception as exc:
-            if isinstance(job, TTSJob) and not job.result_future.done():
-                job.result_future.set_exception(exc)
-            logger.exception("TTS worker failed to synthesize audio")
-
-        finally:
-            queue.task_done()
-
-
 async def synthesize_async(
     text: str,
     output_path: Path,
     session_id: str,
     application: FastAPI | None = None,
 ):
-    queue: asyncio.Queue = (application or app).state.tts_queue
-    loop = asyncio.get_running_loop()
-    result_future: asyncio.Future[None] = loop.create_future()
-
-    await queue.put(
-        TTSJob(
-            text=text,
-            output_path=output_path,
-            result_future=result_future,
-            session_id=session_id,
-        )
-    )
-    await result_future
+    await (application or app).state.audio_delivery.synthesize(text, output_path, session_id)
 
 
 def _build_session_init_payload(
@@ -990,11 +925,10 @@ async def _startup_application(
         application.state.server_instance_id,
     )
 
-    application.state.tts = tts_builder(settings.tts)
-    application.state.tts_queue = asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE)
-    application.state.tts_worker_task = asyncio.create_task(
-        tts_worker(application.state.tts_queue, application.state.tts)
+    application.state.audio_delivery = AudioDelivery(
+        tts_builder(settings.tts), queue_size=TTS_QUEUE_MAXSIZE,
     )
+    application.state.audio_delivery.start()
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
     application.state.voice_input_path = _voice_input_path(settings)
     if application.state.voice_input_path == VOICE_INPUT_STT:
@@ -1022,8 +956,7 @@ async def _shutdown_application(application: FastAPI) -> None:
     deletion_tasks = list(getattr(application.state, "session_deletion_tasks", {}).values())
     if deletion_tasks:
         await asyncio.gather(*deletion_tasks, return_exceptions=True)
-    queue = getattr(application.state, "tts_queue", None)
-    worker_task = getattr(application.state, "tts_worker_task", None)
+    audio_delivery = getattr(application.state, "audio_delivery", None)
     orchestrator = getattr(application.state, "orchestrator", None)
     autonomy_runtime = getattr(application.state, "autonomy_runtime", None)
     reflection_executor = getattr(application.state, "memory_reflection_executor", None)
@@ -1041,11 +974,8 @@ async def _shutdown_application(application: FastAPI) -> None:
             if callable(close_orchestrator):
                 close_orchestrator()
         finally:
-            if queue is not None:
-                await queue.put(_TTS_STOP)
-            if worker_task is not None:
-                with suppress(asyncio.CancelledError):
-                    await worker_task
+            if audio_delivery is not None:
+                await audio_delivery.close()
 
 
 def create_app(
