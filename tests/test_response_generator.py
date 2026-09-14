@@ -17,6 +17,23 @@ def consume(generator):
 
 
 class ResponseGeneratorTests(unittest.TestCase):
+    def test_omitted_memory_call_does_not_add_a_verification_inference(self):
+        llm = SimpleNamespace(chat_buffered=Mock(side_effect=[
+            {"content": "I'll remember that."},
+        ]))
+        executor = SimpleNamespace(
+            get_native_tools=lambda **kwargs: [{"type": "function", "function": {
+                "name": "memory__write", "parameters": {"type": "object"},
+            }}],
+            execute=Mock(),
+        )
+        _, response = consume(ResponseGenerator(llm, executor, Mock()).stream_late_routed_response(
+            "session", [], "Remember our project decision.",
+        ))
+        self.assertEqual(response, "I'll remember that.")
+        llm.chat_buffered.assert_called_once()
+        executor.execute.assert_not_called()
+
     def test_direct_generation_emits_response_without_persistence_dependencies(self):
         trace = Mock()
         generator = ResponseGenerator(

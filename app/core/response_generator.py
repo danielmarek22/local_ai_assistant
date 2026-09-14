@@ -111,7 +111,11 @@ class ResponseGenerator:
                 "a temporary current activity usually uses beliefs__update only; a meaningful completed "
                 "shared event or durable project decision uses memory__write; incidental chat and Astra's "
                 "stylistic reactions use neither. Rarely, both are justified when a current revisable fact "
-                "and a distinct durable event narrative each have independent value."
+                "and a distinct durable event narrative each have independent value.\n"
+                "Only say information was saved or updated when a successful result from the "
+                "appropriate tool in this turn confirms it. A promise to remember is not a write. "
+                "If an explicit persistence request cannot be completed with the available tools, "
+                "explain that limitation or ask for the missing clarification."
             ),
         )
 

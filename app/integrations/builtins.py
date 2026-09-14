@@ -79,12 +79,12 @@ class MemoryIntegration:
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "The fact or instruction to persist in memory.",
+                            "description": "The durable event, decision, instruction, or narrative to persist.",
                             "minLength": 1,
                         },
                         "category": {
                             "type": "string",
-                            "description": "Optional memory category, such as general or preference.",
+                            "description": "Optional memory category, such as general, decision, or event.",
                         },
                         "importance": {
                             "type": "integer",

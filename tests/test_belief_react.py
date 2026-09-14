@@ -164,6 +164,36 @@ class ReactBeliefToolTests(unittest.TestCase):
             )
         ), [])
 
+    def test_polish_possessive_exposes_tool_and_persists_for_actual_sender(self):
+        text = "Moje koty to Luna i Oreo."
+        authoritative = turn(text=text)
+        context = self.context(authoritative)
+        self.assertEqual(context.prepared_belief_turn.grounded_subject_references(), ("Moje",))
+        self.assertEqual(len(self.registry.get_native_tools(invocation_context=context)), 1)
+        payload = assertion(text, "Luna and Oreo")
+        payload["assertions"][0].update(
+            subject_reference="Moje", predicate="pet_names",
+            value=["Luna", "Oreo"], expiry_policy="NO_AUTOMATIC_EXPIRY",
+        )
+        result = self.registry.invoke(ToolCall(CapabilityId("beliefs", "update"), payload), context)
+        self.assertEqual(result.status.value, "success", result.content)
+        stored = self.repository.get_visible("astra", "session-a", now=NOW)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].subject_id, authoritative.sender_id)
+        self.assertEqual(stored[0].value, ["Luna", "Oreo"])
+
+    def test_polish_conjunction_neither_exposes_nor_authorizes_a_self_report(self):
+        text = "Przecież już dużo razy o nich wspominałem, Luna i Oreo."
+        authoritative = turn(text=text)
+        context = self.context(authoritative)
+        self.assertEqual(context.prepared_belief_turn.grounded_subject_references(), ())
+        self.assertEqual(self.registry.get_native_tools(invocation_context=context), [])
+        payload = assertion(text)
+        payload["assertions"][0]["subject_reference"] = "i"
+        result = self.registry.invoke(ToolCall(CapabilityId("beliefs", "update"), payload), context)
+        self.assertEqual(result.status.value, "error")
+        self.assertEqual(self.repository.get_visible("astra", "session-a", now=NOW), [])
+
     def test_eligibility_accepts_supported_participants_and_rejects_runtime_sources(self):
         eligible = (
             turn(),

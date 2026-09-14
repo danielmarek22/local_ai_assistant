@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 from app.beliefs.models import AllowedSubject
@@ -9,6 +8,7 @@ from app.beliefs.subjects import (
     DEFAULT_ENVIRONMENT_SUBJECT,
     WORLD_SUBJECT,
     default_allowed_subjects,
+    grounded_subject_reference,
     participant_subject,
     subject_from_belief,
 )
@@ -88,20 +88,10 @@ class PreparedBeliefTurn:
         )
 
     def _grounded_reference(self, subject: AllowedSubject) -> str | None:
-        text = self.authoritative_turn.user_text
-        if subject.subject_id == self.authoritative_turn.sender_id:
-            match = re.search(
-                r"(?<!\w)(?:I(?:['\N{RIGHT SINGLE QUOTATION MARK}](?:m|ve|d))?|my|me|myself)(?!\w)",
-                text,
-                flags=re.IGNORECASE,
-            )
-            if match:
-                return match.group(0)
-        for label in subject.subject_reference_labels or (subject.subject_display_name,):
-            match = re.search(re.escape(label), text, flags=re.IGNORECASE)
-            if match:
-                return match.group(0)
-        return None
+        return grounded_subject_reference(
+            self.authoritative_turn.user_text, subject, list(self.allowed_subjects),
+            self.authoritative_turn.sender_id,
+        )
 
 
 class BeliefTurnPreparer:

@@ -55,6 +55,22 @@ invalidation evidence must be exact substrings of the authoritative participant 
 No call means no application row. A successful complete batch is atomic and records
 `react-tool-v1`; subsequent calls for the same message cannot append mutations.
 
+The tool catalog and mutation validator share subject-reference grounding. References
+must occur as complete tokens or phrases, not inside another name or word. Supported
+self references include standard English pronouns/contractions and explicit Polish
+pronouns and possessives such as `ja`, `mnie`, `mój`, and `moje`. Bare English `I` is
+case-sensitive: lowercase `i` is not a self-reference because it is also the Polish
+conjunction. This is bounded lexical matching, not language detection; it does not
+resolve every multilingual ambiguity or infer subjects from Polish verb endings.
+Ambiguous names and second-person aliases are omitted from the catalog rather than
+offered as arguments that the handler would reject.
+
+Native tool selection remains part of the existing response generation. There is no
+additional per-turn memory classifier or verification model call. The prompt requires
+a successful tool result before claiming a save, but this is not a deterministic
+response-integrity check: the model can still omit a warranted tool call or give an
+unsupported confirmation. Do not infer a durable memory/belief write from prose alone.
+
 Invalidation IDs come from a bounded, frozen tool-only catalog containing only tracks
 the current source may invalidate. It is not part of normal belief context, chat
 history, or Knowledge previews. The handler repeats authorization checks.
