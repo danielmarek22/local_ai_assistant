@@ -55,6 +55,17 @@ invalidation evidence must be exact substrings of the authoritative participant 
 No call means no application row. A successful complete batch is atomic and records
 `react-tool-v1`; subsequent calls for the same message cannot append mutations.
 
+Both mutation arrays are required. Use `invalidations: []` for an assertion-only
+batch, and `assertions: []` for a retraction-only batch. An empty permitted-invalidation
+catalog authorizes no retractions. Null, empty, and invented target IDs are rejected;
+no placeholder is removed automatically and no part of a rejected batch is applied.
+If a requested retraction has no permitted target, ask for clarification rather than
+silently dropping that operation. Schema validation errors include a bounded description
+of the failing field to help the existing single correction attempt repair the batch.
+This does not add a classifier or verification inference, and a model may still choose
+not to retry. A rejected assertion is not evidence that the assertion would otherwise
+pass subject, evidence, vocabulary, or expiry validation.
+
 The tool catalog and mutation validator share subject-reference grounding. References
 must occur as complete tokens or phrases, not inside another name or word. Supported
 self references include standard English pronouns/contractions and explicit Polish
