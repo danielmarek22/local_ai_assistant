@@ -45,6 +45,9 @@ jobs:
         if: matrix.python-version == '3.12'
         run: ruff check --select E9,F63,F7,F82 app tests main.py
 
+      - name: Run scoped type checks
+        run: python -m mypy --config-file mypy.ini --python-version "${{ matrix.python-version }}"
+
       - name: Run Python tests
         run: python -m unittest discover -s tests -v --buffer
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from app.core.session_ids import SessionDeletedError
 
@@ -8,7 +9,7 @@ from app.core.session_ids import SessionDeletedError
 class SessionTurnCoordinator:
     """Serializes a session and gives waiting user turns priority over events."""
 
-    def __init__(self, global_concurrency: int = 1):
+    def __init__(self, global_concurrency: int = 1) -> None:
         if int(global_concurrency) < 1:
             raise ValueError("global_concurrency must be at least one")
         self._global_concurrency = int(global_concurrency)
@@ -28,17 +29,17 @@ class SessionTurnCoordinator:
             await self._condition.wait_for(lambda: session_id not in self._active_sessions)
 
     @asynccontextmanager
-    async def user_turn(self, session_id: str):
+    async def user_turn(self, session_id: str) -> AsyncIterator[None]:
         async with self._turn(session_id, is_user=True):
             yield
 
     @asynccontextmanager
-    async def event_turn(self, session_id: str):
+    async def event_turn(self, session_id: str) -> AsyncIterator[None]:
         async with self._turn(session_id, is_user=False):
             yield
 
     @asynccontextmanager
-    async def _turn(self, session_id: str, *, is_user: bool):
+    async def _turn(self, session_id: str, *, is_user: bool) -> AsyncIterator[None]:
         async with self._condition:
             if is_user:
                 self._waiting_users += 1

@@ -25,3 +25,6 @@ astra_minecraft*
 
 # Generated documentation output
 site/
+
+# Local static type checker cache
+/.mypy_cache/

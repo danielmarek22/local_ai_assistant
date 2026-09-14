@@ -66,6 +66,23 @@ undefined names, keeping adoption separate from broad formatting cleanup:
 venv_app/bin/ruff check --select E9,F63,F7,F82 app tests main.py
 ```
 
+## Incremental type checks
+
+CI runs strict mypy checks on both supported Python versions. `mypy.ini` lists the
+initial scope: session IDs, turn coordination, session deletion guards, vector
+candidate validation, and the speech interface and delivery queue. Run it locally:
+
+```bash
+venv_app/bin/python -m mypy --config-file mypy.ini
+```
+
+Imported modules outside this list supply type information but their errors are not
+reported. This is an incremental gate, not whole-application type coverage; callers
+and backend implementations outside the list are not independently checked. Expand
+the list as boundaries gain explicit contracts, keeping strict checks enabled rather
+than adding blanket error suppressions. Runtime validation and regression tests remain
+necessary for external data and asynchronous behavior.
+
 ## Documentation expectations
 
 Update the generated documentation when a change affects system boundaries, data flow, configuration meaning, or a stable public contract. Keep the explanation close to the relevant architecture or guide page instead of maintaining a separate decision log.

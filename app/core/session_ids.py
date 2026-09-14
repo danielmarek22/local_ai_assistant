@@ -7,7 +7,7 @@ _SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
 
 
 class SessionDeletedError(ValueError):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("This conversation has been deleted")
 
 

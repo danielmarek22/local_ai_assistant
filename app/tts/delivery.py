@@ -5,8 +5,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.tts.base import TTS
+
 logger = logging.getLogger("server")
-_STOP = object()
 
 
 @dataclass
@@ -18,14 +19,14 @@ class _SpeechJob:
 
 
 class AudioDelivery:
-    def __init__(self, engine, *, queue_size: int = 128):
+    def __init__(self, engine: TTS | None, *, queue_size: int = 128) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
         self.engine = engine
-        self._queue = asyncio.Queue(maxsize=queue_size)
+        self._queue: asyncio.Queue[_SpeechJob | None] = asyncio.Queue(maxsize=queue_size)
         self._admission = asyncio.Lock()
-        self.worker_task = None
-        self._close_task = None
+        self.worker_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._closing = False
 
     def start(self) -> None:
@@ -38,7 +39,7 @@ class AudioDelivery:
         async with self._admission:
             if self._closing or self.worker_task is None or self.worker_task.done():
                 raise RuntimeError("Audio delivery is not running")
-            future = asyncio.get_running_loop().create_future()
+            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             await self._queue.put(_SpeechJob(text, output_path, future, session_id))
         await future
 
@@ -53,7 +54,7 @@ class AudioDelivery:
         async with self._admission:
             if self.worker_task is None:
                 return
-            await self._queue.put(_STOP)
+            await self._queue.put(None)
         await self.worker_task
 
     async def _run(self) -> None:
@@ -62,7 +63,7 @@ class AudioDelivery:
         while True:
             job = await self._queue.get()
             try:
-                if job is _STOP:
+                if job is None:
                     logger.info("TTS worker stopping")
                     return
                 if self.engine is None:
