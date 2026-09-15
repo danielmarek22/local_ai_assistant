@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -43,6 +43,32 @@ def _ndjson_line(payload: str) -> bytes:
 
 
 class HttpRetryTests(unittest.TestCase):
+    @patch("app.llm.ollama_stream.requests.Session.post")
+    def test_stream_records_native_ollama_telemetry_from_terminal_chunk(self, post_mock):
+        post_mock.return_value = _FakeStreamResponse(lines=[
+            b'{"message":{"content":"ok"},"done":false}',
+            b'{"message":{},"done":true,"done_reason":"stop","total_duration":9000000,"prompt_eval_count":42,"prompt_eval_duration":2000000,"eval_count":8,"eval_duration":4000000}',
+        ])
+        telemetry = Mock(enabled=True, full=False)
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            options={"num_ctx": 4096, "num_gpu": 20},
+            telemetry=telemetry,
+        )
+
+        self.assertEqual(list(client.stream_chat([{"role": "user", "content": "hello"}])), ["ok"])
+
+        metrics = telemetry.record_model_call.call_args.kwargs
+        self.assertEqual(metrics["prompt_tokens"], 42)
+        self.assertEqual(metrics["completion_tokens"], 8)
+        self.assertEqual(metrics["total_model_duration_ms"], 9.0)
+        self.assertEqual(metrics["decode_tokens_per_s"], 2000.0)
+        self.assertEqual(metrics["context_tokens_total"], 50)
+        self.assertEqual(metrics["num_ctx"], 4096)
+        self.assertEqual(metrics["num_gpu_layers"], 20)
+        self.assertIsNotNone(metrics["time_to_first_token_ms"])
+
     @patch("app.llm.ollama_stream.trace_event")
     @patch("app.llm.ollama_stream.requests.Session.post")
     def test_buffered_chat_waits_for_complete_tool_call_and_tool_wins_content(

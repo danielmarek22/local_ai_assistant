@@ -60,9 +60,11 @@ class OllamaClient(LLMClient):
         timeout_s: float = 30.0,
         max_retries: int = 2,
         retry_backoff_s: float = 0.25,
+        telemetry=None,
     ):
         self.model = model
         self._preload_url = f"{host}/api/generate"
+        self._show_url = f"{host}/api/show"
         self.url = f"{host}/api/chat"
         self.options = options or {}
         self.thinking_enabled = thinking_enabled
@@ -71,6 +73,7 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        self.telemetry = telemetry
         self._multimodal_supported = True
         self.last_chat_dropped_current_images = False
         self.last_chat_dropped_current_images_count = 0
@@ -103,6 +106,24 @@ class OllamaClient(LLMClient):
         except Exception as exc:
             logger.warning("Failed to preload model: %s", exc)
 
+    def load_telemetry_metadata(self) -> None:
+        """Best-effort model metadata lookup used only by full telemetry."""
+        if self.telemetry is None or not getattr(self.telemetry, "full", False):
+            return
+        try:
+            response = self.session.post(
+                self._show_url,
+                json={"model": self.model},
+                timeout=min(self.timeout_s, 30.0),
+            )
+            response.raise_for_status()
+            data = response.json()
+            details = data.get("details", {}) if isinstance(data, dict) else {}
+            quantization = details.get("quantization_level") if isinstance(details, dict) else None
+            self.telemetry.set_model_metadata(quantization=quantization)
+        except Exception as exc:
+            logger.warning("Unable to read Ollama model metadata for telemetry: %s", exc)
+
     def close(self) -> None:
         self.session.close()
 
@@ -119,6 +140,7 @@ class OllamaClient(LLMClient):
         max_retries_override: int | None = None,
         tools: list[dict] | None = None,
         format_override: dict | str | None = None,
+        telemetry_session_id: str | None = None,
     ) -> dict:
         """
         Blocking, non-streaming call.
@@ -274,6 +296,15 @@ class OllamaClient(LLMClient):
             },
         )
 
+        self._record_telemetry(
+            data,
+            started=request_started,
+            request_options=request_options,
+            call_mode="blocking",
+            phase="blocking",
+            telemetry_session_id=telemetry_session_id,
+        )
+
         return message
 
     def chat_buffered(
@@ -286,6 +317,7 @@ class OllamaClient(LLMClient):
         tools: list[dict] | None = None,
         generation_phase: str | None = None,
         react_iteration: int | None = None,
+        telemetry_session_id: str | None = None,
     ) -> dict:
         """Consume a native streamed generation atomically before exposing its result."""
         think_value = self._resolve_think_value(think_override)
@@ -335,8 +367,6 @@ class OllamaClient(LLMClient):
                         )
                     if not line:
                         continue
-                    if first_chunk_ms is None:
-                        first_chunk_ms = round((now - started) * 1000, 2)
                     if len(line) > _MAX_BUFFERED_LINE_BYTES:
                         raise InferenceFailure(
                             "malformed_response",
@@ -357,6 +387,10 @@ class OllamaClient(LLMClient):
                     message = chunk.get("message", {})
                     content = message.get("content") or ""
                     thinking = message.get("thinking") or ""
+                    if first_chunk_ms is None and (
+                        content or thinking or message.get("tool_calls")
+                    ):
+                        first_chunk_ms = round((now - started) * 1000, 2)
                     if not isinstance(content, str) or not isinstance(thinking, str):
                         raise InferenceFailure(
                             "malformed_response",
@@ -441,6 +475,16 @@ class OllamaClient(LLMClient):
                 "generation_token_count": final_chunk.get("eval_count"),
             },
         )
+        self._record_telemetry(
+            final_chunk,
+            started=started,
+            request_options=request_options,
+            time_to_first_token_ms=first_chunk_ms,
+            call_mode="buffered",
+            phase=generation_phase or "buffered",
+            react_iteration=react_iteration,
+            telemetry_session_id=telemetry_session_id,
+        )
         return message
 
     def stream_chat(
@@ -451,6 +495,7 @@ class OllamaClient(LLMClient):
         options_override: dict | None = None,
         generation_deadline_s: float | None = None,
         timeout_override: float | None = None,
+        telemetry_session_id: str | None = None,
     ) -> Iterator[str | dict]:
         """
         Streaming call. Yields text chunks for user-facing responses.
@@ -486,8 +531,9 @@ class OllamaClient(LLMClient):
 
         collected_content: list[str] = []
         collected_thinking: list[str] = []
+        stream_result = None
         try:
-            yield from self._stream_payload(
+            stream_result = yield from self._stream_payload(
                 payload,
                 collected_content,
                 collected_thinking,
@@ -529,7 +575,7 @@ class OllamaClient(LLMClient):
                     },
                 )
                 try:
-                    yield from self._stream_payload(
+                    stream_result = yield from self._stream_payload(
                         payload, collected_content, collected_thinking,
                         generation_deadline_s=generation_deadline_s,
                         timeout_override=timeout_override,
@@ -567,6 +613,16 @@ class OllamaClient(LLMClient):
                 "thinking": "".join(collected_thinking),
             },
         )
+        if stream_result is not None:
+            self._record_telemetry(
+                stream_result["final_chunk"],
+                started=stream_result["started"],
+                request_options=request_options,
+                time_to_first_token_ms=stream_result["time_to_first_token_ms"],
+                call_mode="streaming",
+                phase="response",
+                telemetry_session_id=telemetry_session_id,
+            )
 
     # ------------------------------------------------------------------
     # Private — streaming
@@ -586,6 +642,8 @@ class OllamaClient(LLMClient):
         in_thinking_block = False
 
         started = time.perf_counter()
+        first_token_ms = None
+        final_chunk: dict = {}
         with self._post_stream(payload, timeout_override=timeout_override) as r:
             for line in r.iter_lines():
                 if generation_deadline_s is not None and time.perf_counter() - started > generation_deadline_s:
@@ -603,6 +661,8 @@ class OllamaClient(LLMClient):
                 
                 # Intercept native tool calls and yield as a dict
                 tool_calls = message.get("tool_calls")
+                if first_token_ms is None and (content or thinking or tool_calls):
+                    first_token_ms = round((time.perf_counter() - started) * 1000, 2)
                 if tool_calls:
                     yield {"tool_calls": tool_calls}
 
@@ -622,6 +682,7 @@ class OllamaClient(LLMClient):
                     yield content
 
                 if chunk.get("done"):
+                    final_chunk = chunk
                     if in_thinking_block:
                         yield "\n</think>\n\n"
                     if chunk.get("done_reason") == "length":
@@ -630,6 +691,11 @@ class OllamaClient(LLMClient):
                             "before finishing — response may be truncated."
                         )
                     break
+        return {
+            "final_chunk": final_chunk,
+            "started": started,
+            "time_to_first_token_ms": first_token_ms,
+        }
 
     # ------------------------------------------------------------------
     # Private — request builders
@@ -820,6 +886,56 @@ class OllamaClient(LLMClient):
                 time.sleep(backoff)
 
         raise RuntimeError("unreachable")  # loop always raises or returns
+
+    def _record_telemetry(
+        self,
+        data: dict,
+        *,
+        started: float,
+        request_options: dict,
+        call_mode: str,
+        phase: str,
+        time_to_first_token_ms: float | None = None,
+        react_iteration: int | None = None,
+        telemetry_session_id: str | None = None,
+    ) -> None:
+        if self.telemetry is None or not getattr(self.telemetry, "enabled", False):
+            return
+        prompt_tokens = data.get("prompt_eval_count")
+        completion_tokens = data.get("eval_count")
+        eval_duration_ms = self._nanoseconds_to_ms(data.get("eval_duration"))
+        decode_tokens_per_s = None
+        if completion_tokens is not None and eval_duration_ms:
+            decode_tokens_per_s = float(completion_tokens) / (eval_duration_ms / 1000.0)
+        context_tokens_total = None
+        if prompt_tokens is not None and completion_tokens is not None:
+            context_tokens_total = int(prompt_tokens) + int(completion_tokens)
+        total_model_duration_ms = self._nanoseconds_to_ms(data.get("total_duration"))
+        if total_model_duration_ms is None:
+            total_model_duration_ms = (time.perf_counter() - started) * 1000
+
+        self.telemetry.record_model_call(
+            session_id=telemetry_session_id,
+            status="success",
+            call_mode=call_mode,
+            phase=phase,
+            react_iteration=react_iteration,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_eval_duration_ms=self._nanoseconds_to_ms(
+                data.get("prompt_eval_duration")
+            ),
+            eval_duration_ms=eval_duration_ms,
+            time_to_first_token_ms=time_to_first_token_ms,
+            decode_tokens_per_s=decode_tokens_per_s,
+            total_model_duration_ms=total_model_duration_ms,
+            http_wall_duration_ms=(time.perf_counter() - started) * 1000,
+            context_tokens_total=context_tokens_total,
+            model_name=self.model,
+            num_ctx=request_options.get("num_ctx"),
+            num_gpu_layers=request_options.get("num_gpu"),
+            done_reason=data.get("done_reason"),
+        )
 
     @staticmethod
     def _nanoseconds_to_ms(value):

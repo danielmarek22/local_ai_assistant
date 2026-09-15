@@ -803,8 +803,11 @@ class ChatHistoryStore:
             return self._build_attachment_vector_doc(item["role"], item["content"], attachment, sender, kind)
         return self._build_message_vector_doc(item["role"], item["content"], sender, kind)
 
-    def get_recent(self, session_id: str, limit: int = 10):
+    def get_recent(self, session_id: str, limit: int = 10, *, conversation_only: bool = False):
+        """Read bounded recent history; optionally use summarization eligibility."""
         session_id = validate_session_id(session_id)
+        if limit <= 0:
+            return []
         with self.db.connection() as conn:
             rows = conn.execute(
                 """
@@ -812,10 +815,11 @@ class ChatHistoryStore:
                        retry_error, retry_attempts
                 FROM chat_history
                 WHERE session_id = ? AND excluded_from_context = 0
+                  AND (? = 0 OR role IN ('user', 'assistant'))
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (session_id, limit),
+                (session_id, conversation_only, limit),
             ).fetchall()
             hydrated = list(reversed(self._rows_with_attachments(conn, rows)))
         trace_event(

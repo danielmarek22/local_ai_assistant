@@ -51,3 +51,15 @@ initialization while preserving typed control, pathfinding, safety modes, and ca
 Integrations that own background resources may implement `start(publisher)` and `close()`.
 Startup occurs only after the server event loop and journal are ready; shutdown runs in
 reverse registration order and isolates cleanup failures.
+
+## Invocation authority
+
+`InvocationContext.allowed_capabilities` is a frozen application-owned permission set.
+An empty set permits no capabilities; `None` preserves unrestricted participant/internal
+invocations. Event invocations with no explicit set default to no capabilities.
+The response generator snapshots the turn's set before inference and passes it through
+`ToolExecutor` to `IntegrationRegistry.invoke`, which rejects disallowed calls before
+availability checks, argument validation, or handler execution. Denials remain journaled.
+Schema exposure is separate from execution authorization; model-returned names never
+expand this set. Existing approval and belief provenance checks still apply to permitted
+calls.

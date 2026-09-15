@@ -79,7 +79,10 @@ The server translates those events into WebSocket payloads. The UI controls play
 ## Failure boundaries
 
 - Invalid client payloads fail before orchestration.
-- Capability schemas are validated before invocation.
+- Capability authority is checked at dispatch, independently of schema exposure.
+  An empty permitted set denies all tools; event calls missing explicit authority
+  also deny all tools. Participant/internal calls may use unrestricted application
+  authority. Allowed calls still pass schema, availability, approval, and domain checks.
 - A failed optional context provider does not stop the turn.
 - User input is durable before retrieval; semantic and episodic query failures are
   isolated independently, preserving successful context from the other provider.

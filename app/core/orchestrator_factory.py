@@ -53,6 +53,7 @@ from app.beliefs import (
     REACT_TOOL_BELIEF_VERSION,
 )
 from app.paths import DATA_DIR, STATIC_DIR, resolve_app_path
+from app.telemetry import TelemetryRecorder
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -71,6 +72,7 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
         "rep_pen": "repeat_penalty",
         "repeat_penalty": "repeat_penalty",
         "num_ctx": "num_ctx",
+        "num_gpu_layers": "num_gpu",
     }
 
     for source_key, target_key in field_map.items():
@@ -171,6 +173,23 @@ def _build_orchestrator(
     logger.info("Loading configuration")
     config = config or Config()
 
+    telemetry_cfg = getattr(config, "telemetry", None) or {
+        "mode": "none",
+        "file_name": "model-telemetry.jsonl",
+    }
+    logging_cfg = getattr(config, "logging", None) or {}
+    telemetry = TelemetryRecorder(
+        mode=telemetry_cfg["mode"],
+        file_path=(
+            resolve_app_path(logging_cfg.get("dir", "logs"))
+            / telemetry_cfg["file_name"]
+        ),
+        max_bytes=logging_cfg.get("max_bytes", 10_000_000),
+        backup_count=logging_cfg.get("backup_count", 5),
+    )
+    startup_resources.callback(telemetry.close)
+    active_telemetry = telemetry if telemetry.enabled else None
+
     logger.debug(
         "Config summary: llm_model=%s, integrations=%s",
         config.llm.get("model"),
@@ -202,6 +221,7 @@ def _build_orchestrator(
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
+        telemetry=active_telemetry,
     )
     startup_resources.callback(llm.close)
 
@@ -215,6 +235,7 @@ def _build_orchestrator(
     )
 
     llm.preload()
+    llm.load_telemetry_metadata()
 
     # --------------------------------------------------
     # Storage
@@ -401,7 +422,11 @@ def _build_orchestrator(
 
     integration_registry = IntegrationRegistry(integrations)
     startup_resources.callback(integration_registry.close)
-    tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
+    tool_executor = ToolExecutor(
+        integration_registry,
+        operation_store=autonomy_store,
+        telemetry=active_telemetry,
+    )
 
     # --------------------------------------------------
     # Context builder
@@ -463,6 +488,7 @@ def _build_orchestrator(
         recovery_num_predict=int(
             config.orchestrator.get("recovery_num_predict", 192)
         ),
+        telemetry=active_telemetry,
         database=db,
         vector_store=vector_store,
         belief_turn_preparer=(

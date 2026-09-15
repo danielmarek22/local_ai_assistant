@@ -159,6 +159,8 @@ class ResponseGenerator:
             accepts_stream_kwargs or "timeout_override" in stream_parameters
         ):
             stream_kwargs["timeout_override"] = timeout_override
+        if accepts_stream_kwargs or "telemetry_session_id" in stream_parameters:
+            stream_kwargs["telemetry_session_id"] = session_id
         for chunk in self.llm.stream_chat(messages, **stream_kwargs):
             text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
             if not text_chunk:
@@ -231,7 +233,7 @@ class ResponseGenerator:
         messages,
         user_text: str,
         tool_approval_callback: Callable[[dict], bool] | None = None,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         event: IntegrationEvent | None = None,
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         persist_tool_traces: bool = True,
@@ -240,6 +242,12 @@ class ResponseGenerator:
         initial_think_override=None,
     ):
         logger.info("[%s] Calling LLM with native late routing", session_id)
+        # Freeze application authority before inference or callbacks can mutate it.
+        # Event turns without explicit authority fail closed.
+        execution_capabilities = (
+            frozenset(allowed_capabilities) if allowed_capabilities is not None
+            else frozenset() if event is not None else None
+        )
         
         # THE MISSING LINK: Inject the high-level instruction before the loop
         self._inject_late_routing_system_message(messages)
@@ -280,7 +288,7 @@ class ResponseGenerator:
                     session_id=session_id,
                     messages=messages,
                     user_text=user_text,
-                    allowed_capabilities=allowed_capabilities,
+                    allowed_capabilities=execution_capabilities,
                     authoritative_turn=authoritative_turn,
                     prepared_belief_turn=prepared_belief_turn,
                     excluded_capabilities=(
@@ -362,6 +370,7 @@ class ResponseGenerator:
                     call=tool_call,
                     user_text=user_text,
                     tool_approval_callback=tool_approval_callback,
+                    allowed_capabilities=execution_capabilities,
                     event=event,
                     notification_callback=notification_callback,
                     authoritative_turn=authoritative_turn,
@@ -481,7 +490,7 @@ class ResponseGenerator:
         session_id: str,
         messages,
         user_text: str,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         authoritative_turn=None,
         prepared_belief_turn=None,
         excluded_capabilities: frozenset[CapabilityId] = frozenset(),
@@ -534,6 +543,7 @@ class ResponseGenerator:
                 generation_deadline_s=self.generation_deadline_s,
                 generation_phase=inference_phase.value,
                 react_iteration=react_iteration,
+                telemetry_session_id=session_id,
             )
         else:
             message = self.llm.chat(
@@ -764,6 +774,7 @@ class ResponseGenerator:
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         authoritative_turn=None,
         prepared_belief_turn=None,
+        allowed_capabilities: frozenset[CapabilityId] | None = None,
     ):
         capability = str(call.capability)
         yield AssistantThinkingEvent(text=f"\n[Using {capability}]\n")
@@ -775,6 +786,7 @@ class ResponseGenerator:
                 "approval_callback": tool_approval_callback,
                 "authoritative_turn": authoritative_turn,
                 "prepared_belief_turn": prepared_belief_turn,
+                "allowed_capabilities": allowed_capabilities,
             }
             if event is not None:
                 execute_kwargs.update({

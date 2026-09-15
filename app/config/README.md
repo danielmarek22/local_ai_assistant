@@ -21,6 +21,18 @@ Configuration management for the assistant.
 
 This layer should remain *dumb*: no business logic, only structured data.
 
+## Model telemetry
+
+`telemetry.mode` controls local model performance reporting:
+
+- `none` disables collection and output.
+- `minimal` emits one compact INFO-level summary for each completed user turn.
+- `full` also writes request- and turn-level JSONL records to
+  `logging.dir/telemetry.file_name`.
+
+Full records contain timing and token counts returned by Ollama plus retrieval,
+tool, and end-to-end turn durations. They never contain prompts or responses.
+
 ## Integrations
 
 - `integrations.web` configures the optional SearXNG-backed search capability;

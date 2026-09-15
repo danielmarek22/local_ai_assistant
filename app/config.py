@@ -29,6 +29,7 @@ _CONFIG_SECTIONS = {
     "logging",
     "orchestrator",
     "stt",
+    "telemetry",
     "tts",
     "vision_watchdog",
     "voice_input",
@@ -59,6 +60,7 @@ class _LLMGenerationConfig(_StrictConfigModel):
     rep_pen: float | None = Field(default=None, gt=0.0)
     repeat_penalty: float | None = Field(default=None, gt=0.0)
     num_ctx: int | None = Field(default=None, gt=0)
+    num_gpu_layers: int | None = Field(default=None, ge=-1)
 
     @model_validator(mode="after")
     def validate_aliases(self):
@@ -393,6 +395,19 @@ class _LoggingConfig(_StrictConfigModel):
         return self
 
 
+class _TelemetryConfig(_StrictConfigModel):
+    mode: Literal["none", "minimal", "full"] = "none"
+    file_name: str = "model-telemetry.jsonl"
+
+    @field_validator("file_name")
+    @classmethod
+    def validate_file_name(cls, value: str) -> str:
+        value = _stripped_nonempty(value, field_name="telemetry.file_name")
+        if Path(value).name != value:
+            raise ValueError("telemetry.file_name must be a file name without directories")
+        return value
+
+
 class _EnabledIntegrationConfig(_StrictConfigModel):
     enabled: bool
 
@@ -639,6 +654,7 @@ class _RuntimeConfigSections(_StrictConfigModel):
     tts: _TTSConfig
     stt: _STTConfig
     logging: _LoggingConfig
+    telemetry: _TelemetryConfig
     integrations: _IntegrationsConfig
     orchestrator: _OrchestratorConfig
     context: _ContextConfig
@@ -710,6 +726,7 @@ class Config:
 
         # Logging
         self.logging = self.raw.get("logging", {})
+        self.telemetry = self.raw.get("telemetry", {})
 
         runtime_sections = {
             "llm": self.llm,
@@ -718,6 +735,7 @@ class Config:
             "tts": self.tts,
             "stt": self.stt,
             "logging": self.logging,
+            "telemetry": self.telemetry,
             "integrations": self.integrations,
             "orchestrator": self.orchestrator,
             "context": self.context,

@@ -33,11 +33,11 @@ flowchart LR
 
 ### Rolling summaries
 
-`SummaryStore` keeps one evolving summary per session with a message-count checkpoint. `TurnFinalizer` updates it after enough new messages accumulate. The checkpoint lets context construction combine summarized history with every newer turn.
+`SummaryStore` keeps one evolving summary per session with a message-ID checkpoint. `TurnFinalizer` updates it after enough new messages accumulate. Context construction compares message IDs directly against this checkpoint. It reads the newest eligible user and assistant messages, excluding rows marked out of context, within the configured history limit. All newer messages in that window are retained, with up to two recent messages kept for continuity when the summary is current. If the unsummarized backlog exceeds the limit, the newest messages win; older backlog remains stored for subsequent summarization and the reader does not advance the checkpoint. Summaries without a checkpoint conservatively retain the full recent-history window.
 
 ## Retrieval during a turn
 
-Before the current user message is persisted, `MemoryRetriever` searches relevant long-term facts and episodic records from past sessions. Results are bounded and inserted into an explicitly untrusted background-context section of the system prompt.
+After the current user message is durably persisted, `MemoryRetriever` searches relevant long-term facts and episodic records from past sessions. Results are bounded and inserted into an explicitly untrusted background-context section of the system prompt.
 
 Retrieval is relevance-based; it is not a replacement for the current session's summary and recent-history window.
 

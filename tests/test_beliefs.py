@@ -2268,7 +2268,7 @@ class FakeHistory:
             latest[item["sender_id"]] = item
         return list(reversed(list(latest.values())))[:limit]
 
-    def get_recent(self, session_id=None, limit=10):
+    def get_recent(self, session_id=None, limit=10, *, conversation_only=False):
         return self.rows[-limit:]
 
     def get_summary_batch(self, session_id, after_message_id, limit):

@@ -80,10 +80,10 @@ class ContextBuilder:
 
         summary_record = self.summary_store.get(session_id) if self.summary_store else None
         if isinstance(summary_record, tuple):
-            summary, last_summarized_count = summary_record
+            summary, last_summarized_message_id = summary_record
         else:
             summary = summary_record
-            last_summarized_count = None
+            last_summarized_message_id = None
 
         messages.append({
             "role": "system",
@@ -106,15 +106,21 @@ class ContextBuilder:
                 bool(belief_context),
             )
 
-        history_limit = self._history_limit_for_summary(
-            session_id,
-            summary=summary,
-            last_summarized_count=last_summarized_count,
-        )
         history = self.history_store.get_recent(
             session_id=session_id,
-            limit=history_limit,
+            limit=self.history_limit,
+            conversation_only=True,
         )
+        if summary:
+            # Keep every newer row within the history budget, plus at least two
+            # recent messages for continuity when the summary is up to date.
+            anchor_start = max(0, len(history) - 2)
+            history = [
+                row for index, row in enumerate(history)
+                if index >= anchor_start
+                or last_summarized_message_id is None
+                or row["id"] > last_summarized_message_id
+            ]
 
         seen = set()
         current_user_key = (
@@ -187,34 +193,11 @@ class ContextBuilder:
                 "memory_context": memory_context,
                 "integration_context": integration_context,
                 "belief_context": belief_context,
-                "history_limit_used": history_limit,
+                "history_limit_used": self.history_limit,
                 "messages": messages,
             },
         )
         return messages
-
-    def _history_limit_for_summary(
-        self,
-        session_id: str,
-        *,
-        summary: str | None,
-        last_summarized_count: int | None,
-    ) -> int:
-        if not summary:
-            return self.history_limit
-
-        # A summary is only authoritative through its saved checkpoint. Keep
-        # all newer messages (within the configured safety bound) so reopening
-        # a chat reconstructs the same state that existed before a restart.
-        count_messages = getattr(self.history_store, "count_messages", None)
-        if not callable(count_messages) or last_summarized_count is None:
-            return min(2, self.history_limit)
-
-        unsummarized_count = max(
-            0,
-            count_messages(session_id) - int(last_summarized_count),
-        )
-        return min(self.history_limit, max(2, unsummarized_count))
 
     def _with_attachment_context(
         self,

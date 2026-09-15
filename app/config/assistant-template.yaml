@@ -140,6 +140,11 @@ logging:
   trace_max_bytes: 10000000
   trace_backup_count: 5
 
+telemetry:
+  # none: disabled; minimal: one INFO summary per turn; full: summary plus JSONL.
+  mode: none
+  file_name: model-telemetry.jsonl
+
 integrations:
   web:
     enabled: true

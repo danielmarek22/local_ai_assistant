@@ -29,7 +29,7 @@ class FakeHistory:
     def session_exists(self, session_id):
         return session_id in self.sessions
 
-    def get_recent(self, session_id, limit):
+    def get_recent(self, session_id, limit, *, conversation_only=False):
         return []
 
 

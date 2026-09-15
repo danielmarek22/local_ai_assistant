@@ -42,6 +42,7 @@ class ConfigTests(unittest.TestCase):
             ({"orchestrator": {"recovery_num_predict": True}}, "recovery_num_predict"),
             ({"voice_input": {"path": "native"}}, "voice_input.path"),
             ({"vision_watchdog": {"max_new_tokens": -1}}, "max_new_tokens"),
+            ({"telemetry": {"mode": "verbose"}}, "telemetry.mode"),
         )
         for payload, expected in invalid:
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
@@ -399,10 +400,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(template["beliefs"]["processing_mode"], "disabled")
         self.assertNotIn("extraction_enabled", template["beliefs"])
         self.assertNotIn("planner", template)
+        self.assertEqual(template["telemetry"]["mode"], "none")
 
         config = Config(template_path)
         self.assertEqual(config.llm["backend"], "ollama")
         self.assertEqual(config.assistant["display_name"], "Astra")
+
+    def test_telemetry_defaults_and_full_mode_are_normalized(self):
+        default = self._load({})
+        self.assertEqual(default.telemetry["mode"], "none")
+        self.assertEqual(default.telemetry["file_name"], "model-telemetry.jsonl")
+
+        configured = self._load({"telemetry": {"mode": "full", "file_name": "metrics.jsonl"}})
+        self.assertEqual(configured.telemetry["mode"], "full")
+        self.assertEqual(configured.telemetry["file_name"], "metrics.jsonl")
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

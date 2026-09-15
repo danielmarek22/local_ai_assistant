@@ -70,6 +70,7 @@ class Orchestrator:
         generation_deadline_s: float = DEFAULT_GENERATION_DEADLINE_S,
         recovery_deadline_s: float = DEFAULT_RECOVERY_DEADLINE_S,
         recovery_num_predict: int = DEFAULT_RECOVERY_NUM_PREDICT,
+        telemetry=None,
         database=None,
         vector_store=None,
     ):
@@ -96,6 +97,7 @@ class Orchestrator:
         self.generation_deadline_s = max(1.0, float(generation_deadline_s))
         self.recovery_deadline_s = max(1.0, float(recovery_deadline_s))
         self.recovery_num_predict = max(1, int(recovery_num_predict))
+        self.telemetry = telemetry
         self._owned_resources = (database, vector_store)
         self._closed = False
         self.perception = PerceptionState()
@@ -135,6 +137,13 @@ class Orchestrator:
             except Exception:
                 logger.exception("LLM client failed during shutdown")
 
+        close_telemetry = getattr(self.telemetry, "close", None)
+        if callable(close_telemetry):
+            try:
+                close_telemetry()
+            except Exception:
+                logger.exception("Telemetry recorder failed during shutdown")
+
     # ============================================================
     # Public entry point
     # ============================================================
@@ -153,6 +162,13 @@ class Orchestrator:
         existing_user_message_id: int | None = None,
     ):
         start_ts = time.perf_counter()
+        telemetry_handle = (
+            self.telemetry.begin_turn(session_id, turn_kind="user")
+            if self.telemetry is not None
+            else None
+        )
+        telemetry_ended = False
+        telemetry_error_category = None
         observed_at = datetime.now(timezone.utc)
         sender = sender or SenderAttribution(
             sender_id=self.local_human_id,
@@ -262,7 +278,13 @@ class Orchestrator:
             )
 
             # 3. Retrieve optional context after authoritative input is durable
+            retrieval_started = time.perf_counter()
             retrieval = self.memory_retriever.retrieve(retrieval_text, session_id)
+            if self.telemetry is not None:
+                self.telemetry.record_retrieval_duration(
+                    (time.perf_counter() - retrieval_started) * 1000,
+                    session_id=session_id,
+                )
             memory_context = retrieval.memory_context
             trace_event(
                 "orchestrator",
@@ -363,6 +385,13 @@ class Orchestrator:
                     message=failure_message,
                     attempts=attempts,
                 )
+                if self.telemetry is not None:
+                    self.telemetry.end_turn(
+                        telemetry_handle,
+                        status="failure",
+                        error_category="deterministic_fallback",
+                    )
+                    telemetry_ended = True
                 idle_emitted = True
                 yield AssistantStateEvent(state=AssistantState.IDLE)
                 return
@@ -378,6 +407,10 @@ class Orchestrator:
                 payload={"response": response},
             )
             yield AssistantSpeechEvent(text=response, is_final=True)
+
+            if self.telemetry is not None:
+                self.telemetry.end_turn(telemetry_handle, status="success")
+                telemetry_ended = True
 
             # 6. Post-processing (image and conversation summarization)
             summarize_attachments = getattr(
@@ -414,8 +447,10 @@ class Orchestrator:
             yield AssistantStateEvent(state=AssistantState.IDLE)
         except GeneratorExit:
             is_closing = True
+            telemetry_error_category = "cancelled"
             raise
         except Exception as exc:
+            telemetry_error_category = getattr(exc, "category", type(exc).__name__)
             if user_message_id is None:
                 raise
             logger.exception("[%s] Turn generation failed; exposing retry action", session_id)
@@ -444,6 +479,12 @@ class Orchestrator:
             idle_emitted = True
             yield AssistantStateEvent(state=AssistantState.IDLE)
         finally:
+            if self.telemetry is not None and not telemetry_ended:
+                self.telemetry.end_turn(
+                    telemetry_handle,
+                    status="cancelled" if is_closing else "failure",
+                    error_category=telemetry_error_category,
+                )
             if not idle_emitted and not is_closing:
                 idle_emitted = True
                 yield AssistantStateEvent(state=AssistantState.IDLE)
