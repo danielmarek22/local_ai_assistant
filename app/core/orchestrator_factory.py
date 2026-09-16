@@ -282,7 +282,11 @@ def _build_orchestrator(
     # --------------------------------------------------
     logger.info("Initializing summarizers")
 
-    history_summarizer = HistorySummarizer(llm)
+    history_summarizer = HistorySummarizer(
+        llm,
+        timeout_s=config.orchestrator["summary_timeout_s"],
+        num_predict=config.orchestrator["summary_num_predict"],
+    )
     image_summarizer = ImageSummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
     history_store.image_summarizer = image_summarizer

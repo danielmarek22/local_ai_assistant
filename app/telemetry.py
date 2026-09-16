@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -12,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-TelemetryMode = Literal["none", "minimal", "full"]
+TelemetryMode = Literal["none", "minimal", "full", "extended"]
 
 logger = logging.getLogger("model_telemetry")
 
@@ -25,6 +27,154 @@ def _rounded(value: float | int | None) -> float | int | None:
     if isinstance(value, float):
         return round(value, 2)
     return value
+
+
+def _read_kib_value(fields: dict[str, str], key: str) -> int | None:
+    raw = fields.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw.split()[0]) * 1024
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _optional_float(value: str) -> float | None:
+    try:
+        return float(value.strip())
+    except (TypeError, ValueError):
+        return None
+
+
+class _ExtendedSystemProbe:
+    """Best-effort post-inference host and NVIDIA GPU snapshot."""
+
+    _GPU_FIELDS = {
+        "gpu_count": 0,
+        "gpu_vram_used_bytes": None,
+        "gpu_vram_free_bytes": None,
+        "gpu_utilization_percent": None,
+        "gpu_clock_mhz": None,
+        "gpu_temperature_c": None,
+        "gpu_power_w": None,
+        "gpu_performance_state": None,
+        "gpus": [],
+    }
+
+    def __init__(self) -> None:
+        self._nvidia_smi = shutil.which("nvidia-smi")
+        self._gpu_unavailable = self._nvidia_smi is None
+        self._gpu_lock = threading.Lock()
+
+    def collect(self) -> dict[str, Any]:
+        return {
+            "system_sample_timing": "post_model_call",
+            **self._host_metrics(),
+            **self._gpu_metrics(),
+        }
+
+    @staticmethod
+    def _host_metrics() -> dict[str, int | None]:
+        result: dict[str, int | None] = {
+            "process_rss_bytes": None,
+            "system_ram_used_bytes": None,
+            "system_ram_available_bytes": None,
+            "swap_used_bytes": None,
+        }
+        try:
+            status = {}
+            for line in Path("/proc/self/status").read_text().splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    status[key] = value.strip()
+            result["process_rss_bytes"] = _read_kib_value(status, "VmRSS")
+        except OSError:
+            pass
+
+        try:
+            meminfo = {}
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    meminfo[key] = value.strip()
+            total = _read_kib_value(meminfo, "MemTotal")
+            available = _read_kib_value(meminfo, "MemAvailable")
+            swap_total = _read_kib_value(meminfo, "SwapTotal")
+            swap_free = _read_kib_value(meminfo, "SwapFree")
+            result["system_ram_available_bytes"] = available
+            if total is not None and available is not None:
+                result["system_ram_used_bytes"] = max(0, total - available)
+            if swap_total is not None and swap_free is not None:
+                result["swap_used_bytes"] = max(0, swap_total - swap_free)
+        except OSError:
+            pass
+        return result
+
+    def _gpu_metrics(self) -> dict[str, Any]:
+        with self._gpu_lock:
+            if self._gpu_unavailable or self._nvidia_smi is None:
+                return dict(self._GPU_FIELDS)
+            try:
+                completed = subprocess.run(
+                    [
+                        self._nvidia_smi,
+                        "--query-gpu=index,name,memory.used,memory.free,utilization.gpu,"
+                        "clocks.current.graphics,temperature.gpu,power.draw,pstate",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+            except (OSError, subprocess.SubprocessError):
+                self._gpu_unavailable = True
+                return dict(self._GPU_FIELDS)
+
+        gpus = []
+        for line in completed.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) != 9:
+                continue
+            used_mib = _optional_float(parts[2])
+            free_mib = _optional_float(parts[3])
+            gpus.append(
+                {
+                    "index": int(parts[0]) if parts[0].isdigit() else parts[0],
+                    "name": parts[1],
+                    "vram_used_bytes": int(used_mib * 1024 * 1024) if used_mib is not None else None,
+                    "vram_free_bytes": int(free_mib * 1024 * 1024) if free_mib is not None else None,
+                    "utilization_percent": _optional_float(parts[4]),
+                    "clock_mhz": _optional_float(parts[5]),
+                    "temperature_c": _optional_float(parts[6]),
+                    "power_w": _optional_float(parts[7]),
+                    "performance_state": parts[8] or None,
+                }
+            )
+        if not gpus:
+            return dict(self._GPU_FIELDS)
+
+        def values(key: str) -> list[float]:
+            return [float(item[key]) for item in gpus if item.get(key) is not None]
+
+        used = values("vram_used_bytes")
+        free = values("vram_free_bytes")
+        utilization = values("utilization_percent")
+        clocks = values("clock_mhz")
+        temperatures = values("temperature_c")
+        power = values("power_w")
+        states = [str(item["performance_state"]) for item in gpus if item.get("performance_state")]
+        return {
+            "gpu_count": len(gpus),
+            "gpu_vram_used_bytes": int(sum(used)) if used else None,
+            "gpu_vram_free_bytes": int(sum(free)) if free else None,
+            "gpu_utilization_percent": max(utilization) if utilization else None,
+            "gpu_clock_mhz": max(clocks) if clocks else None,
+            "gpu_temperature_c": max(temperatures) if temperatures else None,
+            "gpu_power_w": sum(power) if power else None,
+            "gpu_performance_state": ",".join(states) if states else None,
+            "gpus": gpus,
+        }
 
 
 @dataclass
@@ -60,8 +210,9 @@ class TelemetryRecorder:
         self._turn_lock = threading.Lock()
         self._turns_by_session: dict[str, _TurnCapture] = {}
         self._model_metadata: dict[str, Any] = {"quantization": None}
+        self._extended_probe = _ExtendedSystemProbe() if mode == "extended" else None
 
-        if mode == "full":
+        if mode in {"full", "extended"}:
             path = Path(file_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             handler = RotatingFileHandler(
@@ -79,7 +230,11 @@ class TelemetryRecorder:
 
     @property
     def full(self) -> bool:
-        return self.mode == "full"
+        return self.mode in {"full", "extended"}
+
+    @property
+    def extended(self) -> bool:
+        return self.mode == "extended"
 
     def set_model_metadata(self, **metadata: Any) -> None:
         if self.full:
@@ -114,6 +269,7 @@ class TelemetryRecorder:
         if not self.enabled:
             return
         capture = self._capture_for_session(session_id) if session_id else None
+        extended_metrics = self._extended_probe.collect() if self._extended_probe else {}
         record = {
             "schema_version": 1,
             "event": "model_call",
@@ -122,6 +278,7 @@ class TelemetryRecorder:
             "session_id": capture.session_id if capture is not None else None,
             "call_id": uuid.uuid4().hex,
             **self._model_metadata,
+            **extended_metrics,
             **{key: _rounded(value) for key, value in metrics.items()},
         }
         if capture is not None:

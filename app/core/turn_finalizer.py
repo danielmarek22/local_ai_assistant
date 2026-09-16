@@ -44,7 +44,7 @@ class TurnFinalizer:
         history = self.history.get_summary_batch(
             session_id=session_id,
             after_message_id=last_message_id,
-            limit=max(100, self.summary_trigger),
+            limit=self.summary_trigger,
         )
         trace_event(
             "turn_finalizer",

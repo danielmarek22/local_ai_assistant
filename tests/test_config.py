@@ -15,6 +15,20 @@ class ConfigTests(unittest.TestCase):
             config_file.flush()
             return Config(config_file.name)
 
+    def test_summary_generation_settings(self):
+        defaults = self._load({}).orchestrator
+        self.assertEqual(defaults["summary_timeout_s"], 300.0)
+        self.assertEqual(defaults["summary_num_predict"], 384)
+        custom = self._load({"orchestrator": {
+            "summary_timeout_s": 240.0, "summary_num_predict": 256,
+        }}).orchestrator
+        self.assertEqual(custom["summary_timeout_s"], 240.0)
+        self.assertEqual(custom["summary_num_predict"], 256)
+        for field, value in (("summary_timeout_s", 0), ("summary_timeout_s", 3601),
+                             ("summary_num_predict", 0), ("summary_num_predict", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                self._load({"orchestrator": {field: value}})
+
     def test_document_root_and_sections_must_be_mappings(self):
         for payload, expected in (
             (["not", "a", "mapping"], "document root must be a mapping"),
@@ -414,6 +428,9 @@ class ConfigTests(unittest.TestCase):
         configured = self._load({"telemetry": {"mode": "full", "file_name": "metrics.jsonl"}})
         self.assertEqual(configured.telemetry["mode"], "full")
         self.assertEqual(configured.telemetry["file_name"], "metrics.jsonl")
+
+        extended = self._load({"telemetry": {"mode": "extended"}})
+        self.assertEqual(extended.telemetry["mode"], "extended")
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:

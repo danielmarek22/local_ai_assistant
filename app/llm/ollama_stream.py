@@ -65,6 +65,7 @@ class OllamaClient(LLMClient):
         self.model = model
         self._preload_url = f"{host}/api/generate"
         self._show_url = f"{host}/api/show"
+        self._ps_url = f"{host}/api/ps"
         self.url = f"{host}/api/chat"
         self.options = options or {}
         self.thinking_enabled = thinking_enabled
@@ -901,6 +902,7 @@ class OllamaClient(LLMClient):
     ) -> None:
         if self.telemetry is None or not getattr(self.telemetry, "enabled", False):
             return
+        http_wall_duration_ms = (time.perf_counter() - started) * 1000
         prompt_tokens = data.get("prompt_eval_count")
         completion_tokens = data.get("eval_count")
         eval_duration_ms = self._nanoseconds_to_ms(data.get("eval_duration"))
@@ -912,7 +914,29 @@ class OllamaClient(LLMClient):
             context_tokens_total = int(prompt_tokens) + int(completion_tokens)
         total_model_duration_ms = self._nanoseconds_to_ms(data.get("total_duration"))
         if total_model_duration_ms is None:
-            total_model_duration_ms = (time.perf_counter() - started) * 1000
+            total_model_duration_ms = http_wall_duration_ms
+        extended_metrics = {}
+        if getattr(self.telemetry, "extended", False):
+            cached_prompt_tokens = next(
+                (
+                    data.get(key)
+                    for key in (
+                        "cached_prompt_tokens",
+                        "cached_prompt_eval_count",
+                        "prompt_cache_count",
+                    )
+                    if data.get(key) is not None
+                ),
+                None,
+            )
+            extended_metrics = {
+                "model_load_duration_ms": self._nanoseconds_to_ms(
+                    data.get("load_duration")
+                ),
+                "cached_prompt_tokens": cached_prompt_tokens,
+                "actually_evaluated_prompt_tokens": prompt_tokens,
+                **self._extended_runtime_metrics(),
+            }
 
         self.telemetry.record_model_call(
             session_id=telemetry_session_id,
@@ -929,13 +953,67 @@ class OllamaClient(LLMClient):
             time_to_first_token_ms=time_to_first_token_ms,
             decode_tokens_per_s=decode_tokens_per_s,
             total_model_duration_ms=total_model_duration_ms,
-            http_wall_duration_ms=(time.perf_counter() - started) * 1000,
+            http_wall_duration_ms=http_wall_duration_ms,
             context_tokens_total=context_tokens_total,
             model_name=self.model,
             num_ctx=request_options.get("num_ctx"),
             num_gpu_layers=request_options.get("num_gpu"),
             done_reason=data.get("done_reason"),
+            **extended_metrics,
         )
+
+    def _extended_runtime_metrics(self) -> dict:
+        defaults = {
+            "ollama_model_vram_bytes": None,
+            "kv_cache_bytes": None,
+            "context_allocation_tokens": None,
+            "active_model_runners": None,
+            "active_contexts": None,
+        }
+        if self.telemetry is None or not getattr(self.telemetry, "extended", False):
+            return defaults
+        try:
+            response = self.session.get(
+                self._ps_url,
+                timeout=min(self.timeout_s, 2.0),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            logger.debug("Unable to read Ollama runtime telemetry: %s", exc)
+            return defaults
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return defaults
+        runner = next(
+            (
+                item
+                for item in models
+                if isinstance(item, dict)
+                and (item.get("model") == self.model or item.get("name") == self.model)
+            ),
+            None,
+        )
+        active_contexts = None
+        reported_contexts = [
+            item.get("active_contexts")
+            for item in models
+            if isinstance(item, dict) and isinstance(item.get("active_contexts"), int)
+        ]
+        if reported_contexts:
+            active_contexts = sum(reported_contexts)
+        if runner is None:
+            return {**defaults, "active_model_runners": len(models), "active_contexts": active_contexts}
+        kv_cache_bytes = runner.get("kv_cache_bytes")
+        if kv_cache_bytes is None:
+            kv_cache_bytes = runner.get("kv_cache_size")
+        return {
+            "ollama_model_vram_bytes": runner.get("size_vram"),
+            "kv_cache_bytes": kv_cache_bytes,
+            "context_allocation_tokens": runner.get("context_length"),
+            "active_model_runners": len(models),
+            "active_contexts": active_contexts,
+        }
 
     @staticmethod
     def _nanoseconds_to_ms(value):

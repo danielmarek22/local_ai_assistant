@@ -29,9 +29,18 @@ This layer should remain *dumb*: no business logic, only structured data.
 - `minimal` emits one compact INFO-level summary for each completed user turn.
 - `full` also writes request- and turn-level JSONL records to
   `logging.dir/telemetry.file_name`.
+- `extended` adds post-inference host, NVIDIA GPU, and Ollama runner snapshots to
+  each model-call record. Unsupported counters are written as `null`.
 
 Full records contain timing and token counts returned by Ollama plus retrieval,
 tool, and end-to-end turn durations. They never contain prompts or responses.
+
+Extended records sample Astra's RSS and Linux memory state after each model call.
+When NVIDIA SMI is available, they also include per-GPU and aggregate VRAM,
+utilization, clock, temperature, power, and performance-state values. Ollama's
+`/api/ps` supplies loaded runner count, model VRAM, and context allocation. The
+current Ollama API does not guarantee prompt-cache hits, KV-cache bytes, or active
+context count, so those keys remain `null` unless the runtime reports them.
 
 ## Integrations
 

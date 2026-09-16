@@ -77,3 +77,5 @@ never supplements an existing strict match.
 
 Past-conversation vector matches use the separate
 `context.episodic_memory_max_distance` ceiling and do not use the semantic fallback.
+
+History summarization uses its own `orchestrator.summary_timeout_s` (300 seconds) and `orchestrator.summary_num_predict` (384 output tokens), with thinking disabled and temperature 0.2. These settings do not change normal chat generation. Each completed turn summarizes at most `summary_trigger` pending messages, preserving the remaining backlog for later turns. Failed requests leave the saved summary and checkpoint unchanged. The batch bounds message count, not token count; unusually long messages can still exceed the timeout.

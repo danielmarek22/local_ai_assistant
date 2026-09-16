@@ -396,7 +396,7 @@ class _LoggingConfig(_StrictConfigModel):
 
 
 class _TelemetryConfig(_StrictConfigModel):
-    mode: Literal["none", "minimal", "full"] = "none"
+    mode: Literal["none", "minimal", "full", "extended"] = "none"
     file_name: str = "model-telemetry.jsonl"
 
     @field_validator("file_name")
@@ -559,6 +559,8 @@ class _IntegrationsConfig(_StrictConfigModel):
 
 class _OrchestratorConfig(_StrictConfigModel):
     summary_trigger: int = Field(default=10, gt=0)
+    summary_timeout_s: float = Field(default=300.0, gt=0.0, le=3600.0)
+    summary_num_predict: int = Field(default=384, gt=0)
     generation_deadline_s: float = Field(default=600.0, gt=0)
     recovery_deadline_s: float = Field(default=180.0, gt=0)
     recovery_num_predict: int = Field(default=192, gt=0)

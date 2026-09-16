@@ -141,7 +141,7 @@ logging:
   trace_backup_count: 5
 
 telemetry:
-  # none: disabled; minimal: one INFO summary per turn; full: summary plus JSONL.
+  # none: disabled; minimal: INFO summary; full: JSONL; extended: JSONL plus system/GPU data.
   mode: none
   file_name: model-telemetry.jsonl
 

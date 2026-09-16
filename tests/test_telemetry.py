@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.telemetry import TelemetryRecorder
@@ -102,6 +103,32 @@ class TelemetryRecorderTests(unittest.TestCase):
         self.assertEqual(turn["model_call_count"], 1)
         self.assertEqual(turn["prompt_tokens"], 3)
         self.assertEqual(turn["tool_duration_ms"], 25.0)
+
+    @patch("app.telemetry.subprocess.run")
+    @patch("app.telemetry.shutil.which", return_value="/usr/bin/nvidia-smi")
+    def test_extended_adds_host_and_gpu_snapshot(self, _which, run):
+        run.return_value = SimpleNamespace(
+            stdout="0, Test GPU, 1024, 2048, 75, 1800, 65, 150.5, P0\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "telemetry.jsonl"
+            recorder = TelemetryRecorder("extended", file_path=path)
+            recorder.record_model_call(
+                status="success",
+                model_name="test-model",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+            recorder.close()
+
+            record = json.loads(path.read_text().splitlines()[0])
+
+        self.assertIsInstance(record["process_rss_bytes"], int)
+        self.assertIsInstance(record["system_ram_available_bytes"], int)
+        self.assertEqual(record["gpu_count"], 1)
+        self.assertEqual(record["gpu_vram_used_bytes"], 1024 * 1024 * 1024)
+        self.assertEqual(record["gpu_utilization_percent"], 75.0)
+        self.assertEqual(record["gpu_performance_state"], "P0")
 
 
 if __name__ == "__main__":

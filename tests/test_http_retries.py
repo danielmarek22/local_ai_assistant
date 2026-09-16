@@ -1,4 +1,5 @@
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 import requests
@@ -50,6 +51,7 @@ class HttpRetryTests(unittest.TestCase):
             b'{"message":{},"done":true,"done_reason":"stop","total_duration":9000000,"prompt_eval_count":42,"prompt_eval_duration":2000000,"eval_count":8,"eval_duration":4000000}',
         ])
         telemetry = Mock(enabled=True, full=False)
+        telemetry.extended = False
         client = OllamaClient(
             model="test-model",
             host="http://localhost:11434",
@@ -68,6 +70,50 @@ class HttpRetryTests(unittest.TestCase):
         self.assertEqual(metrics["num_ctx"], 4096)
         self.assertEqual(metrics["num_gpu_layers"], 20)
         self.assertIsNotNone(metrics["time_to_first_token_ms"])
+
+    def test_extended_runtime_metrics_use_ollama_ps(self):
+        telemetry = Mock(enabled=True, full=True, extended=True)
+        client = OllamaClient(
+            model="test-model",
+            host="http://localhost:11434",
+            telemetry=telemetry,
+        )
+        client.session.get = Mock(return_value=_FakeResponse(data={"models": [
+            {
+                "name": "test-model",
+                "model": "test-model",
+                "size_vram": 123456,
+                "context_length": 8192,
+            },
+            {"name": "embedding-model", "model": "embedding-model"},
+        ]}))
+
+        metrics = client._extended_runtime_metrics()
+
+        self.assertEqual(metrics["ollama_model_vram_bytes"], 123456)
+        self.assertEqual(metrics["context_allocation_tokens"], 8192)
+        self.assertEqual(metrics["active_model_runners"], 2)
+        self.assertIsNone(metrics["kv_cache_bytes"])
+        self.assertIsNone(metrics["active_contexts"])
+
+        client._record_telemetry(
+            {
+                "load_duration": 3_000_000,
+                "prompt_eval_count": 42,
+                "prompt_eval_duration": 2_000_000,
+                "eval_count": 8,
+                "eval_duration": 4_000_000,
+                "total_duration": 9_000_000,
+            },
+            started=time.perf_counter(),
+            request_options={"num_ctx": 8192},
+            call_mode="streaming",
+            phase="response",
+        )
+        recorded = telemetry.record_model_call.call_args.kwargs
+        self.assertEqual(recorded["model_load_duration_ms"], 3.0)
+        self.assertEqual(recorded["actually_evaluated_prompt_tokens"], 42)
+        self.assertIsNone(recorded["cached_prompt_tokens"])
 
     @patch("app.llm.ollama_stream.trace_event")
     @patch("app.llm.ollama_stream.requests.Session.post")

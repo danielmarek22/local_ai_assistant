@@ -84,15 +84,15 @@ class SummaryCheckpointTests(unittest.TestCase):
 
     def test_backlog_is_processed_in_order_in_bounded_batches(self):
         last_id = self.seed(1100)
-        for _ in range(11):
+        for _ in range(550):
             self.finalizer.finalize("session")
         batches = [call.args[0] for call in self.summarizer.summarize.call_args_list]
-        self.assertEqual([len(batch) for batch in batches], [100] * 11)
+        self.assertEqual([len(batch) for batch in batches], [2] * 550)
         self.assertEqual([row["content"] for batch in batches for row in batch],
                          [f"session-user-{number}" for number in range(1100)])
         self.assertEqual(self.store.get("session")[1], last_id)
         self.finalizer.finalize("session")
-        self.assertEqual(self.summarizer.summarize.call_count, 11)
+        self.assertEqual(self.summarizer.summarize.call_count, 550)
 
     def test_tools_exclusions_and_other_sessions_do_not_count_or_shift_checkpoint(self):
         self.seed(1)
