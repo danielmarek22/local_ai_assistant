@@ -46,7 +46,7 @@ LiveKit and Microsoft Agent Framework remain useful secondary references, but we
 
 ### F1 — Enforce capability permissions at execution
 
-**Implementation update:** fixed in the working tree. Invocation authority is frozen and enforced by the registry, including direct executor paths. Event calls missing explicit authority fail closed. Eight regression tests are in `tests/test_capability_authority.py`. Validation: 573 Python tests passed, critical lint and scoped type checks passed, and the strict documentation build passed. F2 is addressed below; F3 remains open. The original finding below records the reviewed baseline.
+**Implementation update:** fixed in the working tree. Invocation authority is frozen and enforced by the registry, including direct executor paths. Event calls missing explicit authority fail closed. Eight regression tests are in `tests/test_capability_authority.py`. Validation: 573 Python tests passed, critical lint and scoped type checks passed, and the strict documentation build passed. F2 is addressed below; F3 is addressed below. The original finding below records the reviewed baseline.
 
 **Priority: first. Evidence: reproduced. Category: REFACTOR NOW within KEEP architecture.**
 
@@ -79,6 +79,8 @@ A message ID is global and can be much larger than the number of rows in a parti
 This is a local consistency bug, not a reason to install a memory framework. It corrects the initial assessment's claim that restored-summary continuity was fully covered.
 
 ### F3 — Make operation state transitions explicit and monotonic
+
+**Implementation update:** fixed in the working tree. Operation transitions now preserve the first terminal outcome, leave identical retries unchanged, and persist conflicting late results in a separate diagnostic journal. Repeated begin calls preserve the record; mismatched invocation identity is rejected. Seven regression tests cover terminal conflicts, duplicate completion, repeated begin, identity collisions, invalid statuses, concurrent completions across connections, journal persistence, and external completion before the initiating handler returns. Validation: all 584 Python tests, critical lint, scoped type checks, and the strict documentation build passed. The original finding below records the reviewed baseline.
 
 **Priority: next small fix. Evidence: reproduced. Category: REFACTOR NOW.**
 

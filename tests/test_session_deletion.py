@@ -120,7 +120,7 @@ class SessionDeletionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(reopened.claim_event(event.event_id))
             reopened.complete_event(event.event_id, "Late completion", {})
             self.assertEqual(reopened.get_event(event.event_id).status, "discarded")
-        reopened.finish_operation("op", "completed", "Late callback")
+        reopened.finish_operation("op", "success", "Late callback")
         self.assertEqual(reopened.get_operation("op").status, "cancelled")
         with self.assertRaisesRegex(ValueError, "deleted"):
             reopened.append_event(IntegrationEvent(spec.event, {}, "session"), spec)

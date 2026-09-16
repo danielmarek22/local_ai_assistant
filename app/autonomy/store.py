@@ -258,41 +258,75 @@ class AutonomyStore:
         causation_id: str | None,
     ) -> None:
         now = self._iso(datetime.now(timezone.utc))
-        with self._lock:
+        with self._lock, self._conn:
             require_writable_session(self._conn, session_id)
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO integration_operations (
+                INSERT INTO integration_operations (
                     invocation_id, capability, session_id, status, event_id,
                     root_event_id, causation_id, created_at, updated_at
                 ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                ON CONFLICT(invocation_id) DO NOTHING
                 """,
                 (
                     invocation_id, capability, session_id, event_id,
                     root_event_id, causation_id, now, now,
                 ),
             )
-            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM integration_operations WHERE invocation_id = ?", (invocation_id,),
+            ).fetchone()
+            identity = (capability, session_id, event_id, root_event_id, causation_id)
+            if tuple(row[key] for key in (
+                "capability", "session_id", "event_id", "root_event_id", "causation_id",
+            )) != identity:
+                raise ValueError(f"Operation ID already belongs to a different invocation: {invocation_id}")
 
     def finish_operation(self, invocation_id: str, status: str, result: str | None = None) -> None:
+        """Accept forward transitions only; retain contradictory results for diagnosis."""
+        if status not in {"pending", "success", "error", "denied", "unavailable", "cancelled"}:
+            raise ValueError(f"Invalid operation status: {status}")
+        now = self._iso(datetime.now(timezone.utc))
+        with self._lock, self._conn:
+            # Write before reading so separate store connections also serialize
+            # acceptance and conflict recording in one SQLite transaction.
+            cursor = self._conn.execute(
+                """
+                UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
+                WHERE invocation_id = ? AND (
+                    status = 'running' OR (status = 'pending' AND ? != 'pending')
+                )
+                """,
+                (status, result, now, invocation_id, status),
+            )
+            if cursor.rowcount:
+                return
+            row = self._conn.execute(
+                "SELECT status, result FROM integration_operations WHERE invocation_id = ?",
+                (invocation_id,),
+            ).fetchone()
+            # Unknown external IDs have never belonged to this store. Preserve
+            # the existing no-op behavior for those notifications.
+            if row is None or (row["status"] == status and row["result"] == result):
+                return
+            self._conn.execute(
+                """
+                INSERT INTO integration_operation_conflicts (
+                    invocation_id, accepted_status, accepted_result,
+                    attempted_status, attempted_result, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (invocation_id, row["status"], row["result"], status, result, now),
+            )
+
+    def operation_conflicts(self, invocation_id: str) -> list[dict[str, object]]:
+        """Return ignored conflicting results in arrival order."""
         with self._lock:
-            if status == "pending":
-                self._conn.execute(
-                    """
-                    UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
-                    WHERE invocation_id = ? AND status = 'running'
-                    """,
-                    (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
-                )
-            else:
-                self._conn.execute(
-                    """
-                    UPDATE integration_operations SET status = ?, result = ?, updated_at = ?
-                    WHERE invocation_id = ? AND status != 'cancelled'
-                    """,
-                    (status, result, self._iso(datetime.now(timezone.utc)), invocation_id),
-                )
-            self._conn.commit()
+            rows = self._conn.execute(
+                "SELECT * FROM integration_operation_conflicts WHERE invocation_id = ? ORDER BY id",
+                (invocation_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_operation(self, invocation_id: str) -> OperationRecord | None:
         with self._lock:
@@ -421,6 +455,18 @@ class AutonomyStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS integration_operation_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    invocation_id TEXT NOT NULL,
+                    accepted_status TEXT NOT NULL,
+                    accepted_result TEXT,
+                    attempted_status TEXT NOT NULL,
+                    attempted_result TEXT,
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_operation_conflicts_invocation
+                    ON integration_operation_conflicts(invocation_id, id);
 
                 CREATE TABLE IF NOT EXISTS autonomy_runtime_state (
                     key TEXT PRIMARY KEY,

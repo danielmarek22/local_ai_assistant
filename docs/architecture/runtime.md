@@ -62,6 +62,12 @@ This ordering matters: model arguments may express an intended action, but they 
 
     Integration events run through a durable autonomy queue. Each event declares an exact capability allowlist, correlation lineage, and notification policy. Internal final text is journaled; only explicit notification actions interrupt the user.
 
+## Operation outcomes
+
+The operation journal accepts `running → pending` and `running/pending → success/error/denied/unavailable/cancelled`. Terminal outcomes are final. Identical status/result retries leave the record and timestamps unchanged; contradictory results, including late pending acknowledgements, are retained in `integration_operation_conflicts` and available through `operation_conflicts()`. Acceptance and conflict recording are transactional across store connections.
+
+Beginning the same invocation again preserves its state. Reusing an ID with different capability, session, or lineage raises an error. Invalid result statuses are rejected; unknown external operation IDs remain a no-op. Session deletion cancels active operations and subsequent completions cannot revive them. Corrections require a new operation; there is no implicit terminal-state override.
+
 ## Presentation events
 
 The model's visible response is processed into separate runtime events:
