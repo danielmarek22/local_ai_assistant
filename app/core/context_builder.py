@@ -8,6 +8,7 @@ from app.core.conversation import (
     SenderType,
     SessionKind,
     render_group_message,
+    unwrap_assistant_envelope,
 )
 from app.logging import trace_event
 from app.perception.attachments import (
@@ -142,6 +143,8 @@ class ContextBuilder:
 
             row_attachments = self._normalize_history_attachments(row.get("attachments", []))
             row_sender = self._sender_for_row(row)
+            if session_kind == SessionKind.MANUAL_GROUP and role == "assistant":
+                content = unwrap_assistant_envelope(content, sender_id=row_sender.sender_id)
             key = self._build_seen_key(role, content, row_attachments, row_sender.sender_id)
             if key in seen:
                 continue

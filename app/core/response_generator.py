@@ -17,6 +17,9 @@ from app.core.assistant_state import AssistantState
 from app.avatar.stream_processor import StreamProcessor
 from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.core.conversation import (
+    AssistantEnvelopeFilter,
+    GROUP_CONTEXT_INSTRUCTION,
+    unwrap_assistant_envelope,
     InputSource,
     SenderAttribution,
     SenderType,
@@ -89,6 +92,12 @@ class ResponseGenerator:
         self.recovery_deadline_s = recovery_deadline_s
         self.recovery_num_predict = recovery_num_predict
 
+    @staticmethod
+    def _is_group_context(messages) -> bool:
+        return any(message.get("role") == "system"
+                   and GROUP_CONTEXT_INSTRUCTION in message.get("content", "")
+                   for message in messages)
+
     def _inject_late_routing_system_message(self, messages: list[dict]) -> None:
         inject_hidden_system_message(
             messages,
@@ -140,6 +149,7 @@ class ResponseGenerator:
             allowed_expressions=self.allowed_expressions,
         )
         thinking_splitter = ThinkingBlockSplitter()
+        envelope_filter = AssistantEnvelopeFilter(self._is_group_context(messages))
 
         stream_kwargs = {"think_override": think_override}
         stream_parameters = inspect.signature(self.llm.stream_chat).parameters
@@ -170,6 +180,7 @@ class ResponseGenerator:
             if thinking_chunk:
                 thinking_buffer += thinking_chunk
                 yield AssistantThinkingEvent(text=thinking_chunk)
+            visible_chunk = envelope_filter.push(visible_chunk)
             if not visible_chunk:
                 continue
                 
@@ -187,6 +198,8 @@ class ResponseGenerator:
             thinking_buffer += final_thinking_chunk
             yield AssistantThinkingEvent(text=final_thinking_chunk)
 
+        final_visible_chunk = (envelope_filter.push(final_visible_chunk)
+                               + envelope_filter.flush())
         if final_visible_chunk:
             if not visible_buffer and not final_visible_chunk.strip():
                 final_visible_chunk = ""
@@ -616,6 +629,8 @@ class ResponseGenerator:
         
         # If no tool was called, process whatever visible text it generated
         visible_content = message.get("content", "")
+        if self._is_group_context(messages):
+            visible_content = unwrap_assistant_envelope(visible_content)
         clean_response = ""
         
         if visible_content:

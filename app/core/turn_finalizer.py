@@ -1,7 +1,7 @@
 import logging
 
 from app.logging import trace_event
-from app.core.conversation import SessionKind, render_group_message
+from app.core.conversation import SessionKind, render_group_message, unwrap_assistant_envelope
 
 logger = logging.getLogger("turn_finalizer")
 
@@ -101,4 +101,8 @@ class TurnFinalizer:
         effective_sender = getattr(self.history, "effective_sender", None)
         if not callable(effective_sender):
             return row["content"]
-        return render_group_message(row["content"], effective_sender(row))
+        sender = effective_sender(row)
+        content = row["content"]
+        if row["role"] == "assistant":
+            content = unwrap_assistant_envelope(content, sender_id=sender.sender_id)
+        return render_group_message(content, sender)
