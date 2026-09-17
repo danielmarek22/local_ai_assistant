@@ -65,7 +65,7 @@ class ParticipantEnvelopeTests(unittest.TestCase):
         self.assertEqual((speech, result), ('Hello there!', 'Hello there!'))
         speech, result = consume(generator._stream_late_routing_step('group', messages, 'Hi'))
         self.assertEqual(speech, 'Hello there!')
-        self.assertEqual(result['response'], 'Hello there!')
+        self.assertEqual(result.response, 'Hello there!')
 
     def test_direct_response_is_not_unwrapped(self):
         wrapped = render_group_message('Hello', SENDER)
@@ -73,7 +73,7 @@ class ParticipantEnvelopeTests(unittest.TestCase):
         llm.chat_buffered.return_value = {'content': wrapped}
         generator = ResponseGenerator(llm, SimpleNamespace(get_native_tools=lambda **kwargs: []), Mock())
         _, result = consume(generator._stream_late_routing_step('direct', [], 'Hi'))
-        self.assertIn('PARTICIPANT_MESSAGE', result['response'])
+        self.assertIn('PARTICIPANT_MESSAGE', result.response)
 
     def test_context_and_summary_normalize_saved_assistant_only(self):
         wrapped = render_group_message(render_group_message('Hello', SENDER), SENDER)
