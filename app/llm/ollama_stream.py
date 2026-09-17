@@ -6,6 +6,7 @@ from typing import Iterator
 
 from . import image_fallback
 from .base import InferenceFailure, LLMClient
+from .stream_decoder import decode_buffered_chunk, decode_chunk
 from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.logging import trace_event
 
@@ -29,7 +30,6 @@ _THINKING_MIN_PREDICT = 2048
 # sequences at the top level; they must be passed inside `options`. See
 # _build_stream_options for where these are injected.
 _BUILTIN_STOP_SEQUENCES = ["<|eot_id|>", "<|im_end|>", "<|end_of_sentence|>"]
-_MAX_BUFFERED_LINE_BYTES = 512_000
 _MAX_BUFFERED_CONTENT_CHARS = 256_000
 _MAX_BUFFERED_THINKING_CHARS = 1_000_000
 _MAX_BUFFERED_TOOL_JSON_CHARS = 128_000
@@ -157,16 +157,15 @@ class OllamaClient(LLMClient):
         if options_override:
             request_options.update(options_override)
 
-        request_messages = messages
+        fallback = image_fallback.ImageFallback(
+            messages, multimodal_supported=self._multimodal_supported,
+        )
         self.last_chat_dropped_current_images = False
         self.last_chat_dropped_current_images_count = 0
         self.last_chat_image_fallback_strategy = None
 
-        if not self._multimodal_supported:
-            request_messages, _ = image_fallback.strip_images_from_messages(request_messages)
-
         payload = self._build_payload(
-            request_messages,
+            fallback.attempt.messages,
             stream=False,
             think_value=think_value,
             options=request_options,
@@ -182,81 +181,26 @@ class OllamaClient(LLMClient):
         trace_event("llm", "chat_request", payload=payload)
 
         request_started = time.perf_counter()
-        try:
-            r = self._post_with_retry(
-                payload,
-                stream=False,
-                timeout_override=timeout_override,
-                max_retries_override=image_fallback.resolve_request_retries(
-                    request_messages,
-                    max_retries_override,
-                ),
-            )
-        except requests.HTTPError as exc:
-            if not image_fallback.should_retry_without_images(
-                exc,
-                request_messages,
-                multimodal_supported=self._multimodal_supported,
-            ):
+        while True:
+            try:
+                r = self._post_with_retry(
+                    payload,
+                    stream=False,
+                    timeout_override=timeout_override,
+                    max_retries_override=image_fallback.resolve_request_retries(
+                        fallback.attempt.messages,
+                        max_retries_override,
+                    ),
+                )
+                break
+            except requests.HTTPError as exc:
+                payload["messages"] = self._next_image_attempt(fallback, exc, mode="chat").messages
+            except requests.RequestException as exc:
                 raise self._inference_failure(exc) from exc
 
-            response_text = image_fallback.http_error_text(exc)
-            if image_fallback.error_indicates_model_without_images(response_text):
-                self._multimodal_supported = False
-
-            fallback_candidates = image_fallback.build_fallback_messages(request_messages)
-            if not fallback_candidates:
-                raise
-
-            last_exc: requests.HTTPError = exc
-            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = fallback_messages
-                logger.warning(
-                    "Ollama chat rejected image payload (status=%s); retrying %s.",
-                    getattr(last_exc.response, "status_code", None),
-                    strategy,
-                )
-                trace_event(
-                    "llm",
-                    "chat_retry_without_images",
-                    payload={
-                        "status_code": getattr(last_exc.response, "status_code", None),
-                        "response_text": image_fallback.http_error_text(last_exc),
-                        "strategy": strategy,
-                        "dropped_current_images_count": dropped_current_images_count,
-                    },
-                )
-                try:
-                    r = self._post_with_retry(
-                        payload,
-                        stream=False,
-                        timeout_override=timeout_override,
-                        max_retries_override=image_fallback.resolve_request_retries(
-                            fallback_messages,
-                            max_retries_override,
-                        ),
-                    )
-                    self.last_chat_image_fallback_strategy = strategy
-                    if dropped_current_images_count > 0:
-                        self.last_chat_dropped_current_images = True
-                        self.last_chat_dropped_current_images_count = dropped_current_images_count
-                    break
-                except requests.HTTPError as retry_exc:
-                    if not image_fallback.should_retry_without_images(
-                        retry_exc,
-                        fallback_messages,
-                        multimodal_supported=self._multimodal_supported,
-                    ):
-                        raise self._inference_failure(retry_exc) from retry_exc
-                    last_exc = retry_exc
-                    if image_fallback.error_indicates_model_without_images(image_fallback.http_error_text(retry_exc)):
-                        self._multimodal_supported = False
-                except requests.RequestException as retry_exc:
-                    raise self._inference_failure(retry_exc) from retry_exc
-            else:
-                raise self._inference_failure(last_exc) from last_exc
-        except requests.RequestException as exc:
-            raise self._inference_failure(exc) from exc
+        self.last_chat_image_fallback_strategy = fallback.attempt.strategy
+        self.last_chat_dropped_current_images_count = fallback.attempt.dropped_current_images_count
+        self.last_chat_dropped_current_images = fallback.attempt.dropped_current_images_count > 0
 
         try:
             data = r.json()
@@ -367,23 +311,7 @@ class OllamaClient(LLMClient):
                         )
                     if not line:
                         continue
-                    if len(line) > _MAX_BUFFERED_LINE_BYTES:
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama stream chunk exceeded the bounded line size.",
-                        )
-                    try:
-                        chunk = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama returned malformed streamed JSON.",
-                        ) from exc
-                    if not isinstance(chunk, dict) or not isinstance(chunk.get("message", {}), dict):
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama returned an invalid streamed response shape.",
-                        )
+                    chunk = decode_buffered_chunk(line)
                     message = chunk.get("message", {})
                     content = message.get("content") or ""
                     thinking = message.get("thinking") or ""
@@ -506,16 +434,15 @@ class OllamaClient(LLMClient):
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
         request_options = self._merge_options(request_options, options_override)
-        request_messages = messages
+        fallback = image_fallback.ImageFallback(
+            messages, multimodal_supported=self._multimodal_supported,
+        )
         self.last_stream_dropped_current_images = False
         self.last_stream_dropped_current_images_count = 0
         self.last_stream_image_fallback_strategy = None
 
-        if not self._multimodal_supported:
-            request_messages, _ = image_fallback.strip_images_from_messages(request_messages)
-
         payload = self._build_payload(
-            request_messages,
+            fallback.attempt.messages,
             stream=True,
             think_value=think_value,
             options=request_options,
@@ -531,74 +458,27 @@ class OllamaClient(LLMClient):
 
         collected_content: list[str] = []
         collected_thinking: list[str] = []
-        stream_result = None
-        try:
-            stream_result = yield from self._stream_payload(
-                payload,
-                collected_content,
-                collected_thinking,
-                generation_deadline_s=generation_deadline_s,
-                timeout_override=timeout_override,
-            )
-        except requests.HTTPError as exc:
-            if not image_fallback.should_retry_without_images(
-                exc,
-                request_messages,
-                multimodal_supported=self._multimodal_supported,
-            ):
+        while True:
+            try:
+                stream_result = yield from self._stream_payload(
+                    payload,
+                    collected_content,
+                    collected_thinking,
+                    generation_deadline_s=generation_deadline_s,
+                    timeout_override=timeout_override,
+                )
+                break
+            except requests.HTTPError as exc:
+                payload["messages"] = self._next_image_attempt(fallback, exc, mode="stream").messages
+            except requests.RequestException as exc:
+                if fallback.attempt.strategy is not None:
+                    # Keep the existing fallback-stream exception contract.
+                    raise
                 raise self._inference_failure(exc) from exc
 
-            response_text = image_fallback.http_error_text(exc)
-            if image_fallback.error_indicates_model_without_images(response_text):
-                self._multimodal_supported = False
-
-            fallback_candidates = image_fallback.build_fallback_messages(request_messages)
-            if not fallback_candidates:
-                raise
-
-            last_exc: requests.HTTPError = exc
-            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = fallback_messages
-                logger.warning(
-                    "Ollama stream rejected image payload (status=%s); retrying %s.",
-                    getattr(last_exc.response, "status_code", None),
-                    strategy,
-                )
-                trace_event(
-                    "llm",
-                    "stream_retry_without_images",
-                    payload={
-                        "status_code": getattr(last_exc.response, "status_code", None),
-                        "response_text": image_fallback.http_error_text(last_exc),
-                        "strategy": strategy,
-                        "dropped_current_images_count": dropped_current_images_count,
-                    },
-                )
-                try:
-                    stream_result = yield from self._stream_payload(
-                        payload, collected_content, collected_thinking,
-                        generation_deadline_s=generation_deadline_s,
-                        timeout_override=timeout_override,
-                    )
-                    self.last_stream_image_fallback_strategy = strategy
-                    if dropped_current_images_count > 0:
-                        self.last_stream_dropped_current_images = True
-                        self.last_stream_dropped_current_images_count = dropped_current_images_count
-                    break
-                except requests.HTTPError as retry_exc:
-                    if not image_fallback.should_retry_without_images(
-                        retry_exc,
-                        fallback_messages,
-                        multimodal_supported=self._multimodal_supported,
-                    ):
-                        raise self._inference_failure(retry_exc) from retry_exc
-                    last_exc = retry_exc
-                    if image_fallback.error_indicates_model_without_images(image_fallback.http_error_text(retry_exc)):
-                        self._multimodal_supported = False
-            else:
-                raise self._inference_failure(last_exc) from last_exc
-        except requests.RequestException as exc:
-            raise self._inference_failure(exc) from exc
+        self.last_stream_image_fallback_strategy = fallback.attempt.strategy
+        self.last_stream_dropped_current_images_count = fallback.attempt.dropped_current_images_count
+        self.last_stream_dropped_current_images = fallback.attempt.dropped_current_images_count > 0
 
         logger.info(
             "Ollama stream complete (content_len=%d, thinking_len=%d)",
@@ -624,6 +504,35 @@ class OllamaClient(LLMClient):
                 telemetry_session_id=telemetry_session_id,
             )
 
+    def _next_image_attempt(
+        self,
+        fallback: image_fallback.ImageFallback,
+        exc: requests.HTTPError,
+        *,
+        mode: str,
+    ) -> image_fallback.ImageAttempt:
+        try:
+            attempt = fallback.retry(exc)
+        finally:
+            self._multimodal_supported = fallback.multimodal_supported
+        if attempt is None:
+            raise self._inference_failure(exc) from exc
+        status_code = getattr(exc.response, "status_code", None)
+        logger.warning(
+            "Ollama %s rejected image payload (status=%s); retrying %s.",
+            mode, status_code, attempt.strategy,
+        )
+        trace_event(
+            "llm", f"{mode}_retry_without_images",
+            payload={
+                "status_code": status_code,
+                "response_text": image_fallback.http_error_text(exc),
+                "strategy": attempt.strategy,
+                "dropped_current_images_count": attempt.dropped_current_images_count,
+            },
+        )
+        return attempt
+
     # ------------------------------------------------------------------
     # Private — streaming
     # ------------------------------------------------------------------
@@ -635,7 +544,7 @@ class OllamaClient(LLMClient):
         collected_thinking: list[str],
         generation_deadline_s: float | None = None,
         timeout_override: float | None = None,
-    ) -> Iterator[str | dict]: # Update return type
+    ) -> Iterator[str | dict]:
         """
         Consume a streaming response from /api/chat (native NDJSON format).
         """
@@ -654,7 +563,7 @@ class OllamaClient(LLMClient):
                 if not line:
                     continue
 
-                chunk = json.loads(line.decode("utf-8"))
+                chunk = decode_chunk(line)
                 message = chunk.get("message", {})
                 content = message.get("content")
                 thinking = message.get("thinking")

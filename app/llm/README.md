@@ -39,8 +39,17 @@ the distinction between atomic buffered results and visible streaming.
 
 This layer should hide all backend-specific details from the rest of the system.
 
-`image_fallback.py` owns the pure policy for recognizing image-related HTTP failures,
-disabling transport retries for image requests, and generating progressively reduced
-message candidates. `ollama_stream.py` remains responsible for HTTP and client state.
+`image_fallback.py` owns the policy for recognizing image-related HTTP failures,
+disabling transport retries for image requests, and selecting progressively reduced
+message candidates through request-local `ImageFallback` state. Blocking and visible
+streaming calls share that policy but keep their transport loops separate. Buffered
+generation does not use image fallback. `ollama_stream.py` remains responsible for
+HTTP, cached model capability, telemetry, and publishing successful fallback metadata.
+
+`stream_decoder.py` shares NDJSON parsing and owns buffered per-line size and shape
+validation. Visible streaming retains native decoding exceptions and its existing
+end-of-stream behavior; buffered generation requires a completion marker and enforces
+aggregate content, thinking, and tool-call limits in its consumer. This separation
+does not add stream replay or tighten the visible-stream protocol.
 `thinking_filter.py` separates streamed reasoning markers from visible model output;
 it is model-output normalization rather than turn orchestration.

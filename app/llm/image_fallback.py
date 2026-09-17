@@ -1,8 +1,51 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from typing import Iterator
 
 import requests
+
+
+@dataclass(frozen=True)
+class ImageAttempt:
+    messages: list
+    strategy: str | None = None
+    dropped_current_images_count: int = 0
+
+
+class ImageFallback:
+    """Request-local candidate selection; the caller owns transport and success."""
+
+    def __init__(self, messages: list, *, multimodal_supported: bool):
+        self.multimodal_supported = multimodal_supported
+        if not multimodal_supported:
+            messages, _ = strip_images_from_messages(messages)
+        self.attempt = ImageAttempt(messages)
+        self._candidates: Iterator[tuple[list, str, int]] | None = None
+
+    def retry(self, exc: requests.HTTPError) -> ImageAttempt | None:
+        if not should_retry_without_images(
+            exc, self.attempt.messages,
+            multimodal_supported=self.multimodal_supported,
+        ):
+            return None
+
+        if error_indicates_model_without_images(http_error_text(exc)):
+            self.multimodal_supported = False
+
+        if self._candidates is None:
+            candidates = build_fallback_messages(self.attempt.messages)
+            if not candidates:
+                # Preserve the original error when no reduced payload exists.
+                raise exc
+            self._candidates = iter(candidates)
+
+        candidate = next(self._candidates, None)
+        if candidate is None:
+            return None
+        self.attempt = ImageAttempt(*candidate)
+        return self.attempt
 
 
 def resolve_request_retries(
