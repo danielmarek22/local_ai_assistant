@@ -97,10 +97,13 @@ class CapabilityAuthorityTests(unittest.TestCase):
                                   ({self.capability}, 'success'), (None, 'denied')):
             with self.subTest(allowed=allowed):
                 self.handler.reset_mock()
-                llm = SimpleNamespace(chat_buffered=Mock(side_effect=[
-                    {'tool_calls': [{'function': {'name': str(self.capability), 'arguments': {}}}]},
-                    {'content': 'Finished'},
-                ]))
+                llm = SimpleNamespace(
+                    resolve_think_value=lambda override: True if override is None else override,
+                    chat_buffered=Mock(side_effect=[
+                        {'tool_calls': [{'function': {'name': str(self.capability), 'arguments': {}}}]},
+                        {'content': 'Finished'},
+                    ]),
+                )
                 messages = []
                 generator = ResponseGenerator(llm, ToolExecutor(self.registry), Mock())
                 answer = consume(generator.stream_late_routed_response(
@@ -123,7 +126,9 @@ class CapabilityAuthorityTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             return model(**kwargs) if calls == 1 else {'content': 'Finished'}
-        llm = SimpleNamespace(chat_buffered=Mock(side_effect=infer))
+        llm = SimpleNamespace(
+            resolve_think_value=lambda override: True if override is None else override,
+            chat_buffered=Mock(side_effect=infer))
         consume(ResponseGenerator(llm, ToolExecutor(self.registry), Mock()).stream_late_routed_response(
             'session', [], 'test', allowed_capabilities=allowed, persist_tool_traces=False,
         ))

@@ -148,9 +148,8 @@ class OllamaClient(LLMClient):
         Used for summarizers, classifiers, and other structured workflows.
 
         `options_override` is merged on top of instance defaults per-call
-        without mutating them. `stream_chat` intentionally does not expose
-        this parameter because streaming responses are always user-facing and
-        apply their own fixed safety defaults (temperature cap, stop tokens).
+        without mutating them. Streaming calls merge overrides after applying
+        their mode-specific generation defaults.
         """
         think_value = self._resolve_think_value(think_override)
 

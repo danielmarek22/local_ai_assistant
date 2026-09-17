@@ -1,7 +1,6 @@
 import logging
 import time
 import json
-import inspect
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -25,7 +24,8 @@ from app.core.conversation import (
     SenderType,
 )
 from app.logging import trace_event
-from app.llm.base import InferenceFailure
+from app.llm.base import InferenceFailure, LLMClient
+from app.core.tool_executor import ToolExecutor
 from app.integrations import (
     CapabilityId,
     IntegrationEvent,
@@ -76,7 +76,7 @@ class ResponseGenerator:
     """Per-turn inference, native tool routing, recovery, and response event emission."""
 
     def __init__(
-        self, llm, tool_executor, record_tool_trace, *, allowed_animations=None,
+        self, llm: LLMClient, tool_executor: ToolExecutor, record_tool_trace, *, allowed_animations=None,
         allowed_expressions=None, max_late_routing_steps=5,
         generation_deadline_s=DEFAULT_GENERATION_DEADLINE_S,
         recovery_deadline_s=DEFAULT_RECOVERY_DEADLINE_S,
@@ -151,27 +151,14 @@ class ResponseGenerator:
         thinking_splitter = ThinkingBlockSplitter()
         envelope_filter = AssistantEnvelopeFilter(self._is_group_context(messages))
 
-        stream_kwargs = {"think_override": think_override}
-        stream_parameters = inspect.signature(self.llm.stream_chat).parameters
-        accepts_stream_kwargs = any(
-            item.kind == inspect.Parameter.VAR_KEYWORD
-            for item in stream_parameters.values()
-        )
-        if options_override is not None and (
-            accepts_stream_kwargs or "options_override" in stream_parameters
+        for chunk in self.llm.stream_chat(
+            messages,
+            think_override=think_override,
+            options_override=options_override,
+            generation_deadline_s=generation_deadline_s,
+            timeout_override=timeout_override,
+            telemetry_session_id=session_id,
         ):
-            stream_kwargs["options_override"] = options_override
-        if generation_deadline_s is not None and (
-            accepts_stream_kwargs or "generation_deadline_s" in stream_parameters
-        ):
-            stream_kwargs["generation_deadline_s"] = generation_deadline_s
-        if timeout_override is not None and (
-            accepts_stream_kwargs or "timeout_override" in stream_parameters
-        ):
-            stream_kwargs["timeout_override"] = timeout_override
-        if accepts_stream_kwargs or "telemetry_session_id" in stream_parameters:
-            stream_kwargs["telemetry_session_id"] = session_id
-        for chunk in self.llm.stream_chat(messages, **stream_kwargs):
             text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
             if not text_chunk:
                 continue
@@ -276,12 +263,7 @@ class ResponseGenerator:
             else:
                 inject_hidden_system_message(messages, catalog_message)
 
-        resolver = getattr(self.llm, "resolve_think_value", None)
-        normal_think = (
-            resolver(initial_think_override)
-            if callable(resolver)
-            else (True if initial_think_override is None else initial_think_override)
-        )
+        normal_think = self.llm.resolve_think_value(initial_think_override)
         turn_state = _LateRoutingTurnState(
             normal_think=normal_think,
             phase=_GenerationPhase.INITIAL,
@@ -514,27 +496,13 @@ class ResponseGenerator:
         yield AssistantStateEvent(state=AssistantState.THINKING)
         start_ts = time.perf_counter()
 
-        # Fetch native schemas when the executor supports native discovery.
-        # Keep this backward-compatible with older test doubles and wrappers.
-        tools = getattr(self.tool_executor, "get_native_tools", None)
-        if callable(tools):
-            kwargs = {
-                "session_id": session_id,
-                "user_text": user_text,
-                "authoritative_turn": authoritative_turn,
-                "prepared_belief_turn": prepared_belief_turn,
-            }
-            try:
-                native_tools = (
-                    tools(**kwargs)
-                    if allowed_capabilities is None
-                    else tools(allowed_capabilities, **kwargs)
-                )
-            except TypeError:
-                # Backward compatibility for existing executor test doubles/wrappers.
-                native_tools = tools() if allowed_capabilities is None else tools(allowed_capabilities)
-        else:
-            native_tools = []
+        native_tools = self.tool_executor.get_native_tools(
+            allowed_capabilities=allowed_capabilities,
+            session_id=session_id,
+            user_text=user_text,
+            authoritative_turn=authoritative_turn,
+            prepared_belief_turn=prepared_belief_turn,
+        )
         if excluded_capabilities:
             excluded_names = {str(item) for item in excluded_capabilities}
             native_tools = [
@@ -545,27 +513,17 @@ class ResponseGenerator:
         is_correction = inference_phase is _GenerationPhase.CORRECTION
         think_value = False if is_correction else normal_think
         options_override = {"num_predict": 512} if is_correction else None
-        buffered_chat = getattr(self.llm, "chat_buffered", None)
-        if callable(buffered_chat):
-            message = buffered_chat(
-                messages=messages,
-                think_override=think_value,
-                options_override=options_override,
-                tools=native_tools,
-                timeout_override=self.generation_deadline_s,
-                generation_deadline_s=self.generation_deadline_s,
-                generation_phase=inference_phase.value,
-                react_iteration=react_iteration,
-                telemetry_session_id=session_id,
-            )
-        else:
-            message = self.llm.chat(
-                messages=messages,
-                think_override=think_value,
-                options_override=options_override,
-                tools=native_tools,
-                timeout_override=self.generation_deadline_s,
-            )
+        message = self.llm.chat_buffered(
+            messages=messages,
+            think_override=think_value,
+            options_override=options_override,
+            tools=native_tools,
+            timeout_override=self.generation_deadline_s,
+            generation_deadline_s=self.generation_deadline_s,
+            generation_phase=inference_phase.value,
+            react_iteration=react_iteration,
+            telemetry_session_id=session_id,
+        )
         inference_duration_ms = (time.perf_counter() - start_ts) * 1000
         trace_event(
             "orchestrator",

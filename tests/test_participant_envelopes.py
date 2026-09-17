@@ -56,10 +56,10 @@ class ParticipantEnvelopeTests(unittest.TestCase):
 
     def test_streaming_and_buffered_paths_emit_and_return_clean_reply(self):
         wrapped = render_group_message('Hello there!', SENDER)
-        llm = Mock(spec=["chat", "stream_chat"])
+        llm = Mock(spec=["chat_buffered", "stream_chat"])
         llm.stream_chat.return_value = iter(wrapped)
-        llm.chat.return_value = {'content': wrapped}
-        generator = ResponseGenerator(llm, SimpleNamespace(), Mock())
+        llm.chat_buffered.return_value = {'content': wrapped}
+        generator = ResponseGenerator(llm, SimpleNamespace(get_native_tools=lambda **kwargs: []), Mock())
         messages = [{'role': 'system', 'content': GROUP_CONTEXT_INSTRUCTION}]
         speech, result = consume(generator.stream_response('group', messages))
         self.assertEqual((speech, result), ('Hello there!', 'Hello there!'))
@@ -69,9 +69,9 @@ class ParticipantEnvelopeTests(unittest.TestCase):
 
     def test_direct_response_is_not_unwrapped(self):
         wrapped = render_group_message('Hello', SENDER)
-        llm = Mock(spec=["chat", "stream_chat"])
-        llm.chat.return_value = {'content': wrapped}
-        generator = ResponseGenerator(llm, SimpleNamespace(), Mock())
+        llm = Mock(spec=["chat_buffered", "stream_chat"])
+        llm.chat_buffered.return_value = {'content': wrapped}
+        generator = ResponseGenerator(llm, SimpleNamespace(get_native_tools=lambda **kwargs: []), Mock())
         _, result = consume(generator._stream_late_routing_step('direct', [], 'Hi'))
         self.assertIn('PARTICIPANT_MESSAGE', result['response'])
 

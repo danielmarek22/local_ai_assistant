@@ -387,7 +387,11 @@ class ReactBeliefToolTests(unittest.TestCase):
                 return {"content": "The update was applied."}
             return {"tool_calls": [{"function": {"name": "beliefs__update", "arguments": payload}}]}
 
-        generator = ResponseGenerator(SimpleNamespace(chat_buffered=chat), ToolExecutor(self.registry), Mock())
+        llm = SimpleNamespace(
+            resolve_think_value=lambda override: True if override is None else override,
+            chat_buffered=chat,
+        )
+        generator = ResponseGenerator(llm, ToolExecutor(self.registry), Mock())
         list(generator.stream_late_routed_response(
             authoritative.session_id, [], authoritative.user_text,
             authoritative_turn=authoritative, prepared_belief_turn=context.prepared_belief_turn,

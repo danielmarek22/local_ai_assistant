@@ -163,13 +163,19 @@ class FakeLLM:
         self.chat_calls = []
         self.chat_responses = list(chat_responses or [])
 
+    def resolve_think_value(self, think_override=None):
+        return True if think_override is None else think_override
+
+    def chat_buffered(self, messages, think_override=None, tools=None, **kwargs):
+        return self.chat(messages, think_override=think_override, tools=tools)
+
     def chat(self, messages, think_override=None, options_override=None, timeout_override=None, max_retries_override=None, tools=None):
         self.chat_calls.append((messages, think_override, tools))
         if self.chat_responses:
             return self.chat_responses.pop(0)
         return {"content": ""}
 
-    def stream_chat(self, messages, think_override=None):
+    def stream_chat(self, messages, think_override=None, **kwargs):
         self.calls.append((messages, think_override))
         for chunk in self.chunks:
             yield chunk
@@ -896,6 +902,9 @@ class OrchestratorTests(unittest.TestCase):
                 self.responses = list(responses)
                 self.calls = []
                 self.stream_calls = []
+
+            def resolve_think_value(self, think_override=None):
+                return True if think_override is None else think_override
 
             def chat_buffered(self, **kwargs):
                 self.calls.append(kwargs)
