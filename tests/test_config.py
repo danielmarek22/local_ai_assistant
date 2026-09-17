@@ -15,6 +15,31 @@ class ConfigTests(unittest.TestCase):
             config_file.flush()
             return Config(config_file.name)
 
+    def test_empty_document_and_empty_sections_preserve_defaults(self):
+        defaults = self._load({})
+        self.assertEqual(self._load(None).raw, defaults.raw)
+        self.assertEqual(
+            self._load({section: {} for section in defaults.raw}).raw,
+            defaults.raw,
+        )
+
+    def test_raw_sections_share_normalized_public_dictionaries(self):
+        config = self._load({
+            "llm": {
+                "host": " https://ollama.example.test/ ",
+                "generation": {"temperature": None, "max_tokens": 128},
+            },
+            "tts": {"engine": "pocket"},
+        })
+
+        self.assertEqual(config.raw["llm"]["host"], "https://ollama.example.test")
+        self.assertEqual(config.raw["llm"]["generation"], {"max_tokens": 128})
+        self.assertEqual(config.raw["tts"]["engine"], "pocket_tts")
+        self.assertIn("vision_watchdog", config.raw)
+        for section, values in config.raw.items():
+            with self.subTest(section=section):
+                self.assertIs(getattr(config, section), values)
+
     def test_summary_generation_settings(self):
         defaults = self._load({}).orchestrator
         self.assertEqual(defaults["summary_timeout_s"], 300.0)

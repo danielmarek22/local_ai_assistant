@@ -18,24 +18,6 @@ from app.core.session_ids import validate_session_id
 from app.paths import DEFAULT_CONFIG_PATH
 
 
-_CONFIG_SECTIONS = {
-    "assistant",
-    "autonomy",
-    "beliefs",
-    "context",
-    "integrations",
-    "llm",
-    "local_human",
-    "logging",
-    "orchestrator",
-    "stt",
-    "telemetry",
-    "tts",
-    "vision_watchdog",
-    "voice_input",
-}
-
-
 class _StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -688,7 +670,7 @@ class Config:
                 "Invalid configuration: tools.web was removed; move web search settings "
                 "to integrations.web and remove the tools section"
             )
-        unknown_sections = sorted(set(raw) - _CONFIG_SECTIONS, key=repr)
+        unknown_sections = sorted(set(raw) - _RuntimeConfigSections.model_fields.keys(), key=repr)
         if unknown_sections:
             raise ValueError(
                 "Invalid configuration: unsupported top-level sections: "
@@ -699,59 +681,18 @@ class Config:
                 raise ValueError(
                     f"Invalid configuration: {section_name} must be a mapping"
                 )
-        self.raw = raw
-
-        # Core sections
-        self.llm = self.raw.get("llm", {})
-        self.assistant = self.raw.get("assistant", {})
-        self.local_human = self.raw.get("local_human", {})
-
-        # Integrations
-        self.integrations = self.raw.get("integrations", {})
-
-        # Orchestrator
-        self.orchestrator = self.raw.get("orchestrator", {})
-
-        # Context
-        self.context = self.raw.get("context", {})
-
-        self.beliefs = self._load_beliefs_config(self.raw.get("beliefs"))
-
-        self.autonomy = self.raw.get("autonomy", {})
-
-        # Speech input/output
-        self.tts = self.raw.get("tts", {})
-        self.stt = self.raw.get("stt", {})
-
-        # Voice input routing
-        self.voice_input = self.raw.get("voice_input", {})
-
-        # Logging
-        self.logging = self.raw.get("logging", {})
-        self.telemetry = self.raw.get("telemetry", {})
-
         runtime_sections = {
-            "llm": self.llm,
-            "assistant": self.assistant,
-            "local_human": self.local_human,
-            "tts": self.tts,
-            "stt": self.stt,
-            "logging": self.logging,
-            "telemetry": self.telemetry,
-            "integrations": self.integrations,
-            "orchestrator": self.orchestrator,
-            "context": self.context,
-            "beliefs": self.beliefs,
-            "autonomy": self.autonomy,
-            "voice_input": self.raw.get("voice_input", {}),
-            "vision_watchdog": self.raw.get("vision_watchdog", {}),
+            section_name: raw.get(section_name, {})
+            for section_name in _RuntimeConfigSections.model_fields
         }
+        runtime_sections["beliefs"] = self._load_beliefs_config(runtime_sections["beliefs"])
         try:
             validated = _RuntimeConfigSections.model_validate(runtime_sections)
         except ValidationError as exc:
             raise _format_config_error(exc) from exc
 
         normalized = validated.model_dump(mode="python", exclude_none=True)
+        self.raw = raw
         for section_name, section_value in normalized.items():
             setattr(self, section_name, section_value)
             self.raw[section_name] = section_value
