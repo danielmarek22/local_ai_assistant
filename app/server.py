@@ -1,6 +1,6 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Request, WebSocket, WebSocketDisconnect
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Callable, Iterator, Any
@@ -69,17 +69,7 @@ from app.transport.websocket_connection import (
     send_turn_error as _send_turn_error,
     send_ws_payload as _send_ws_payload,
 )
-from app.knowledge import (
-    BeliefDetailDTO,
-    BeliefListResponse,
-    BeliefRecordStatus,
-    ContextPreviewResponse,
-    EffectiveBeliefsResponse,
-    KnowledgeService,
-    SavedMemoryListResponse,
-)
-from app.knowledge.models import BeliefFiltersDTO
-from app.beliefs.models import EpistemicStatus, VisibilityPolicy
+from app.http.knowledge import router as knowledge_router
 from app.llm.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 from app.paths import STATIC_DIR, resolve_app_path
 
@@ -123,16 +113,6 @@ SessionIdPath = Annotated[
         pattern=SESSION_ID_PATTERN,
     ),
 ]
-SessionIdQuery = Annotated[
-    str,
-    Query(
-        min_length=1,
-        max_length=SESSION_ID_MAX_LENGTH,
-        pattern=SESSION_ID_PATTERN,
-    ),
-]
-
-
 def _runtime_app(request_or_ws: Request | WebSocket | None = None) -> FastAPI:
     scoped_app = getattr(request_or_ws, "app", None)
     return scoped_app if scoped_app is not None else app
@@ -930,6 +910,7 @@ def create_app(
     application = FastAPI(lifespan=lifespan)
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     application.include_router(router)
+    application.include_router(knowledge_router)
     return application
 
 
@@ -990,112 +971,6 @@ async def get_session(session_id: SessionIdPath, request: Request = None):
             for row in rows
         ],
     }
-
-
-def _knowledge_service(
-    *,
-    require_beliefs: bool = True,
-    require_memories: bool = False,
-    application: FastAPI | None = None,
-) -> KnowledgeService:
-    orchestrator = (application or app).state.orchestrator
-    repository = getattr(orchestrator, "belief_repository", None)
-    provider = getattr(orchestrator, "belief_context_provider", None)
-    memory_retriever = getattr(orchestrator, "memory_retriever", None)
-    memory_store = getattr(memory_retriever, "memory", None)
-    if require_beliefs and (repository is None or provider is None):
-        raise HTTPException(status_code=503, detail="Knowledge subsystem is unavailable")
-    if require_memories and memory_store is None:
-        raise HTTPException(status_code=503, detail="Saved memory storage is unavailable")
-    return KnowledgeService(
-        owner_agent_id=orchestrator.agent_id,
-        repository=repository,
-        context_provider=provider,
-        history_store=orchestrator.history,
-        memory_store=memory_store,
-    )
-
-
-def _require_known_session(service: KnowledgeService, session_id: str) -> None:
-    if not service.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-
-@router.get("/api/knowledge/memories", response_model=SavedMemoryListResponse)
-async def list_saved_memories(request: Request = None):
-    return _knowledge_service(
-        require_beliefs=False,
-        require_memories=True,
-        application=_runtime_app(request),
-    ).list_saved_memories()
-
-
-@router.get(
-    "/api/knowledge/beliefs/effective",
-    response_model=EffectiveBeliefsResponse,
-)
-async def get_effective_beliefs(session_id: SessionIdQuery, request: Request = None):
-    service = _knowledge_service(application=_runtime_app(request))
-    _require_known_session(service, session_id)
-    return service.effective_beliefs(session_id)
-
-
-@router.get("/api/knowledge/beliefs", response_model=BeliefListResponse)
-async def list_beliefs_for_inspection(
-    subject_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    source_sender_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    predicate: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    epistemic_status: EpistemicStatus | None = None,
-    visibility: VisibilityPolicy | None = None,
-    record_status: BeliefRecordStatus | None = None,
-    scope_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    source_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    offset: Annotated[int, Query(ge=0, le=100000)] = 0,
-    request: Request = None,
-):
-    filters = BeliefFiltersDTO(
-        subject_id=subject_id,
-        source_sender_id=source_sender_id,
-        predicate=predicate,
-        epistemic_status=epistemic_status,
-        visibility=visibility,
-        record_status=record_status,
-        scope_session_id=scope_session_id,
-        source_session_id=source_session_id,
-    )
-    return _knowledge_service(application=_runtime_app(request)).list_beliefs(
-        filters=filters,
-        limit=limit,
-        offset=offset,
-    )
-
-
-@router.get(
-    "/api/knowledge/beliefs/{belief_id}",
-    response_model=BeliefDetailDTO,
-)
-async def get_belief_for_inspection(
-    belief_id: Annotated[
-        str,
-        ApiPath(min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$"),
-    ],
-    request: Request = None,
-):
-    detail = _knowledge_service(application=_runtime_app(request)).get_belief_detail(belief_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Belief not found")
-    return detail
-
-
-@router.get(
-    "/api/knowledge/belief-context",
-    response_model=ContextPreviewResponse,
-)
-async def get_belief_context_preview(session_id: SessionIdQuery, request: Request = None):
-    service = _knowledge_service(application=_runtime_app(request))
-    _require_known_session(service, session_id)
-    return service.context_preview(session_id)
 
 
 def _session_coordinator(application: FastAPI) -> SessionTurnCoordinator:
