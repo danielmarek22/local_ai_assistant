@@ -1,4 +1,5 @@
 import { CONFIG } from './config.js';
+import { PreferenceStore } from './preferences.mjs';
 import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
 import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
 import {
@@ -73,17 +74,13 @@ export class UIManager {
         this.localAssistantDisplayName = 'Astra';
         this.onConversationModeChangeHandler = null;
         this.onRelayHandler = null;
-        this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
-        this.agentModeStorageKey = CONFIG.UI.STORAGE_KEYS.AGENT_MODE;
-        this.hideThinkingStorageKey = CONFIG.UI.STORAGE_KEYS.HIDE_THINKING;
+        this.preferences = new PreferenceStore();
         this.agentModeEnabled = this.readStoredAgentMode();
         this.hideThinkingEnabled = this.readStoredHideThinking();
         this.instantModeEnabled = !this.agentModeEnabled;
         this.reasoningAlwaysStorageKey = CONFIG.UI.STORAGE_KEYS.REASONING_ALWAYS_ON;
         this.reasoningAlwaysEnabled = this.agentModeEnabled;
-        this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
         this.voiceMode = this.readStoredVoiceMode();
-        this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
         this.defaultMessages = this.serializeChatHistory();
         this.pendingToolApprovals = [];
@@ -889,23 +886,7 @@ export class UIManager {
     }
 
     readStoredPlaybackVolume() {
-        try {
-            const rawValue = localStorage.getItem(this.volumeStorageKey);
-            if (rawValue === null) {
-                return CONFIG.AUDIO.DEFAULT_VOLUME;
-            }
-
-            const parsedValue = Number(rawValue);
-            if (Number.isFinite(parsedValue) && parsedValue >= 0 && parsedValue <= 1) {
-                return parsedValue;
-            }
-
-            localStorage.removeItem(this.volumeStorageKey);
-        } catch (error) {
-            console.warn('Failed to restore playback volume:', error);
-        }
-
-        return CONFIG.AUDIO.DEFAULT_VOLUME;
+        return this.preferences.readStoredPlaybackVolume();
     }
 
     setPlaybackVolume(volume, { persist = true, notify = true } = {}) {
@@ -922,11 +903,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.volumeStorageKey, String(nextVolume));
-            } catch (error) {
-                console.warn('Failed to persist playback volume:', error);
-            }
+            this.preferences.save('AUDIO_VOLUME', String(nextVolume), 'playback volume');
         }
 
         if (notify && this.onVolumeChangeHandler) {
@@ -943,38 +920,11 @@ export class UIManager {
     }
 
     readStoredAgentMode() {
-        try {
-            const storedValue = localStorage.getItem(this.agentModeStorageKey);
-            if (storedValue !== null) {
-                return storedValue === 'true';
-            }
-
-            const legacyValue = localStorage.getItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
-            if (legacyValue !== null) {
-                const migratedAgentMode = legacyValue === 'false';
-                localStorage.setItem(this.agentModeStorageKey, String(migratedAgentMode));
-                localStorage.removeItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
-                return migratedAgentMode;
-            }
-
-            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
-        } catch (error) {
-            console.warn('Failed to restore agent mode:', error);
-            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
-        }
+        return this.preferences.readStoredAgentMode();
     }
 
     readStoredHideThinking() {
-        try {
-            const storedValue = localStorage.getItem(this.hideThinkingStorageKey);
-            if (storedValue === null) {
-                return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
-            }
-            return storedValue === 'true';
-        } catch (error) {
-            console.warn('Failed to restore hide thinking setting:', error);
-            return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
-        }
+        return this.preferences.readStoredHideThinking();
     }
 
     setAgentMode(isEnabled, { persist = true } = {}) {
@@ -1000,11 +950,7 @@ export class UIManager {
         this.syncReasoningToggle();
 
         if (persist) {
-            try {
-                localStorage.setItem(this.agentModeStorageKey, String(this.agentModeEnabled));
-            } catch (error) {
-                console.warn('Failed to persist agent mode:', error);
-            }
+            this.preferences.save('AGENT_MODE', String(this.agentModeEnabled), 'agent mode');
         }
     }
 
@@ -1024,11 +970,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.hideThinkingStorageKey, String(this.hideThinkingEnabled));
-            } catch (error) {
-                console.warn('Failed to persist hide thinking setting:', error);
-            }
+            this.preferences.save('HIDE_THINKING', String(this.hideThinkingEnabled), 'hide thinking setting');
         }
     }
 
@@ -1069,23 +1011,11 @@ export class UIManager {
     }
 
     normalizeVoiceMode(mode) {
-        return CONFIG.UI.VOICE_MODES.includes(mode)
-            ? mode
-            : CONFIG.UI.VOICE_MODE_DEFAULT;
+        return this.preferences.normalizeVoiceMode(mode);
     }
 
     readStoredVoiceMode() {
-        try {
-            const rawValue = localStorage.getItem(this.voiceModeStorageKey);
-            const mode = this.normalizeVoiceMode(rawValue);
-            if (rawValue !== null && rawValue !== mode) {
-                localStorage.removeItem(this.voiceModeStorageKey);
-            }
-            return mode;
-        } catch (error) {
-            console.warn('Failed to restore voice mode:', error);
-            return CONFIG.UI.VOICE_MODE_DEFAULT;
-        }
+        return this.preferences.readStoredVoiceMode();
     }
 
     setVoiceMode(mode, { persist = true, activate = true } = {}) {
@@ -1099,11 +1029,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.voiceModeStorageKey, nextMode);
-            } catch (error) {
-                console.warn('Failed to persist voice mode:', error);
-            }
+            this.preferences.save('VOICE_MODE', nextMode, 'voice mode');
         }
 
         if (activate) {
@@ -1112,23 +1038,11 @@ export class UIManager {
     }
 
     normalizeScreenCapturePolicy(policy) {
-        return CONFIG.UI.SCREEN_CAPTURE_POLICIES.includes(policy)
-            ? policy
-            : CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+        return this.preferences.normalizeScreenCapturePolicy(policy);
     }
 
     readStoredScreenCapturePolicy() {
-        try {
-            const rawValue = localStorage.getItem(this.screenCapturePolicyStorageKey);
-            const policy = this.normalizeScreenCapturePolicy(rawValue);
-            if (rawValue !== null && rawValue !== policy) {
-                localStorage.removeItem(this.screenCapturePolicyStorageKey);
-            }
-            return policy;
-        } catch (error) {
-            console.warn('Failed to restore screen capture policy:', error);
-            return CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
-        }
+        return this.preferences.readStoredScreenCapturePolicy();
     }
 
     setScreenCapturePolicy(policy, { persist = true, notify = true } = {}) {
@@ -1142,11 +1056,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.screenCapturePolicyStorageKey, nextPolicy);
-            } catch (error) {
-                console.warn('Failed to persist screen capture policy:', error);
-            }
+            this.preferences.save('SCREEN_CAPTURE_POLICY', nextPolicy, 'screen capture policy');
         }
 
         if (notify && this.onScreenCapturePolicyChangeHandler) {
