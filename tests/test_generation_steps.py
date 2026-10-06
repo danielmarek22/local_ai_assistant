@@ -8,15 +8,7 @@ from app.core.events import (
 )
 from app.core.generation_step import AcceptedToolCall, FinalText, InvalidToolCall
 from app.core.response_generator import ResponseGenerator
-
-
-def consume(iterator):
-    events = []
-    while True:
-        try:
-            events.append(next(iterator))
-        except StopIteration as done:
-            return events, done.value
+from tests.support import consume_generator as consume
 
 
 class GenerationStepTests(unittest.TestCase):
@@ -38,7 +30,9 @@ class GenerationStepTests(unittest.TestCase):
         for split in range(len(text) + 1):
             with self.subTest(split=split):
                 generator = self.generator(chunks=[text[:split], text[split:]])
+                generator.tool_executor = SimpleNamespace()
                 events, result = consume(generator.stream_response("s", []))
+                generator.record_tool_trace.assert_not_called()
                 render_events = expected
                 if split == text.index("Hi") + 1:
                     render_events = [expected[0], AssistantSpeechEvent(text="H"),

@@ -3,19 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, create_autospec
 
 from app.core.response_generator import ResponseGenerator
-from app.core.events import AssistantSpeechEvent, AvatarAnimationEvent
 from app.integrations import ToolResult
 from app.core.tool_executor import ToolExecutor
 from app.llm.base import LLMClient
-
-
-def consume(generator):
-    events = []
-    while True:
-        try:
-            events.append(next(generator))
-        except StopIteration as completed:
-            return events, completed.value
+from tests.support import consume_generator as consume
 
 
 class ResponseGeneratorTests(unittest.TestCase):
@@ -98,18 +89,6 @@ class ResponseGeneratorTests(unittest.TestCase):
         self.assertEqual(response, "I'll remember that.")
         llm.chat_buffered.assert_called_once()
         executor.execute.assert_not_called()
-
-    def test_direct_generation_emits_response_without_persistence_dependencies(self):
-        trace = Mock()
-        generator = ResponseGenerator(
-            SimpleNamespace(stream_chat=lambda messages, **kwargs: iter(["Hello [wave]."])),
-            SimpleNamespace(), trace, allowed_animations={"wave"},
-        )
-        events, response = consume(generator.stream_response("session", []))
-        self.assertIn("Hello", response)
-        self.assertTrue(any(isinstance(event, AvatarAnimationEvent) for event in events))
-        self.assertTrue(any(isinstance(event, AssistantSpeechEvent) for event in events))
-        trace.assert_not_called()
 
     def test_native_loop_preserves_authority_and_records_only_tool_trace(self):
         trace = Mock()

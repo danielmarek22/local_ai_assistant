@@ -326,30 +326,22 @@ class ConfigTests(unittest.TestCase):
             self._load({"beliefs": {"timezone": "Mars/Olympus"}})
 
     def test_local_human_has_stable_defaults(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
         self.assertEqual(config.local_human, {"id": "local-human", "display_name": "You"})
 
     def test_context_uses_injected_memory_limit(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump(
-                {
-                    "context": {
-                        "history_limit": 8,
-                        "injected_memory_limit": 7,
-                        "semantic_memory_max_distance": 0.7,
-                        "semantic_memory_fallback_max_distance": 0.85,
-                        "semantic_memory_fallback_limit": 2,
-                        "episodic_memory_max_distance": 0.7,
-                    }
-                },
-                config_file,
-            )
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load(
+            {
+                "context": {
+                    "history_limit": 8,
+                    "injected_memory_limit": 7,
+                    "semantic_memory_max_distance": 0.7,
+                    "semantic_memory_fallback_max_distance": 0.85,
+                    "semantic_memory_fallback_limit": 2,
+                    "episodic_memory_max_distance": 0.7,
+                }
+            }
+        )
 
         self.assertEqual(config.context["history_limit"], 8)
         self.assertEqual(config.context["injected_memory_limit"], 7)
@@ -369,20 +361,14 @@ class ConfigTests(unittest.TestCase):
             self._load({"context": context})
 
     def test_autonomy_defaults_are_bounded_and_disabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertFalse(config.autonomy["enabled"])
         self.assertEqual(config.autonomy["max_chain_events"], 20)
         self.assertEqual(config.autonomy["global_llm_concurrency"], 1)
 
     def test_belief_storage_defaults_enabled_but_production_is_disabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertTrue(config.beliefs["enabled"])
         self.assertEqual(config.beliefs["processing_mode"], "disabled")
@@ -392,46 +378,25 @@ class ConfigTests(unittest.TestCase):
 
     def test_all_belief_processing_modes_are_accepted(self):
         for mode in ("disabled", "observer", "react_tool"):
-            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump(
-                    {"beliefs": {"enabled": True, "processing_mode": mode}},
-                    config_file,
-                )
-                config_file.flush()
-                config = Config(config_file.name)
+            with self.subTest(mode=mode):
+                config = self._load({"beliefs": {"enabled": True, "processing_mode": mode}})
             self.assertEqual(config.beliefs["processing_mode"], mode)
 
     def test_invalid_belief_processing_mode_fails(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({"beliefs": {"processing_mode": "invalid"}}, config_file)
-            config_file.flush()
-            with self.assertRaisesRegex(ValueError, "disabled, observer, react_tool"):
-                Config(config_file.name)
+        with self.assertRaisesRegex(ValueError, 'disabled, observer, react_tool'):
+            self._load({'beliefs': {'processing_mode': 'invalid'}})
 
     def test_legacy_belief_extraction_key_fails_with_migration_guidance(self):
         for value in (True, False):
-            with self.subTest(value=value), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump({"beliefs": {"extraction_enabled": value}}, config_file)
-                config_file.flush()
-                with self.assertRaisesRegex(ValueError, "was replaced.*processing_mode"):
-                    Config(config_file.name)
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'was replaced.*processing_mode'):
+                    self._load({'beliefs': {'extraction_enabled': value}})
 
     def test_disabled_belief_storage_rejects_active_producer(self):
         for mode in ("observer", "react_tool"):
-            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump(
-                    {"beliefs": {"enabled": False, "processing_mode": mode}},
-                    config_file,
-                )
-                config_file.flush()
-                with self.assertRaisesRegex(ValueError, "enabled=false.*disabled"):
-                    Config(config_file.name)
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, 'enabled=false.*disabled'):
+                    self._load({'beliefs': {'enabled': False, 'processing_mode': mode}})
 
     def test_tracked_template_uses_processing_mode_without_legacy_key(self):
         template_path = Path("app/config/assistant-template.yaml")
@@ -458,10 +423,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(extended.telemetry["mode"], "extended")
 
     def test_integration_config_defaults_memory_and_shell_enabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertTrue(config.integrations["memory"]["enabled"])
         self.assertTrue(config.integrations["shell"]["enabled"])
@@ -580,33 +542,21 @@ class ConfigTests(unittest.TestCase):
                 self._load({"integrations": {"mindcraft": mindcraft}})
 
     def test_voice_input_defaults_to_stt(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertEqual(config.voice_input["path"], "stt")
         self.assertEqual(config.voice_input["native_audio"]["payload_field"], "images")
         self.assertTrue(config.voice_input["native_audio"]["convert_to_wav"])
 
     def test_voice_input_merges_native_audio_overrides(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump(
-                {
-                    "voice_input": {
-                        "path": "native_audio",
-                        "native_audio": {
-                            "payload_field": "audios",
-                            "sample_rate": 24000,
-                        },
-                    }
-                },
-                config_file,
-            )
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load(
+            {
+                "voice_input": {
+                    "path": "native_audio",
+                    "native_audio": {"payload_field": "audios", "sample_rate": 24000},
+                }
+            }
+        )
 
         self.assertEqual(config.voice_input["path"], "native_audio")
         self.assertEqual(config.voice_input["native_audio"]["payload_field"], "audios")

@@ -1,5 +1,4 @@
 import copy
-import json
 import unittest
 from unittest.mock import Mock
 
@@ -7,19 +6,16 @@ import requests
 
 from app.llm.base import InferenceFailure
 from app.llm.ollama_stream import OllamaClient
+from tests.support import make_response
 
 
-def response(mode, *, status=200, error="invalid image data"):
-    result = requests.Response()
-    result.status_code = status
+def response(*, status=200, error="invalid image data"):
     data = {"error": error} if status != 200 else {"message": {"content": "ok"}, "done": True}
-    result._content = (json.dumps(data) + ("\n" if mode == "stream" else "")).encode()
-    result._content_consumed = True
-    return result
+    return make_response(data=data, status_code=status)
 
 
 class OllamaImageFallbackTests(unittest.TestCase):
-    def client(self, mode, replies):
+    def client(self, replies):
         client = OllamaClient(model="test", host="http://localhost:11434", max_retries=0)
         self.addCleanup(client.close)
         payloads = []
@@ -45,9 +41,9 @@ class OllamaImageFallbackTests(unittest.TestCase):
         original = copy.deepcopy(messages)
         for mode in ("chat", "stream"):
             with self.subTest(mode=mode):
-                client, payloads = self.client(mode, [
-                    response(mode, status=400), response(mode, status=422),
-                    response(mode), response(mode),
+                client, payloads = self.client([
+                    response(status=400), response(status=422),
+                    response(), response(),
                 ])
                 self.assertEqual(self.invoke(client, mode, messages), "ok")
                 self.assertEqual(
@@ -71,8 +67,8 @@ class OllamaImageFallbackTests(unittest.TestCase):
         ]
         for mode in ("chat", "stream"):
             with self.subTest(mode=mode):
-                client, payloads = self.client(mode, [
-                    response(mode, status=400), response(mode, status=400), response(mode),
+                client, payloads = self.client([
+                    response(status=400), response(status=400), response(),
                 ])
                 self.assertEqual(self.invoke(client, mode, messages), "ok")
                 self.assertNotIn("images", payloads[-1]["messages"][0])
@@ -84,8 +80,8 @@ class OllamaImageFallbackTests(unittest.TestCase):
         messages = [{"role": "user", "content": "look", "images": ["one", "two"]}]
         for mode in ("chat", "stream"):
             with self.subTest(mode=mode):
-                replies = [response(mode, status=400) for _ in range(4)]
-                client, payloads = self.client(mode, replies)
+                replies = [response(status=400) for _ in range(4)]
+                client, payloads = self.client(replies)
                 with self.assertRaises(InferenceFailure) as raised:
                     self.invoke(client, mode, messages)
                 self.assertIs(raised.exception.__cause__.response, replies[-1])
@@ -98,12 +94,21 @@ class OllamaImageFallbackTests(unittest.TestCase):
         messages = [{"role": "user", "content": "look", "images": ["one"]}]
         for mode in ("chat", "stream"):
             with self.subTest(mode=mode):
-                client, payloads = self.client(mode, [
-                    response(mode, status=400, error="model does not support images"),
-                    response(mode), response(mode),
+                client, payloads = self.client([
+                    response(status=400, error="model does not support images"),
+                    response(), response(),
                 ])
-                self.assertEqual(self.invoke(client, mode, messages), "ok")
-                self.assertEqual(self.invoke(client, mode, messages), "ok")
+                if mode == "stream":
+                    self.assertEqual(list(client.stream_chat(messages)), ["ok"])
+                else:
+                    self.assertEqual(self.invoke(client, mode, messages), "ok")
+                self.assertEqual(len(payloads), 2)
+                self.assertEqual(payloads[-1]["messages"][0]["content"], "look")
+                self.assertTrue(getattr(client, f"last_{mode}_dropped_current_images"))
+                self.assertEqual(getattr(client, f"last_{mode}_dropped_current_images_count"), 1)
+                next_messages = [{"role": "user", "content": "again", "images": ["two"]}]
+                self.assertEqual(self.invoke(client, mode, next_messages), "ok")
+                self.assertEqual(payloads[-1]["messages"][0]["content"], "again")
                 self.assertEqual(len(payloads), 3)
                 self.assertNotIn("images", payloads[-1]["messages"][0])
                 self.assertIsNone(getattr(client, f"last_{mode}_image_fallback_strategy"))
@@ -111,7 +116,7 @@ class OllamaImageFallbackTests(unittest.TestCase):
     def test_partial_stream_is_not_replayed_or_marked_as_successful_fallback(self):
         for fallback in (False, True):
             with self.subTest(fallback=fallback):
-                interrupted = response("stream")
+                interrupted = response()
                 error = requests.ReadTimeout("interrupted")
 
                 def lines():
@@ -119,8 +124,8 @@ class OllamaImageFallbackTests(unittest.TestCase):
                     raise error
 
                 interrupted.iter_lines = lines
-                replies = [response("stream", status=400)] if fallback else []
-                client, payloads = self.client("stream", replies + [interrupted])
+                replies = [response(status=400)] if fallback else []
+                client, payloads = self.client(replies + [interrupted])
                 stream = client.stream_chat([{"role": "user", "images": ["one"]}])
                 self.assertEqual(next(stream), "partial")
                 # Preserve the existing exception types of both paths.

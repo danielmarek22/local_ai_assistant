@@ -155,11 +155,15 @@ class FakeStructuredLLM:
         }
 
 
-class BeliefStoreAndUpdateTests(unittest.TestCase):
+class BeliefRepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.repository = BeliefRepository(self.db)
         self.service = BeliefUpdateService(self.repository)
+
+
+class BeliefStoreAndUpdateTests(BeliefRepositoryTestCase):
 
     def apply(
         self,
@@ -2288,11 +2292,7 @@ class FakeSummarizer:
         raise AssertionError("summary should not run")
 
 
-class BeliefSnapshotAndWiringTests(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-        self.repository = BeliefRepository(self.db)
-        self.service = BeliefUpdateService(self.repository)
+class BeliefSnapshotAndWiringTests(BeliefRepositoryTestCase):
 
     def _apply_create(
         self, message_id, session_id, predicate, value, visibility="AGENT_CURRENT"

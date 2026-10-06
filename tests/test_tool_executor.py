@@ -13,15 +13,7 @@ from app.integrations import (
     ToolSpec,
 )
 from app.core.tool_executor import ToolExecutor
-
-
-def consume_generator(gen):
-    events = []
-    try:
-        while True:
-            events.append(next(gen))
-    except StopIteration as stop:
-        return events, stop.value
+from tests.support import consume_generator
 
 
 class FakeIntegration:

@@ -2,24 +2,21 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-import requests
 
 from app.llm.base import InferenceFailure
 from app.llm.ollama_stream import OllamaClient
+from tests.support import make_response
 
 
 class OllamaStreamDecodingTests(unittest.TestCase):
     def client(self, lines):
-        response = requests.Response()
-        response.status_code = 200
-        response._content = b"\n".join(lines)
-        response._content_consumed = True
+        response = make_response(lines=lines)
         client = OllamaClient(model="test", host="http://localhost:11434")
         self.addCleanup(client.close)
         client.session.post = Mock(return_value=response)
         return client
 
-    def test_blank_lines_and_terminal_metrics_preserve_both_modes(self):
+    def test_blank_lines_preserve_thinking_and_content_in_both_modes(self):
         lines = [
             b"", b'{"message":{"thinking":"consider"},"done":false}',
             b'{"message":{"content":"answer"},"done":false}',
@@ -28,16 +25,12 @@ class OllamaStreamDecodingTests(unittest.TestCase):
         for buffered in (False, True):
             with self.subTest(buffered=buffered):
                 client = self.client(lines)
-                client.telemetry = Mock(enabled=True, full=False, extended=False)
                 if buffered:
                     self.assertEqual(client.chat_buffered([]),
                                      {"content": "answer", "thinking": "consider"})
                 else:
                     self.assertEqual(list(client.stream_chat([])),
                                      ["<think>\n", "consider", "\n</think>\n\n", "answer"])
-                metrics = client.telemetry.record_model_call.call_args.kwargs
-                self.assertEqual(metrics["prompt_tokens"], 2)
-                self.assertEqual(metrics["completion_tokens"], 3)
                 client.session.post.assert_called_once()
 
     def test_decoding_errors_keep_mode_specific_exception_types(self):
