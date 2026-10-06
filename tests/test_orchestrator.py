@@ -310,20 +310,27 @@ class OrchestratorTests(unittest.TestCase):
         return orch, llm, history, memory, summary_store, summarizer, tool_executor, context_builder
 
     def test_close_releases_owned_storage_in_reverse_order_once(self):
-        close_order = []
-        database = SimpleNamespace(close=lambda: close_order.append("database"))
-        vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
-        built = self._build_orchestrator(
-            database=database,
-            vector_store=vector_store,
-        )
-        orchestrator, tool_executor = built[0], built[6]
+        for autonomy_attached in (False, True):
+            with self.subTest(autonomy_attached=autonomy_attached):
+                close_order = []
+                database = SimpleNamespace(close=lambda: close_order.append("database"))
+                vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
+                built = self._build_orchestrator(
+                    database=database,
+                    vector_store=vector_store,
+                )
+                orchestrator, tool_executor = built[0], built[6]
+                if autonomy_attached:
+                    # Application shutdown owns the async runtime and its registry.
+                    orchestrator.autonomy_runtime = SimpleNamespace(
+                        close=lambda: self.fail("orchestrator must not close autonomy")
+                    )
 
-        orchestrator.close()
-        orchestrator.close()
+                orchestrator.close()
+                orchestrator.close()
 
-        self.assertEqual(tool_executor.close_calls, 1)
-        self.assertEqual(close_order, ["vector_store", "database"])
+                self.assertEqual(tool_executor.close_calls, 0 if autonomy_attached else 1)
+                self.assertEqual(close_order, ["vector_store", "database"])
 
     def test_factory_closes_constructed_storage_when_build_fails(self):
         close_order = []

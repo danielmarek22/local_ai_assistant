@@ -727,14 +727,14 @@ class BeliefModeConstructionTests(unittest.TestCase):
         disabled = self.build("disabled")
         observer = self.build("observer")
         react = self.build("react_tool")
-        self.assertEqual(disabled[2], [])
-        self.assertIsNone(disabled[3])
-        self.assertEqual(len(observer[2]), 1)
-        self.assertIsNone(observer[3])
-        self.assertEqual(react[2], [])
-        self.assertIsInstance(react[3], BeliefIntegration)
+        self.assertEqual(disabled.completion_observers, [])
+        self.assertIsNone(disabled.integration)
+        self.assertEqual(len(observer.completion_observers), 1)
+        self.assertIsNone(observer.integration)
+        self.assertEqual(react.completion_observers, [])
+        self.assertIsInstance(react.integration, BeliefIntegration)
         for components in (disabled, observer, react):
-            components[0].close()
+            components.repository.close()
 
     def test_react_mode_requires_native_routing(self):
         with self.assertRaisesRegex(ValueError, "requires native late-routing"):

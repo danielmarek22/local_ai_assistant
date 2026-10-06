@@ -3,7 +3,7 @@ import time
 import os
 import json
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from app.core.response_generator import (
     ResponseGenerator, inject_hidden_system_message, DEFAULT_GENERATION_DEADLINE_S,
@@ -40,6 +40,12 @@ from app.perception.state import PerceptionState
 from app.core.tool_executor import ToolExecutor
 from app.perception.keys import PerceptionKey
 
+if TYPE_CHECKING:
+    from app.autonomy import AutonomyRuntime
+    from app.beliefs import BeliefRepository
+    from app.integrations import AvatarWardrobe
+
+
 logger = logging.getLogger("orchestrator")
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # FATAL errors only
@@ -73,6 +79,9 @@ class Orchestrator:
         telemetry=None,
         database=None,
         vector_store=None,
+        belief_repository: "BeliefRepository | None" = None,
+        avatar_wardrobe: "AvatarWardrobe | None" = None,
+        max_late_routing_steps: int = 5,
     ):
         self.llm = llm
         self.context_builder = context_builder
@@ -101,7 +110,11 @@ class Orchestrator:
         self._owned_resources = (database, vector_store)
         self._closed = False
         self.perception = PerceptionState()
-        self.max_late_routing_steps = 5
+        self.belief_repository = belief_repository
+        self.avatar_wardrobe = avatar_wardrobe
+        self.max_late_routing_steps = max_late_routing_steps
+        # The factory attaches the cyclic runtime after this constructor returns.
+        self.autonomy_runtime: "AutonomyRuntime | None" = None
 
         logger.info(
             "Orchestrator initialized (native late routing=%s)",
@@ -113,7 +126,7 @@ class Orchestrator:
             return
         self._closed = True
 
-        if getattr(self, "autonomy_runtime", None) is None:
+        if self.autonomy_runtime is None:
             try:
                 self.tool_executor.close()
             except Exception:
