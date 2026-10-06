@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { MessageRenderer } from '../static/js/message-renderer.mjs';
+import { ChatHistoryStore } from '../static/js/chat-history-store.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -18,6 +20,8 @@ function message() {
 
 test('pending identity survives serialization and refresh, and replay is idempotent', () => {
     const ui = Object.create(UIManager.prototype);
+    ui.messageRenderer = new MessageRenderer();
+    ui.historyStore = new ChatHistoryStore(attachments => attachments);
     const original = message();
     ui.setMessageMetadata(original, { awaitingMessageId: true });
     ui.chatHistory = { querySelectorAll: () => [original] };

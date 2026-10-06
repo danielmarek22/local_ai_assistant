@@ -1,8 +1,8 @@
+import { MessageRenderer } from './message-renderer.mjs';
+import { ChatHistoryStore } from './chat-history-store.mjs';
 import { CONFIG } from './config.js';
 import { PreferenceStore } from './preferences.mjs';
 import { MicrophoneRecorder } from './microphone-recorder.mjs';
-import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
-import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
 import {
     extractBase64Payload,
     extractImageFilesFromDataTransfer,
@@ -10,11 +10,6 @@ import {
     isImageFile,
     repairImageBase64Payload,
 } from './attachment-utils.mjs';
-
-marked.setOptions({
-    gfm: true,
-    breaks: true
-});
 
 export class UIManager {
     constructor() {
@@ -66,7 +61,6 @@ export class UIManager {
 
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
-        this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
@@ -83,6 +77,14 @@ export class UIManager {
         this.reasoningAlwaysEnabled = this.agentModeEnabled;
         this.voiceMode = this.readStoredVoiceMode();
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
+        this.messageRenderer = new MessageRenderer(() => ({
+            conversationMode: this.conversationMode,
+            localHumanDisplayName: this.localHumanDisplayName,
+            localAssistantDisplayName: this.localAssistantDisplayName,
+        }));
+        this.historyStore = new ChatHistoryStore(
+            attachments => this.messageRenderer.normalizeAttachments(attachments),
+        );
         this.defaultMessages = this.serializeChatHistory();
         this.pendingToolApprovals = [];
         this.activeToolApproval = null;
@@ -606,11 +608,7 @@ export class UIManager {
     }
 
     createAttachmentId() {
-        if (window.crypto?.randomUUID) {
-            return window.crypto.randomUUID();
-        }
-
-        return `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        return this.messageRenderer.createAttachmentId();
     }
 
     removePendingAttachment(attachmentId) {
@@ -1133,195 +1131,45 @@ export class UIManager {
     }
 
     setMessageContent(msgDiv, text, attachments = []) {
-        const normalizedAttachments = this.normalizeAttachments(attachments);
-        msgDiv.dataset.rawText = text;
-
-        if (normalizedAttachments.length) {
-            msgDiv.dataset.attachments = JSON.stringify(normalizedAttachments.map((attachment) => ({
-                id: attachment.id,
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                data: attachment.data,
-                url: attachment.url,
-                size: attachment.size,
-            })));
-        } else {
-            delete msgDiv.dataset.attachments;
-        }
-
-        if (msgDiv.classList.contains('astra') || msgDiv.classList.contains('thinking')) {
-            const unsafeHtml = marked.parse(text);
-            const safeHtml = DOMPurify.sanitize(unsafeHtml, {
-                USE_PROFILES: { html: true }
-            });
-            msgDiv.innerHTML = safeHtml;
-
-            for (const link of msgDiv.querySelectorAll('a')) {
-                link.setAttribute('target', '_blank');
-                link.setAttribute('rel', 'noopener noreferrer');
-            }
-            this.prependSenderHeader(msgDiv);
-            return;
-        }
-
-        msgDiv.replaceChildren();
-
-        if (text) {
-            const body = document.createElement('div');
-            body.className = 'message-body';
-            body.innerText = text;
-            msgDiv.appendChild(body);
-        }
-
-        if (normalizedAttachments.length) {
-            const gallery = document.createElement('div');
-            gallery.className = 'message-attachments';
-
-            for (const attachment of normalizedAttachments) {
-                gallery.appendChild(this.createAttachmentNode(attachment));
-            }
-
-            msgDiv.appendChild(gallery);
-        }
-        this.prependSenderHeader(msgDiv);
+        return this.messageRenderer.setMessageContent(msgDiv, text, attachments);
     }
 
     setMessageMetadata(msgDiv, metadata = {}) {
-        const senderType = metadata.senderType || '';
-        const inputSource = metadata.inputSource || '';
-        msgDiv.dataset.senderId = metadata.senderId || '';
-        msgDiv.dataset.senderDisplayName = metadata.senderDisplayName || '';
-        msgDiv.dataset.senderType = senderType;
-        msgDiv.dataset.inputSource = inputSource;
-        if (metadata.messageId) msgDiv.dataset.messageId = String(metadata.messageId);
-        if (metadata.awaitingMessageId && !metadata.messageId) {
-            msgDiv.dataset.awaitingMessageId = 'true';
-        }
-        if (metadata.retryableFailure?.message) {
-            msgDiv.dataset.retryError = metadata.retryableFailure.message;
-            msgDiv.dataset.retryAttempts = String(metadata.retryableFailure.attempts || 1);
-        }
-        const controlledTypes = ['human', 'external_agent', 'local_assistant', 'system', 'tool', 'integration_runtime'];
-        const controlledSources = ['local_text', 'local_voice', 'manual_relay', 'assistant_generation', 'system_runtime', 'tool_runtime', 'integration_runtime'];
-        if (controlledTypes.includes(senderType)) msgDiv.classList.add(`sender-${senderType.replaceAll('_', '-')}`);
-        if (controlledSources.includes(inputSource)) msgDiv.classList.add(`source-${inputSource.replaceAll('_', '-')}`);
-        if (this.conversationMode === 'manual_group') msgDiv.classList.add('group-message');
+        return this.messageRenderer.setMessageMetadata(msgDiv, metadata);
     }
 
     prependSenderHeader(msgDiv) {
-        if (this.conversationMode !== 'manual_group') return;
-        const existing = msgDiv.querySelector('.message-sender-header');
-        if (existing) existing.remove();
-        const header = document.createElement('div');
-        header.className = 'message-sender-header';
-        header.textContent = msgDiv.dataset.senderDisplayName || this.fallbackSenderLabel(msgDiv);
-        msgDiv.prepend(header);
+        return this.messageRenderer.prependSenderHeader(msgDiv);
     }
 
     fallbackSenderLabel(msgDiv) {
-        if (msgDiv.classList.contains('astra')) return this.localAssistantDisplayName;
-        if (msgDiv.classList.contains('thinking')) return `${this.localAssistantDisplayName} thinking`;
-        if (msgDiv.classList.contains('system')) return 'System';
-        if (msgDiv.classList.contains('tool')) return 'Tool';
-        return this.localHumanDisplayName;
+        return this.messageRenderer.fallbackSenderLabel(msgDiv);
     }
 
     normalizeAttachments(attachments) {
-        if (!Array.isArray(attachments)) {
-            return [];
-        }
-
-        return attachments
-            .map((attachment) => this.normalizeAttachment(attachment))
-            .filter(Boolean);
+        return this.messageRenderer.normalizeAttachments(attachments);
     }
 
     normalizeAttachment(attachment) {
-        if (!attachment || typeof attachment !== 'object') {
-            return null;
-        }
-
-        const data = typeof attachment.data === 'string' ? attachment.data.trim() : '';
-        const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
-        if (!data && !url) {
-            return null;
-        }
-
-        const mimeType = typeof attachment.mimeType === 'string'
-            ? attachment.mimeType
-            : typeof attachment.mime_type === 'string'
-                ? attachment.mime_type
-                : 'image/png';
-        if (!mimeType.startsWith('image/')) {
-            return null;
-        }
-
-        const size = Number.isFinite(attachment.size)
-            ? attachment.size
-            : Number.isFinite(attachment.size_bytes)
-                ? attachment.size_bytes
-                : null;
-
-        return {
-            id: typeof attachment.id === 'string' && attachment.id ? attachment.id : this.createAttachmentId(),
-            name: typeof attachment.name === 'string' && attachment.name.trim() ? attachment.name.trim() : 'image',
-            mimeType,
-            data: data || null,
-            url: url || null,
-            size,
-        };
+        return this.messageRenderer.normalizeAttachment(attachment);
     }
 
-    createAttachmentNode(attachment, { removable = false } = {}) {
-        const node = document.createElement('figure');
-        node.className = removable ? 'attachment-chip' : 'message-attachment';
-
-        const image = document.createElement('img');
-        image.className = removable ? 'attachment-chip-image' : 'message-attachment-image';
-        image.src = this.buildAttachmentSrc(attachment);
-        image.alt = attachment.name;
-        node.appendChild(image);
-
-        const caption = document.createElement('figcaption');
-        caption.className = removable ? 'attachment-chip-meta' : 'message-attachment-meta';
-        caption.textContent = this.formatAttachmentLabel(attachment.name, removable ? 18 : 28);
-        node.appendChild(caption);
-
-        if (removable) {
-            const removeButton = document.createElement('button');
-            removeButton.type = 'button';
-            removeButton.className = 'attachment-chip-remove';
-            removeButton.dataset.attachmentRemove = attachment.id;
-            removeButton.setAttribute('aria-label', `Remove ${attachment.name}`);
-            removeButton.textContent = 'x';
-            node.appendChild(removeButton);
-        }
-
-        return node;
+    createAttachmentNode(attachment, options = {}) {
+        return this.messageRenderer.createAttachmentNode(attachment, options);
     }
 
     buildAttachmentSrc(attachment) {
-        if (attachment.url) {
-            return attachment.url;
-        }
-
-        return `data:${attachment.mimeType};base64,${attachment.data}`;
+        return this.messageRenderer.buildAttachmentSrc(attachment);
     }
 
     formatAttachmentLabel(name, limit = 24) {
-        if (name.length <= limit) {
-            return name;
-        }
-
-        return `${name.slice(0, Math.max(0, limit - 1))}…`;
+        return this.messageRenderer.formatAttachmentLabel(name, limit);
     }
 
     setSessionScope(serverInstanceId, sessionId) {
-        const nextStorageKey = `${CONFIG.UI.STORAGE_KEYS.CHAT_HISTORY}:${serverInstanceId}:${sessionId}`;
-        if (this.chatHistoryStorageKey === nextStorageKey) return;
+        if (!this.historyStore.setScope(serverInstanceId, sessionId)) return;
 
         this.currentSessionId = sessionId;
-        this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
         this.activeRetryMessageId = null;
@@ -1329,80 +1177,23 @@ export class UIManager {
     }
 
     restoreChatHistory() {
-        if (!this.chatHistoryStorageKey) return;
-
-        const savedHistory = sessionStorage.getItem(this.chatHistoryStorageKey);
-        if (!savedHistory) {
-            this.renderMessages(this.defaultMessages);
-            this.persistChatHistory();
-            return;
-        }
-
-        try {
-            const messages = JSON.parse(savedHistory);
-            if (!Array.isArray(messages) || messages.length === 0) {
-                this.renderMessages(this.defaultMessages);
-                this.persistChatHistory();
-                return;
-            }
-            this.renderMessages(messages);
-        } catch (error) {
-            console.warn('Failed to restore chat history from session storage:', error);
-            sessionStorage.removeItem(this.chatHistoryStorageKey);
-            this.renderMessages(this.defaultMessages);
-            this.persistChatHistory();
-        }
+        this.historyStore.restore(
+            this.defaultMessages,
+            messages => this.renderMessages(messages),
+            () => this.serializeChatHistory(),
+        );
     }
 
     persistChatHistory() {
-        if (!this.chatHistoryStorageKey) return;
-
-        try {
-            sessionStorage.setItem(this.chatHistoryStorageKey, JSON.stringify(this.serializeChatHistory()));
-        } catch (error) {
-            console.warn('Failed to persist chat history:', error);
-        }
+        this.historyStore.persist(() => this.serializeChatHistory());
     }
 
     serializeChatHistory() {
-        return Array.from(this.chatHistory.querySelectorAll('.message')).map((message) => {
-            const sender = Array.from(message.classList).find((className) => className !== 'message') || 'astra';
-            return {
-                sender,
-                text: message.dataset.rawText || '',
-                attachments: this.readStoredAttachments(message.dataset.attachments),
-                senderId: message.dataset.senderId || '',
-                senderDisplayName: message.dataset.senderDisplayName || '',
-                senderType: message.dataset.senderType || '',
-                inputSource: message.dataset.inputSource || '',
-                messageId: Number(message.dataset.messageId) || null,
-                awaitingMessageId: message.dataset.awaitingMessageId === 'true',
-                retryableFailure: message.dataset.retryError ? {
-                    message: message.dataset.retryError,
-                    attempts: Number(message.dataset.retryAttempts) || 1,
-                } : null,
-            };
-        });
+        return this.historyStore.serialize(this.chatHistory);
     }
 
     readStoredAttachments(rawValue) {
-        if (!rawValue) {
-            return [];
-        }
-
-        try {
-            const parsed = JSON.parse(rawValue);
-            return this.normalizeAttachments(parsed).map((attachment) => ({
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                data: attachment.data,
-                url: attachment.url,
-                size: attachment.size,
-            }));
-        } catch (error) {
-            console.warn('Failed to parse stored attachments:', error);
-            return [];
-        }
+        return this.historyStore.readStoredAttachments(rawValue);
     }
 
     renderMessages(messages) {
