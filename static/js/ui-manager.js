@@ -1,5 +1,6 @@
 import { CONFIG } from './config.js';
 import { PreferenceStore } from './preferences.mjs';
+import { MicrophoneRecorder } from './microphone-recorder.mjs';
 import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
 import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
 import {
@@ -88,20 +89,13 @@ export class UIManager {
         this.onRetryHandler = null;
         this.activeRetryMessageId = null;
 
-        // STT recording state
-        this._mediaRecorder = null;
-        this._audioChunks = [];
-        this._isRecording = false;
-        this._isAlwaysListening = false;
-        this._onMicPressHandler = null;
         this._micHotkey = this.loadMicHotkey();
-        this._alwaysListeningStream = null;
-        this._audioContext = null;
-        this._alwaysListeningAnalyser = null;
-        this._speechDetectedTime = 0;
-        this._alwaysListeningSpeechCheck = null;
-        this._isSendingAlwaysListeningChunk = false;
-        this._alwaysListeningVoiceContextSent = false;
+        this.microphone = new MicrophoneRecorder({
+            onStateChange: (className, active, label) => {
+                this.micBtn?.classList.toggle(className, active);
+                this.micBtn?.setAttribute('aria-label', label);
+            },
+        });
 
         this.initAutoResize();
         this.initPanelControls();
@@ -135,7 +129,7 @@ export class UIManager {
             if (document.activeElement === this.userInput) return;
             // Push-to-talk hotkey is disabled while automatic voice detection is active.
             if (this.voiceMode !== 'push_to_talk') return;
-            if (this._isRecording) return;
+            if (this.microphone.isRecording) return;
 
             event.preventDefault();
             this.startManualRecording();
@@ -143,7 +137,7 @@ export class UIManager {
 
         document.addEventListener('keyup', (event) => {
             if (event.key !== this._micHotkey) return;
-            if (this.voiceMode === 'push_to_talk' && this._isRecording) {
+            if (this.voiceMode === 'push_to_talk' && this.microphone.isRecording) {
                 event.preventDefault();
                 this.stopRecording();
             }
@@ -152,198 +146,28 @@ export class UIManager {
         void this.applyVoiceMode(this.voiceMode);
     }
 
-    async toggleAlwaysListening() {
-        if (this._isAlwaysListening) {
-            // Disable always listening
-            await this.stopAlwaysListening();
-        } else {
-            // Enable always listening
-            await this.startAlwaysListening();
-        }
+    toggleAlwaysListening() {
+        return this.microphone.toggleAlwaysListening();
     }
 
-    async startAlwaysListening() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            this._alwaysListeningStream = stream;
-            this._isAlwaysListening = true;
-
-            this.micBtn?.classList.add('always-listening');
-            this.micBtn?.setAttribute('aria-label', 'Automatic voice detection is active');
-
-            // Setup Web Audio API for voice activity detection
-            if (!this._audioContext) {
-                this._audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            const audioContext = this._audioContext;
-            const source = audioContext.createMediaStreamSource(stream);
-            const analyser = audioContext.createAnalyser();
-            analyser.fftSize = 2048;
-            source.connect(analyser);
-
-            this._alwaysListeningAnalyser = analyser;
-
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : '';
-
-            this._mediaRecorder = null;
-            this._audioChunks = [];
-            this._speechDetectedTime = 0;
-            this._isSendingAlwaysListeningChunk = false;
-            this._alwaysListeningVoiceContextSent = false;
-
-            const startSpeechSegment = () => {
-                if (this._mediaRecorder?.state === 'recording') return;
-
-                const chunks = [];
-                const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-                this._mediaRecorder = recorder;
-                recorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) {
-                        chunks.push(e.data);
-                    }
-                };
-                recorder.onstop = () => {
-                    this._isSendingAlwaysListeningChunk = false;
-                    if (this._mediaRecorder === recorder) {
-                        this._mediaRecorder = null;
-                    }
-
-                    if (!this._isAlwaysListening || !chunks.length || !this._onMicPressHandler) return;
-
-                    const blob = new Blob(chunks, {
-                        type: recorder.mimeType || 'audio/webm',
-                    });
-                    this._onMicPressHandler(blob, {
-                        includeScreenContext: !this._alwaysListeningVoiceContextSent,
-                    });
-                    this._alwaysListeningVoiceContextSent = true;
-                };
-                this._isSendingAlwaysListeningChunk = true;
-                recorder.start();
-            };
-
-            const stopSpeechSegment = () => {
-                if (this._mediaRecorder?.state === 'recording') {
-                    this._mediaRecorder.stop();
-                }
-            };
-
-            // Check for speech activity every 100ms and send each complete utterance
-            // after a short silence, so STT receives a decodable WebM blob.
-            this._alwaysListeningSpeechCheck = setInterval(() => {
-                if (!this._isAlwaysListening) return;
-
-                const hasSpeech = this.detectSpeechActivity(analyser);
-                
-                if (hasSpeech) {
-                    this._speechDetectedTime = Date.now();
-                    startSpeechSegment();
-                }
-
-                const timeSinceSpeech = Date.now() - this._speechDetectedTime;
-                if (timeSinceSpeech >= 800) {
-                    stopSpeechSegment();
-                    this._alwaysListeningVoiceContextSent = false;
-                }
-            }, 100);
-        } catch (err) {
-            console.warn('Microphone access denied:', err);
-            this._isAlwaysListening = false;
-        }
+    startAlwaysListening() {
+        return this.microphone.startAlwaysListening();
     }
 
     detectSpeechActivity(analyser) {
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteFrequencyData(dataArray);
-
-        // Calculate average energy across frequency bins
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-        }
-        const average = sum / dataArray.length;
-
-        // Consider speech detected if average frequency energy > 30
-        // (threshold can be adjusted based on testing)
-        return average > 30;
+        return this.microphone.detectSpeechActivity(analyser);
     }
 
-    async stopAlwaysListening() {
-        if (this._alwaysListeningSpeechCheck) {
-            clearInterval(this._alwaysListeningSpeechCheck);
-            this._alwaysListeningSpeechCheck = null;
-        }
-
-        if (this._mediaRecorder?.state === 'recording') {
-            this._mediaRecorder.stop();
-        }
-        this._mediaRecorder = null;
-
-        if (this._alwaysListeningStream) {
-            this._alwaysListeningStream.getTracks().forEach((t) => t.stop());
-            this._alwaysListeningStream = null;
-        }
-
-        this._alwaysListeningAnalyser = null;
-
-        this._isAlwaysListening = false;
-        this._audioChunks = [];
-        this._alwaysListeningVoiceContextSent = false;
-        this.micBtn?.classList.remove('always-listening');
-        this.micBtn?.setAttribute('aria-label', 'Voice input');
+    stopAlwaysListening() {
+        return this.microphone.stopAlwaysListening();
     }
 
     stopRecording() {
-        if (this._mediaRecorder && this._isRecording) {
-            this._mediaRecorder.stop();
-        }
+        return this.microphone.stopRecording();
     }
 
-    async startManualRecording() {
-        if (this._isRecording) return;
-
-        let stream;
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        } catch (err) {
-            console.warn('Microphone access denied:', err);
-            return;
-        }
-
-        this._audioChunks = [];
-        this._isRecording = true;
-        this.micBtn?.classList.add('recording');
-        this.micBtn?.setAttribute('aria-label', 'Recording... release hotkey to send');
-
-        // Prefer webm/opus; fall back to whatever the browser supports.
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-            ? 'audio/webm;codecs=opus'
-            : '';
-
-        this._mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-        this._mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) this._audioChunks.push(e.data);
-        };
-
-        this._mediaRecorder.onstop = () => {
-            stream.getTracks().forEach((t) => t.stop());
-            this._isRecording = false;
-            this.micBtn?.classList.remove('recording');
-            this.micBtn?.setAttribute('aria-label', 'Voice input');
-
-            const blob = new Blob(this._audioChunks, {
-                type: this._mediaRecorder.mimeType || 'audio/webm',
-            });
-            this._audioChunks = [];
-
-            if (this._onMicPressHandler) {
-                this._onMicPressHandler(blob, { includeScreenContext: true });
-            }
-        };
-
-        this._mediaRecorder.start();
+    startManualRecording() {
+        return this.microphone.startManualRecording();
     }
 
     loadMicHotkey() {
@@ -357,7 +181,7 @@ export class UIManager {
     }
 
     onMicPress(callback) {
-        this._onMicPressHandler = callback;
+        this.microphone.onAudio = callback;
     }
 
     onMicHotkeyChange(callback) {
@@ -446,22 +270,8 @@ export class UIManager {
         this.renderNextToolApproval();
     }
 
-    async applyVoiceMode(mode = this.voiceMode) {
-        if (!navigator.mediaDevices?.getUserMedia) return;
-
-        if (mode === 'automatic') {
-            if (this._isRecording) {
-                this.stopRecording();
-            }
-            if (!this._isAlwaysListening) {
-                await this.startAlwaysListening();
-            }
-            return;
-        }
-
-        if (this._isAlwaysListening) {
-            await this.stopAlwaysListening();
-        }
+    applyVoiceMode(mode = this.voiceMode) {
+        return this.microphone.applyVoiceMode(mode);
     }
 
     formatKeyDisplay(key) {
