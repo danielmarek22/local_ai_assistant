@@ -418,6 +418,9 @@ class ChatHistoryStoreTests(unittest.TestCase):
         )
         self.store.summarize_pending_attachments(message_id)
         attachment_id = self.store.get_all("session-1")[0]["attachments"][0].attachment_id
+        original_documents = {
+            record["id"]: record["document"] for record in self.store.collection.records
+        }
         self.store.collection.records = [{
             "id": "legacy-random-id",
             "document": "Stale copy",
@@ -434,6 +437,10 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(
             {record["id"] for record in self.store.collection.records},
             {f"message:{message_id}", f"attachment:{attachment_id}"},
+        )
+        self.assertEqual(
+            {record["id"]: record["document"] for record in self.store.collection.records},
+            original_documents,
         )
 
     def test_delete_session_reports_partial_cleanup_and_attempts_every_target(self):

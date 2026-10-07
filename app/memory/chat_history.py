@@ -6,6 +6,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.memory.episodic_documents import (
+    attachment_vector_id,
+    build_attachment_document,
+    build_message_document,
+    message_vector_id,
+)
 from app.logging import trace_event
 from app.perception.attachments import Attachment, ImageAttachment, attachment_from_stored_record
 from app.storage.database import Database
@@ -216,7 +222,7 @@ class ChatHistoryStore:
                     attachments,
                 )
 
-        vector_docs = [self._build_message_vector_doc(role, content, sender, session_kind)]
+        vector_docs = [build_message_document(role, content, sender, session_kind)]
         vector_metadatas = [{
             "session_id": session_id,
             "role": role,
@@ -233,7 +239,7 @@ class ChatHistoryStore:
             if not record.summary_text:
                 continue
             vector_docs.append(
-                self._build_attachment_vector_doc(role, content, record, sender, session_kind)
+                build_attachment_document(role, content, record, sender, session_kind)
             )
             vector_metadatas.append({
                 "session_id": session_id,
@@ -248,8 +254,8 @@ class ChatHistoryStore:
                 "input_source": sender.input_source.value,
             })
 
-        vector_ids = [self._message_vector_id(message_id)] + [
-            self._attachment_vector_id(record.attachment_id)
+        vector_ids = [message_vector_id(message_id)] + [
+            attachment_vector_id(record.attachment_id)
             for record in attachment_records
             if record.summary_text
         ]
@@ -267,16 +273,6 @@ class ChatHistoryStore:
             )
 
         return message_id
-
-    @staticmethod
-    def _message_vector_id(message_id: int) -> str:
-        return f"message:{message_id}"
-
-    @staticmethod
-    def _attachment_vector_id(attachment_id: int | None) -> str:
-        if attachment_id is None:
-            raise ValueError("Stored attachment is missing its canonical ID")
-        return f"attachment:{attachment_id}"
 
     def reconcile_index(self, batch_size: int = 100) -> dict[str, int]:
         """Make the episodic index match canonical, visible chat history."""
@@ -339,8 +335,8 @@ class ChatHistoryStore:
             session_kind = SessionKind(item["session_kind"])
             messages[item["id"]] = (item, sender, session_kind)
             records.append({
-                "id": self._message_vector_id(item["id"]),
-                "document": self._build_message_vector_doc(
+                "id": message_vector_id(item["id"]),
+                "document": build_message_document(
                     item["role"], item["content"], sender, session_kind
                 ),
                 "metadata": self._vector_metadata(item, sender, source="message"),
@@ -354,8 +350,8 @@ class ChatHistoryStore:
             item, sender, session_kind = messages[attachment_row["message_id"]]
             attachment = attachment_from_stored_record(attachment_row)
             records.append({
-                "id": self._attachment_vector_id(attachment.attachment_id),
-                "document": self._build_attachment_vector_doc(
+                "id": attachment_vector_id(attachment.attachment_id),
+                "document": build_attachment_document(
                     item["role"], item["content"], attachment, sender, session_kind
                 ),
                 "metadata": self._vector_metadata(
@@ -389,17 +385,6 @@ class ChatHistoryStore:
         if attachment_id is not None:
             metadata["attachment_id"] = attachment_id
         return metadata
-
-    def _build_message_vector_doc(
-        self,
-        role: str,
-        content: str,
-        sender: SenderAttribution,
-        session_kind: SessionKind,
-    ) -> str:
-        if session_kind == SessionKind.DIRECT:
-            return f"{role.upper()}: {content}"
-        return f"{sender.sender_type.value.upper()} {sender.sender_display_name}: {content}"
 
     def _store_attachments(
         self,
@@ -561,8 +546,8 @@ class ChatHistoryStore:
             sender = self.effective_sender(record)
             try:
                 self.collection.upsert(
-                    ids=[self._attachment_vector_id(summarized.attachment_id)],
-                    documents=[self._build_attachment_vector_doc(
+                    ids=[attachment_vector_id(summarized.attachment_id)],
+                    documents=[build_attachment_document(
                         record["role"],
                         record["content"],
                         summarized,
@@ -619,30 +604,6 @@ class ChatHistoryStore:
             payload={"attachment_name": attachment.name, "summary": summary},
         )
         return summary
-
-    def _build_attachment_vector_doc(
-        self,
-        role: str,
-        content: str,
-        attachment: ImageAttachment,
-        sender: SenderAttribution | None = None,
-        session_kind: SessionKind = SessionKind.DIRECT,
-    ) -> str:
-        sender = sender or self.default_sender(role)
-        subject = role.upper()
-        if session_kind == SessionKind.MANUAL_GROUP:
-            subject = f"{sender.sender_type.value.upper()} {sender.sender_display_name}"
-        parts = [
-            f"{subject} shared image '{attachment.name}'.",
-            f"Image summary: {attachment.summary_text}",
-        ]
-        if content and not (
-            content.startswith("[User attached ") and content.endswith(" image]")
-        ) and not (
-            content.startswith("[User attached ") and content.endswith(" images]")
-        ):
-            parts.append(f"Related message text: {content}")
-        return " ".join(parts)
 
     def _extension_for_mime_type(self, mime_type: str) -> str:
         extension = mimetypes.guess_extension(mime_type, strict=False) or ""
@@ -800,8 +761,8 @@ class ChatHistoryStore:
         sender = self.effective_sender(item)
         kind = SessionKind(item["session_kind"])
         if attachment is not None:
-            return self._build_attachment_vector_doc(item["role"], item["content"], attachment, sender, kind)
-        return self._build_message_vector_doc(item["role"], item["content"], sender, kind)
+            return build_attachment_document(item["role"], item["content"], attachment, sender, kind)
+        return build_message_document(item["role"], item["content"], sender, kind)
 
     def get_recent(self, session_id: str, limit: int = 10, *, conversation_only: bool = False):
         """Read bounded recent history; optionally use summarization eligibility."""
