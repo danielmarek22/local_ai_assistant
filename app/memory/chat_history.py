@@ -1,10 +1,6 @@
-import hashlib
 import logging
-import mimetypes
-import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from app.memory.episodic_documents import (
     attachment_vector_id,
@@ -25,7 +21,8 @@ from app.core.conversation import (
     SessionKind,
 )
 from app.core.session_ids import validate_session_id
-from app.paths import STATIC_DIR, resolve_app_path
+from app.paths import STATIC_DIR
+from app.memory.attachment_files import AttachmentFiles
 
 
 logger = logging.getLogger("chat_history")
@@ -62,8 +59,7 @@ class ChatHistoryStore:
         self.db = db
         self.vector_store = vector_store
         self.collection = self.vector_store.episodic_collection
-        self.uploads_root = resolve_app_path(uploads_root)
-        self.uploads_root.mkdir(parents=True, exist_ok=True)
+        self.attachment_files = AttachmentFiles(uploads_root)
         self.image_summarizer = image_summarizer
         self.image_summary_timeout_s = max(0.1, float(image_summary_timeout_s))
         self.local_human_id = local_human_id
@@ -393,45 +389,10 @@ class ChatHistoryStore:
         message_id: int,
         attachments: list[Attachment],
     ) -> list[ImageAttachment]:
-        message_dir = self._session_upload_dir(session_id) / str(message_id)
-        message_dir.mkdir(parents=True, exist_ok=True)
         stored_attachments: list[ImageAttachment] = []
 
         for attachment in attachments:
-            if not isinstance(attachment, ImageAttachment):
-                raise ValueError(
-                    f"Unsupported attachment type for chat history storage: {attachment.__class__.__name__}"
-                )
-
-            payload = attachment.as_bytes()
-            sha256 = hashlib.sha256(payload).hexdigest()
-            file_path = message_dir / f"{sha256}{self._extension_for_mime_type(attachment.mime_type)}"
-            if not file_path.exists():
-                file_path.write_bytes(payload)
-            trace_event(
-                "chat_history",
-                "attachment_stored",
-                session_id=session_id,
-                payload={
-                    "file_path": str(file_path),
-                    "bytes": len(payload),
-                    "name": attachment.name,
-                },
-            )
-
-            stored_attachment = ImageAttachment(
-                name=attachment.name,
-                mime_type=attachment.mime_type,
-                size_bytes=attachment.size_bytes,
-                storage_path=str(file_path),
-                sha256=sha256,
-                summary_text=(
-                    attachment.summary_text.strip()
-                    if isinstance(attachment.summary_text, str)
-                    and attachment.summary_text.strip()
-                    else None
-                ),
-            )
+            stored_attachment = self.attachment_files.store(session_id, message_id, attachment)
 
             cursor.execute(
                 """
@@ -464,7 +425,7 @@ class ChatHistoryStore:
                     size_bytes=stored_attachment.size_bytes,
                     attachment_id=cursor.lastrowid,
                     storage_path=stored_attachment.storage_path,
-                    url=self._public_url_for_storage_path(stored_attachment.storage_path),
+                    url=self.attachment_files.public_url(stored_attachment.storage_path),
                     sha256=stored_attachment.sha256,
                     summary_text=stored_attachment.summary_text,
                 )
@@ -605,26 +566,6 @@ class ChatHistoryStore:
         )
         return summary
 
-    def _extension_for_mime_type(self, mime_type: str) -> str:
-        extension = mimetypes.guess_extension(mime_type, strict=False) or ""
-        if extension == ".jpe":
-            return ".jpg"
-        if extension:
-            return extension
-        return ".img"
-
-    def _public_url_for_storage_path(self, storage_path: str) -> str:
-        path = Path(storage_path)
-        try:
-            relative_path = (
-                path.relative_to(STATIC_DIR)
-                if path.is_absolute()
-                else path.relative_to("static")
-            )
-        except ValueError:
-            relative_path = path
-        return f"/static/{relative_path.as_posix()}"
-
     def _load_attachments_for_message_ids(
         self,
         conn,
@@ -653,7 +594,7 @@ class ChatHistoryStore:
                 "storage_path": row["storage_path"],
                 "sha256": row["sha256"],
                 "size_bytes": row["size_bytes"],
-                "url": self._public_url_for_storage_path(row["storage_path"]),
+                "url": self.attachment_files.public_url(row["storage_path"]),
                 "summary_text": row["summary_text"],
             })
             attachments_by_message.setdefault(row["message_id"], []).append(attachment)
@@ -1017,21 +958,11 @@ class ChatHistoryStore:
             logger.exception("Failed to remove episodic index entries for session %s", session_id)
             cleanup_errors.append("vector_index")
 
-        upload_dir = self._session_upload_dir(session_id)
-        if upload_dir.exists():
-            try:
-                shutil.rmtree(upload_dir)
-            except OSError:
-                logger.exception("Failed to remove attachment files for session %s", session_id)
-                cleanup_errors.append("attachments")
+        try:
+            self.attachment_files.delete_session(session_id)
+        except OSError:
+            logger.exception("Failed to remove attachment files for session %s", session_id)
+            cleanup_errors.append("attachments")
 
         canonical_count = deleted_count if deleted_count > 0 else int(session_exists)
         return SessionDeletionResult(canonical_count, tuple(cleanup_errors))
-
-    def _session_upload_dir(self, session_id: str) -> Path:
-        session_id = validate_session_id(session_id)
-        upload_root = self.uploads_root.resolve()
-        session_dir = (upload_root / session_id).resolve()
-        if session_dir.parent != upload_root:
-            raise ValueError("Invalid session ID: attachment path escapes upload root")
-        return session_dir

@@ -460,7 +460,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
         with self.assertLogs("chat_history", level="ERROR"), patch.object(
             self.store.collection, "delete", side_effect=RuntimeError("offline")
         ), patch(
-            "app.memory.chat_history.shutil.rmtree", side_effect=OSError("busy")
+            "app.memory.attachment_files.shutil.rmtree", side_effect=OSError("busy")
         ) as remove_tree:
             result = self.store.delete_session("session-1")
 
