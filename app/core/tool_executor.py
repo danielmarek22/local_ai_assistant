@@ -25,13 +25,14 @@ logger = logging.getLogger("tool_executor")
 class ToolExecutor:
     """Adds assistant events and tracing around registry capability execution."""
 
-    def __init__(self, registry: IntegrationRegistry, operation_store=None):
+    def __init__(self, registry: IntegrationRegistry, operation_store=None, telemetry=None):
         self.registry = registry
         self.operation_store = operation_store
+        self.telemetry = telemetry
 
     def get_native_tools(
         self,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         *,
         session_id: str = "",
         user_text: str = "",
@@ -69,7 +70,10 @@ class ToolExecutor:
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         authoritative_turn=None,
         prepared_belief_turn=None,
+        allowed_capabilities: frozenset[CapabilityId] | None = None,
     ) -> Generator[AssistantStateEvent, None, ToolResult]:
+        if allowed_capabilities is not None:
+            allowed_capabilities = frozenset(allowed_capabilities)
         yield AssistantStateEvent(state=AssistantState.SEARCHING)
         capability = str(call.capability)
         logger.info("Running capability '%s'", capability)
@@ -114,6 +118,7 @@ class ToolExecutor:
                 notification_callback=notification_callback,
                 authoritative_turn=authoritative_turn,
                 prepared_belief_turn=prepared_belief_turn,
+                allowed_capabilities=allowed_capabilities,
             ),
         )
         if result.status == ToolResultStatus.PENDING and result.operation_id != invocation_id:
@@ -128,11 +133,14 @@ class ToolExecutor:
                 result.content,
             )
 
+        duration_ms = (time.perf_counter() - start_ts) * 1000
+        if self.telemetry is not None:
+            self.telemetry.record_tool_duration(duration_ms, session_id=session_id)
         logger.info(
             "Capability '%s' completed (status=%s, duration=%.2f ms)",
             capability,
             result.status.value,
-            (time.perf_counter() - start_ts) * 1000,
+            duration_ms,
         )
         trace_event(
             "tool_executor",

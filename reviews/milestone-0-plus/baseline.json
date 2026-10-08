@@ -1,0 +1,21 @@
+{
+  "date": "2026-09-15",
+  "head": "5986652eca4d98fe778c8e51c37bd0515ffcf67a",
+  "scope": "Working tree, including pre-existing uncommitted telemetry changes; not a clean commit snapshot",
+  "sha256": {
+    "app/core/context_builder.py": "66610030fd0b4c50111c2be2c729c4c5ae17bc766632f5ed5bb33bdcac688a01",
+    "app/core/response_generator.py": "9a784414a28906cf7fd714b0bb3caf8cdd8e8c17700b3e5cf850cd6683a9e1e5",
+    "app/core/tool_executor.py": "0775f66b80fcee40862c4f2d88d7de746ab03bca4f03c2d8c0a004069a84f10c",
+    "app/autonomy/store.py": "b6150103c847e20496be713fac127ca5fe0054f8d1cc7cf0a69e85f2f163c1e7",
+    "app/autonomy/coordinator.py": "81fd5277704ea1b61c41cf5959e3ee41f36ac91dc135767acb3ebee0e4fbf889",
+    "app/autonomy/runtime.py": "ea07bba0df54632374b4f5bf4976799f26fde6443a9b6b1332e4847320cda569",
+    "app/integrations/registry.py": "f0914e0999b8746e865f4bfa560a6f6f589c2bc477ec5e5f9b0ad353333c6d1f",
+    "app/integrations/contracts.py": "e842b8495b8aee8985703a09154190e38b2eef933bbcede9c22b51c54c5415b4",
+    "app/memory/summary_store.py": "5e6cca2a20acdc4e3649cecbf39f69538aeeb4ddd94bb4739d78d37060150da0",
+    "app/memory/chat_history.py": "f259333d06825072e5394504b564e8a29cabaf8b2fd7a7dfe44e7cf8901f0af8",
+    "app/tts/delivery.py": "cc87dc91c7d0aa01dc723ec8d2e9d88ba07b049a8203fc9f4764956d96516aa2",
+    "app/tts/stream.py": "f3d7270efcd2420bb752ea93de6c93c83f922221eea7924770d70f060a7eee94",
+    "app/server.py": "7e2eca12a507b8a5963a09a94e180848caa11b810ccd3679a529e8071f11e247",
+    "app/telemetry.py": "01b564cffef24a8bd631d3571f9ae41430655dba52d6963c5f66add3dc0ae4a5"
+  }
+}

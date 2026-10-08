@@ -29,7 +29,7 @@ class FakeHistory:
     def session_exists(self, session_id):
         return session_id in self.sessions
 
-    def get_recent(self, session_id, limit):
+    def get_recent(self, session_id, limit, *, conversation_only=False):
         return []
 
 
@@ -268,11 +268,12 @@ class KnowledgeRouteTests(unittest.TestCase):
             model=ForbiddenDependency("model"),
             memory_tool=ForbiddenDependency("memory tool"),
         )
-        server_module.app.state.orchestrator = self.orchestrator
+        self.application = server_module.create_app()
+        self.application.state.orchestrator = self.orchestrator
 
     def request(self, method, path, **kwargs):
         async def run_request():
-            transport = httpx.ASGITransport(app=server_module.app)
+            transport = httpx.ASGITransport(app=self.application)
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://testserver",

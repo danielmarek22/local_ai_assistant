@@ -41,14 +41,7 @@ from app.beliefs import (
     ConversationalBeliefObserver,
 )
 from app.storage.database import Database
-
-def consume_generator(gen):
-    events = []
-    try:
-        while True:
-            events.append(next(gen))
-    except StopIteration as stop:
-        return events, stop.value
+from tests.support import consume_generator
 
 
 class FakeToolExecutor:
@@ -163,13 +156,19 @@ class FakeLLM:
         self.chat_calls = []
         self.chat_responses = list(chat_responses or [])
 
+    def resolve_think_value(self, think_override=None):
+        return True if think_override is None else think_override
+
+    def chat_buffered(self, messages, think_override=None, tools=None, **kwargs):
+        return self.chat(messages, think_override=think_override, tools=tools)
+
     def chat(self, messages, think_override=None, options_override=None, timeout_override=None, max_retries_override=None, tools=None):
         self.chat_calls.append((messages, think_override, tools))
         if self.chat_responses:
             return self.chat_responses.pop(0)
         return {"content": ""}
 
-    def stream_chat(self, messages, think_override=None):
+    def stream_chat(self, messages, think_override=None, **kwargs):
         self.calls.append((messages, think_override))
         for chunk in self.chunks:
             yield chunk
@@ -311,20 +310,27 @@ class OrchestratorTests(unittest.TestCase):
         return orch, llm, history, memory, summary_store, summarizer, tool_executor, context_builder
 
     def test_close_releases_owned_storage_in_reverse_order_once(self):
-        close_order = []
-        database = SimpleNamespace(close=lambda: close_order.append("database"))
-        vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
-        built = self._build_orchestrator(
-            database=database,
-            vector_store=vector_store,
-        )
-        orchestrator, tool_executor = built[0], built[6]
+        for autonomy_attached in (False, True):
+            with self.subTest(autonomy_attached=autonomy_attached):
+                close_order = []
+                database = SimpleNamespace(close=lambda: close_order.append("database"))
+                vector_store = SimpleNamespace(close=lambda: close_order.append("vector_store"))
+                built = self._build_orchestrator(
+                    database=database,
+                    vector_store=vector_store,
+                )
+                orchestrator, tool_executor = built[0], built[6]
+                if autonomy_attached:
+                    # Application shutdown owns the async runtime and its registry.
+                    orchestrator.autonomy_runtime = SimpleNamespace(
+                        close=lambda: self.fail("orchestrator must not close autonomy")
+                    )
 
-        orchestrator.close()
-        orchestrator.close()
+                orchestrator.close()
+                orchestrator.close()
 
-        self.assertEqual(tool_executor.close_calls, 1)
-        self.assertEqual(close_order, ["vector_store", "database"])
+                self.assertEqual(tool_executor.close_calls, 0 if autonomy_attached else 1)
+                self.assertEqual(close_order, ["vector_store", "database"])
 
     def test_factory_closes_constructed_storage_when_build_fails(self):
         close_order = []
@@ -897,6 +903,9 @@ class OrchestratorTests(unittest.TestCase):
                 self.calls = []
                 self.stream_calls = []
 
+            def resolve_think_value(self, think_override=None):
+                return True if think_override is None else think_override
+
             def chat_buffered(self, **kwargs):
                 self.calls.append(kwargs)
                 if not self.responses:
@@ -1176,32 +1185,88 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(summarizer.calls), 1)
         self.assertEqual(len(summary_store.saved), 1)
 
-    def test_response_expression_tag_is_extracted_from_stream(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["[st", "ate:happy]Hello", " there"],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        expression_values = [
-            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
+    def test_avatar_syntax_preserves_events_final_speech_and_history(self):
+        cases = [
+            (
+                "split expression",
+                ["[st", "ate:happy]Hello", " there"],
+                "expression",
+                ["happy"],
+                ["Hello", " there"],
+                "Hello there",
+            ),
+            (
+                "expression spacing",
+                ["[state ", ": surprised ]Hello there"],
+                "expression",
+                ["surprised"],
+                ["Hello there"],
+                "Hello there",
+            ),
+            (
+                "expression alias",
+                ["[expression:happy]Nice."],
+                "expression",
+                ["happy"],
+                ["Nice."],
+                "Nice.",
+            ),
+            (
+                "animation",
+                ["Hello [animation:greeting]there."],
+                "animation",
+                ["greeting"],
+                ["Hello ", "there."],
+                "Hello there.",
+            ),
+            (
+                "animation alias",
+                ["[gesture:greeting]Hi."],
+                "animation",
+                ["greeting"],
+                ["Hi."],
+                "Hi.",
+            ),
+            (
+                "bare animation",
+                ["[greeting]Hi."],
+                "animation",
+                ["greeting"],
+                ["Hi."],
+                "Hi.",
+            ),
+            (
+                "unknown animation",
+                ["Hi [animation:unknown]there."],
+                "animation",
+                [],
+                ["Hi ", "there."],
+                "Hi there.",
+            ),
         ]
-        self.assertEqual(expression_values, ["happy"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hello", " there"])
-        self.assertEqual(speech_texts[-1], "Hello there")
-        self.assertEqual(history.records[1][2], "Hello there")
+        for label, chunks, kind, controls, speech, final in cases:
+            with self.subTest(case=label):
+                built = self._build_orchestrator(llm_chunks=chunks, summary_trigger=999)
+                events = list(built[0].handle_user_input(self.SESSION_ID, "hello"))
+                event_class = (
+                    AvatarExpressionEvent if kind == "expression" else AvatarAnimationEvent
+                )
+                self.assertEqual(
+                    [
+                        getattr(event, kind)
+                        for event in events
+                        if isinstance(event, event_class)
+                    ],
+                    controls,
+                )
+                speech_texts = [
+                    event.text
+                    for event in events
+                    if isinstance(event, AssistantSpeechEvent)
+                ]
+                self.assertEqual(speech_texts[:-1], speech)
+                self.assertEqual(speech_texts[-1], final)
+                self.assertEqual(built[2].records[1][2], final)
 
     def test_response_can_switch_expressions_multiple_times(self):
         (
@@ -1237,60 +1302,6 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(speech_texts[-1], "That worked. Wait, even better. All set.")
         self.assertEqual(history.records[1][2], "That worked. Wait, even better. All set.")
-
-    def test_response_expression_tag_allows_internal_spacing(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["[state ", ": surprised ]Hello there"],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        expression_values = [
-            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
-        ]
-        self.assertEqual(expression_values, ["surprised"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hello there"])
-        self.assertEqual(speech_texts[-1], "Hello there")
-        self.assertEqual(history.records[1][2], "Hello there")
-
-    def test_response_expression_alias_tag_is_supported(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["[expression:happy]Nice."],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        expression_values = [
-            e.expression for e in events if isinstance(e, AvatarExpressionEvent)
-        ]
-        self.assertEqual(expression_values, ["happy"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Nice."])
-        self.assertEqual(speech_texts[-1], "Nice.")
-        self.assertEqual(history.records[1][2], "Nice.")
 
     def test_response_expression_uses_configured_allowlist(self):
         (
@@ -1414,114 +1425,6 @@ class OrchestratorTests(unittest.TestCase):
         payload = llm_stream_complete_call.kwargs["payload"]
         self.assertEqual(payload["visible_response"], "Visible answer.")
         self.assertEqual(payload["reasoning_response"], "\nReasoning bit 1\nReasoning bit 2\n")
-
-    def test_response_animation_tag_is_extracted_from_stream(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["Hello [animation:greeting]there."],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        animation_values = [
-            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
-        ]
-        self.assertEqual(animation_values, ["greeting"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hello ", "there."])
-        self.assertEqual(speech_texts[-1], "Hello there.")
-        self.assertEqual(history.records[1][2], "Hello there.")
-
-    def test_response_animation_alias_tag_is_supported(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["[gesture:greeting]Hi."],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        animation_values = [
-            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
-        ]
-        self.assertEqual(animation_values, ["greeting"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hi."])
-        self.assertEqual(speech_texts[-1], "Hi.")
-        self.assertEqual(history.records[1][2], "Hi.")
-
-    def test_response_bare_animation_name_in_brackets_is_supported(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["[greeting]Hi."],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        animation_values = [
-            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
-        ]
-        self.assertEqual(animation_values, ["greeting"])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hi."])
-        self.assertEqual(speech_texts[-1], "Hi.")
-        self.assertEqual(history.records[1][2], "Hi.")
-
-    def test_unknown_animation_tag_is_stripped_without_event(self):
-        (
-            orch,
-            _llm,
-            history,
-            _memory,
-            _summary_store,
-            _summarizer,
-            _tool_executor,
-            _context_builder,
-        ) = self._build_orchestrator(
-            llm_chunks=["Hi [animation:unknown]there."],
-            summary_trigger=999,
-        )
-
-        events = list(orch.handle_user_input(self.SESSION_ID, "hello"))
-
-        animation_values = [
-            e.animation for e in events if isinstance(e, AvatarAnimationEvent)
-        ]
-        self.assertEqual(animation_values, [])
-
-        speech_texts = [e.text for e in events if isinstance(e, AssistantSpeechEvent)]
-        self.assertEqual(speech_texts[:-1], ["Hi ", "there."])
-        self.assertEqual(speech_texts[-1], "Hi there.")
-        self.assertEqual(history.records[1][2], "Hi there.")
 
     def test_image_only_turn_updates_perception_history_and_context(self):
         (

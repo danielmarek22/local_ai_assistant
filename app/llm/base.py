@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Iterator, List, Dict
+from typing import Iterator
 
 
 def response_text(response: object, *, context: str = "Model") -> str:
@@ -20,13 +20,24 @@ class InferenceFailure(RuntimeError):
 
 
 class LLMClient(ABC):
+    """Inference contract required by the assistant's generation paths."""
+
+    @abstractmethod
+    def resolve_think_value(self, think_override=None):
+        """Resolve an override against the backend's configured reasoning mode."""
+        raise NotImplementedError
+
     @abstractmethod
     def chat(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         think_override=None,
-        options_override: Dict | None = None,
-        format_override: Dict | str | None = None,
+        options_override: dict | None = None,
+        timeout_override: float | None = None,
+        max_retries_override: int | None = None,
+        tools: list[dict] | None = None,
+        format_override: dict | str | None = None,
+        telemetry_session_id: str | None = None,
     ) -> dict:
         """
         Blocking, non-streaming call.
@@ -40,9 +51,39 @@ class LLMClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def stream_chat(self, messages: List[Dict], think_override=None) -> Iterator[str]:
+    def chat_buffered(
+        self,
+        messages: list[dict],
+        think_override=None,
+        options_override: dict | None = None,
+        timeout_override: float | None = None,
+        generation_deadline_s: float | None = 120.0,
+        tools: list[dict] | None = None,
+        generation_phase: str | None = None,
+        react_iteration: int | None = None,
+        telemetry_session_id: str | None = None,
+    ) -> dict:
+        """Return a complete generation atomically; never expose partial tool calls.
+
+        Unlike visible streaming, incomplete or failed generation must raise
+        InferenceFailure rather than return a partial assistant message.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def stream_chat(
+        self,
+        messages: list[dict],
+        think_override=None,
+        tools: list[dict] | None = None,
+        options_override: dict | None = None,
+        generation_deadline_s: float | None = None,
+        timeout_override: float | None = None,
+        telemetry_session_id: str | None = None,
+    ) -> Iterator[str | dict]:
         """
         Streaming call.
-        Yields text chunks for user-facing responses.
+        Yields text chunks (including thinking markers) or native tool-call
+        dictionaries. Per-call controls must not mutate backend defaults.
         """
         raise NotImplementedError

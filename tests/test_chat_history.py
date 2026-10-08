@@ -418,6 +418,9 @@ class ChatHistoryStoreTests(unittest.TestCase):
         )
         self.store.summarize_pending_attachments(message_id)
         attachment_id = self.store.get_all("session-1")[0]["attachments"][0].attachment_id
+        original_documents = {
+            record["id"]: record["document"] for record in self.store.collection.records
+        }
         self.store.collection.records = [{
             "id": "legacy-random-id",
             "document": "Stale copy",
@@ -434,6 +437,10 @@ class ChatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(
             {record["id"] for record in self.store.collection.records},
             {f"message:{message_id}", f"attachment:{attachment_id}"},
+        )
+        self.assertEqual(
+            {record["id"]: record["document"] for record in self.store.collection.records},
+            original_documents,
         )
 
     def test_delete_session_reports_partial_cleanup_and_attempts_every_target(self):
@@ -453,7 +460,7 @@ class ChatHistoryStoreTests(unittest.TestCase):
         with self.assertLogs("chat_history", level="ERROR"), patch.object(
             self.store.collection, "delete", side_effect=RuntimeError("offline")
         ), patch(
-            "app.memory.chat_history.shutil.rmtree", side_effect=OSError("busy")
+            "app.memory.attachment_files.shutil.rmtree", side_effect=OSError("busy")
         ) as remove_tree:
             result = self.store.delete_session("session-1")
 

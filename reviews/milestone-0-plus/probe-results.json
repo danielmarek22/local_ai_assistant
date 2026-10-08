@@ -1,0 +1,20 @@
+{
+  "schemas_seen": [
+    [],
+    []
+  ],
+  "empty_allowlist_handler_executed": true,
+  "terminal_status_after_success_then_error": "error",
+  "checkpoint": 101,
+  "unsummarized_expected": [
+    "new-0",
+    "new-1",
+    "new-2",
+    "new-3"
+  ],
+  "unsummarized_in_context": [
+    "new-2",
+    "new-3",
+    "current"
+  ]
+}

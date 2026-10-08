@@ -1,5 +1,6 @@
 import logging
 from contextlib import ExitStack
+from dataclasses import dataclass, field
 
 from app.config import Config
 from app.llm.ollama_stream import OllamaClient
@@ -53,6 +54,7 @@ from app.beliefs import (
     REACT_TOOL_BELIEF_VERSION,
 )
 from app.paths import DATA_DIR, STATIC_DIR, resolve_app_path
+from app.telemetry import TelemetryRecorder
 
 logger = logging.getLogger("orchestrator_factory")
 
@@ -71,6 +73,7 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
         "rep_pen": "repeat_penalty",
         "repeat_penalty": "repeat_penalty",
         "num_ctx": "num_ctx",
+        "num_gpu_layers": "num_gpu",
     }
 
     for source_key, target_key in field_map.items():
@@ -81,13 +84,24 @@ def _build_ollama_options(raw_generation: dict | None) -> dict:
     return options
 
 
+@dataclass(frozen=True)
+class BeliefComponents:
+    """Belief wiring without taking ownership of the shared database."""
+
+    repository: BeliefRepository | None = None
+    context_provider: BeliefContextProvider | None = None
+    completion_observers: list[ConversationalBeliefObserver] = field(default_factory=list)
+    integration: BeliefIntegration | None = None
+    turn_preparer: BeliefTurnPreparer | None = None
+
+
 def _build_belief_components(
     *, config, llm, db, history_store, agent_id: str,
     native_late_routing_enabled: bool = True,
-):
+) -> BeliefComponents:
     """Build storage/context and exactly one configured conversational producer."""
     if not config.beliefs.get("enabled", True):
-        return None, None, [], None, None
+        return BeliefComponents()
 
     processing_mode = config.beliefs.get("processing_mode", "disabled")
     if processing_mode == "react_tool" and not native_late_routing_enabled:
@@ -149,7 +163,13 @@ def _build_belief_components(
         )
     elif processing_mode != "disabled":
         raise ValueError(f"Unsupported belief processing mode: {processing_mode}")
-    return repository, context_provider, observers, belief_integration, preparer
+    return BeliefComponents(
+        repository=repository,
+        context_provider=context_provider,
+        completion_observers=observers,
+        integration=belief_integration,
+        turn_preparer=preparer,
+    )
 
 
 def build_orchestrator(config: Config | None = None) -> Orchestrator:
@@ -170,6 +190,23 @@ def _build_orchestrator(
     # --------------------------------------------------
     logger.info("Loading configuration")
     config = config or Config()
+
+    telemetry_cfg = getattr(config, "telemetry", None) or {
+        "mode": "none",
+        "file_name": "model-telemetry.jsonl",
+    }
+    logging_cfg = getattr(config, "logging", None) or {}
+    telemetry = TelemetryRecorder(
+        mode=telemetry_cfg["mode"],
+        file_path=(
+            resolve_app_path(logging_cfg.get("dir", "logs"))
+            / telemetry_cfg["file_name"]
+        ),
+        max_bytes=logging_cfg.get("max_bytes", 10_000_000),
+        backup_count=logging_cfg.get("backup_count", 5),
+    )
+    startup_resources.callback(telemetry.close)
+    active_telemetry = telemetry if telemetry.enabled else None
 
     logger.debug(
         "Config summary: llm_model=%s, integrations=%s",
@@ -202,6 +239,7 @@ def _build_orchestrator(
         timeout_s=config.llm.get("timeout_s", 30.0),
         max_retries=config.llm.get("max_retries", 2),
         retry_backoff_s=config.llm.get("retry_backoff_s", 0.25),
+        telemetry=active_telemetry,
     )
     startup_resources.callback(llm.close)
 
@@ -215,6 +253,7 @@ def _build_orchestrator(
     )
 
     llm.preload()
+    llm.load_telemetry_metadata()
 
     # --------------------------------------------------
     # Storage
@@ -261,7 +300,11 @@ def _build_orchestrator(
     # --------------------------------------------------
     logger.info("Initializing summarizers")
 
-    history_summarizer = HistorySummarizer(llm)
+    history_summarizer = HistorySummarizer(
+        llm,
+        timeout_s=config.orchestrator["summary_timeout_s"],
+        num_predict=config.orchestrator["summary_num_predict"],
+    )
     image_summarizer = ImageSummarizer(llm)
     search_summarizer = SearchResultSummarizer(llm)
     history_store.image_summarizer = image_summarizer
@@ -289,28 +332,20 @@ def _build_orchestrator(
         memory_policy=memory_policy,
     )
     native_late_routing_enabled = True
-    (
-        belief_repository,
-        belief_context_provider,
-        completion_observers,
-        belief_integration,
-        belief_turn_preparer,
-    ) = (
-        _build_belief_components(
-            config=config,
-            llm=llm,
-            db=db,
-            history_store=history_store,
-            agent_id=agent_id,
-            native_late_routing_enabled=native_late_routing_enabled,
-        )
+    beliefs = _build_belief_components(
+        config=config,
+        llm=llm,
+        db=db,
+        history_store=history_store,
+        agent_id=agent_id,
+        native_late_routing_enabled=native_late_routing_enabled,
     )
     turn_finalizer = TurnFinalizer(
         history_store=history_store,
         summary_store=summary_store,
         summarizer=history_summarizer,
         summary_trigger=config.orchestrator["summary_trigger"],
-        completion_observers=completion_observers,
+        completion_observers=beliefs.completion_observers,
     )
 
     # --------------------------------------------------
@@ -330,8 +365,8 @@ def _build_orchestrator(
     wardrobe = AvatarWardrobe(outfit_catalog, initial_outfit)
 
     integrations = [RuntimeIntegration(), VisionIntegration(), OutfitIntegration(wardrobe)]
-    if belief_integration is not None:
-        integrations.append(belief_integration)
+    if beliefs.integration is not None:
+        integrations.append(beliefs.integration)
         logger.info("Belief ReAct integration registered")
     web_cfg = config.integrations.get("web", {})
 
@@ -401,7 +436,11 @@ def _build_orchestrator(
 
     integration_registry = IntegrationRegistry(integrations)
     startup_resources.callback(integration_registry.close)
-    tool_executor = ToolExecutor(integration_registry, operation_store=autonomy_store)
+    tool_executor = ToolExecutor(
+        integration_registry,
+        operation_store=autonomy_store,
+        telemetry=active_telemetry,
+    )
 
     # --------------------------------------------------
     # Context builder
@@ -449,7 +488,7 @@ def _build_orchestrator(
         integration_context_limit=config.context["integration_context_limit"],
         agent_id=agent_id,
         timezone_name=str(config.beliefs.get("timezone", "UTC")),
-        belief_context_provider=belief_context_provider,
+        belief_context_provider=beliefs.context_provider,
         local_human_id=config.local_human["id"],
         local_human_name=config.local_human["display_name"],
         local_assistant_name=assistant_name,
@@ -463,17 +502,20 @@ def _build_orchestrator(
         recovery_num_predict=int(
             config.orchestrator.get("recovery_num_predict", 192)
         ),
+        telemetry=active_telemetry,
         database=db,
         vector_store=vector_store,
+        belief_repository=beliefs.repository,
+        avatar_wardrobe=wardrobe,
+        max_late_routing_steps=int(config.autonomy.get("max_tool_steps", 5)),
         belief_turn_preparer=(
-            belief_turn_preparer
+            beliefs.turn_preparer
             if config.beliefs["processing_mode"] == "react_tool"
             else None
         ),
     )
-    orchestrator.belief_repository = belief_repository
-    orchestrator.avatar_wardrobe = wardrobe
-    orchestrator.max_late_routing_steps = int(config.autonomy.get("max_tool_steps", 5))
+    # Attach only after construction: the runtime needs the orchestrator back-reference.
+    # Application shutdown closes autonomy first; it owns registry/store cleanup.
     orchestrator.autonomy_runtime = AutonomyRuntime(
         orchestrator=orchestrator,
         registry=integration_registry,

@@ -1,6 +1,8 @@
+import { MessageRenderer } from './message-renderer.mjs';
+import { ChatHistoryStore } from './chat-history-store.mjs';
 import { CONFIG } from './config.js';
-import { marked } from '/static/vendor/marked/13.0.2/lib/marked.esm.js';
-import DOMPurify from '/static/vendor/dompurify/3.1.6/dist/purify.es.mjs';
+import { PreferenceStore } from './preferences.mjs';
+import { MicrophoneRecorder } from './microphone-recorder.mjs';
 import {
     extractBase64Payload,
     extractImageFilesFromDataTransfer,
@@ -8,11 +10,6 @@ import {
     isImageFile,
     repairImageBase64Payload,
 } from './attachment-utils.mjs';
-
-marked.setOptions({
-    gfm: true,
-    breaks: true
-});
 
 export class UIManager {
     constructor() {
@@ -64,7 +61,6 @@ export class UIManager {
 
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
-        this.chatHistoryStorageKey = null;
         this.currentSessionId = null;
         this.reasoningEnabledForNextSend = false;
         this.pendingAttachments = [];
@@ -73,38 +69,35 @@ export class UIManager {
         this.localAssistantDisplayName = 'Astra';
         this.onConversationModeChangeHandler = null;
         this.onRelayHandler = null;
-        this.volumeStorageKey = CONFIG.UI.STORAGE_KEYS.AUDIO_VOLUME;
-        this.agentModeStorageKey = CONFIG.UI.STORAGE_KEYS.AGENT_MODE;
-        this.hideThinkingStorageKey = CONFIG.UI.STORAGE_KEYS.HIDE_THINKING;
+        this.preferences = new PreferenceStore();
         this.agentModeEnabled = this.readStoredAgentMode();
         this.hideThinkingEnabled = this.readStoredHideThinking();
         this.instantModeEnabled = !this.agentModeEnabled;
         this.reasoningAlwaysStorageKey = CONFIG.UI.STORAGE_KEYS.REASONING_ALWAYS_ON;
         this.reasoningAlwaysEnabled = this.agentModeEnabled;
-        this.voiceModeStorageKey = CONFIG.UI.STORAGE_KEYS.VOICE_MODE;
         this.voiceMode = this.readStoredVoiceMode();
-        this.screenCapturePolicyStorageKey = CONFIG.UI.STORAGE_KEYS.SCREEN_CAPTURE_POLICY;
         this.screenCapturePolicy = this.readStoredScreenCapturePolicy();
+        this.messageRenderer = new MessageRenderer(() => ({
+            conversationMode: this.conversationMode,
+            localHumanDisplayName: this.localHumanDisplayName,
+            localAssistantDisplayName: this.localAssistantDisplayName,
+        }));
+        this.historyStore = new ChatHistoryStore(
+            attachments => this.messageRenderer.normalizeAttachments(attachments),
+        );
         this.defaultMessages = this.serializeChatHistory();
         this.pendingToolApprovals = [];
         this.activeToolApproval = null;
         this.onRetryHandler = null;
         this.activeRetryMessageId = null;
 
-        // STT recording state
-        this._mediaRecorder = null;
-        this._audioChunks = [];
-        this._isRecording = false;
-        this._isAlwaysListening = false;
-        this._onMicPressHandler = null;
         this._micHotkey = this.loadMicHotkey();
-        this._alwaysListeningStream = null;
-        this._audioContext = null;
-        this._alwaysListeningAnalyser = null;
-        this._speechDetectedTime = 0;
-        this._alwaysListeningSpeechCheck = null;
-        this._isSendingAlwaysListeningChunk = false;
-        this._alwaysListeningVoiceContextSent = false;
+        this.microphone = new MicrophoneRecorder({
+            onStateChange: (className, active, label) => {
+                this.micBtn?.classList.toggle(className, active);
+                this.micBtn?.setAttribute('aria-label', label);
+            },
+        });
 
         this.initAutoResize();
         this.initPanelControls();
@@ -138,7 +131,7 @@ export class UIManager {
             if (document.activeElement === this.userInput) return;
             // Push-to-talk hotkey is disabled while automatic voice detection is active.
             if (this.voiceMode !== 'push_to_talk') return;
-            if (this._isRecording) return;
+            if (this.microphone.isRecording) return;
 
             event.preventDefault();
             this.startManualRecording();
@@ -146,7 +139,7 @@ export class UIManager {
 
         document.addEventListener('keyup', (event) => {
             if (event.key !== this._micHotkey) return;
-            if (this.voiceMode === 'push_to_talk' && this._isRecording) {
+            if (this.voiceMode === 'push_to_talk' && this.microphone.isRecording) {
                 event.preventDefault();
                 this.stopRecording();
             }
@@ -155,198 +148,28 @@ export class UIManager {
         void this.applyVoiceMode(this.voiceMode);
     }
 
-    async toggleAlwaysListening() {
-        if (this._isAlwaysListening) {
-            // Disable always listening
-            await this.stopAlwaysListening();
-        } else {
-            // Enable always listening
-            await this.startAlwaysListening();
-        }
+    toggleAlwaysListening() {
+        return this.microphone.toggleAlwaysListening();
     }
 
-    async startAlwaysListening() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            this._alwaysListeningStream = stream;
-            this._isAlwaysListening = true;
-
-            this.micBtn?.classList.add('always-listening');
-            this.micBtn?.setAttribute('aria-label', 'Automatic voice detection is active');
-
-            // Setup Web Audio API for voice activity detection
-            if (!this._audioContext) {
-                this._audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            const audioContext = this._audioContext;
-            const source = audioContext.createMediaStreamSource(stream);
-            const analyser = audioContext.createAnalyser();
-            analyser.fftSize = 2048;
-            source.connect(analyser);
-
-            this._alwaysListeningAnalyser = analyser;
-
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : '';
-
-            this._mediaRecorder = null;
-            this._audioChunks = [];
-            this._speechDetectedTime = 0;
-            this._isSendingAlwaysListeningChunk = false;
-            this._alwaysListeningVoiceContextSent = false;
-
-            const startSpeechSegment = () => {
-                if (this._mediaRecorder?.state === 'recording') return;
-
-                const chunks = [];
-                const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-                this._mediaRecorder = recorder;
-                recorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) {
-                        chunks.push(e.data);
-                    }
-                };
-                recorder.onstop = () => {
-                    this._isSendingAlwaysListeningChunk = false;
-                    if (this._mediaRecorder === recorder) {
-                        this._mediaRecorder = null;
-                    }
-
-                    if (!this._isAlwaysListening || !chunks.length || !this._onMicPressHandler) return;
-
-                    const blob = new Blob(chunks, {
-                        type: recorder.mimeType || 'audio/webm',
-                    });
-                    this._onMicPressHandler(blob, {
-                        includeScreenContext: !this._alwaysListeningVoiceContextSent,
-                    });
-                    this._alwaysListeningVoiceContextSent = true;
-                };
-                this._isSendingAlwaysListeningChunk = true;
-                recorder.start();
-            };
-
-            const stopSpeechSegment = () => {
-                if (this._mediaRecorder?.state === 'recording') {
-                    this._mediaRecorder.stop();
-                }
-            };
-
-            // Check for speech activity every 100ms and send each complete utterance
-            // after a short silence, so STT receives a decodable WebM blob.
-            this._alwaysListeningSpeechCheck = setInterval(() => {
-                if (!this._isAlwaysListening) return;
-
-                const hasSpeech = this.detectSpeechActivity(analyser);
-                
-                if (hasSpeech) {
-                    this._speechDetectedTime = Date.now();
-                    startSpeechSegment();
-                }
-
-                const timeSinceSpeech = Date.now() - this._speechDetectedTime;
-                if (timeSinceSpeech >= 800) {
-                    stopSpeechSegment();
-                    this._alwaysListeningVoiceContextSent = false;
-                }
-            }, 100);
-        } catch (err) {
-            console.warn('Microphone access denied:', err);
-            this._isAlwaysListening = false;
-        }
+    startAlwaysListening() {
+        return this.microphone.startAlwaysListening();
     }
 
     detectSpeechActivity(analyser) {
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteFrequencyData(dataArray);
-
-        // Calculate average energy across frequency bins
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-        }
-        const average = sum / dataArray.length;
-
-        // Consider speech detected if average frequency energy > 30
-        // (threshold can be adjusted based on testing)
-        return average > 30;
+        return this.microphone.detectSpeechActivity(analyser);
     }
 
-    async stopAlwaysListening() {
-        if (this._alwaysListeningSpeechCheck) {
-            clearInterval(this._alwaysListeningSpeechCheck);
-            this._alwaysListeningSpeechCheck = null;
-        }
-
-        if (this._mediaRecorder?.state === 'recording') {
-            this._mediaRecorder.stop();
-        }
-        this._mediaRecorder = null;
-
-        if (this._alwaysListeningStream) {
-            this._alwaysListeningStream.getTracks().forEach((t) => t.stop());
-            this._alwaysListeningStream = null;
-        }
-
-        this._alwaysListeningAnalyser = null;
-
-        this._isAlwaysListening = false;
-        this._audioChunks = [];
-        this._alwaysListeningVoiceContextSent = false;
-        this.micBtn?.classList.remove('always-listening');
-        this.micBtn?.setAttribute('aria-label', 'Voice input');
+    stopAlwaysListening() {
+        return this.microphone.stopAlwaysListening();
     }
 
     stopRecording() {
-        if (this._mediaRecorder && this._isRecording) {
-            this._mediaRecorder.stop();
-        }
+        return this.microphone.stopRecording();
     }
 
-    async startManualRecording() {
-        if (this._isRecording) return;
-
-        let stream;
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        } catch (err) {
-            console.warn('Microphone access denied:', err);
-            return;
-        }
-
-        this._audioChunks = [];
-        this._isRecording = true;
-        this.micBtn?.classList.add('recording');
-        this.micBtn?.setAttribute('aria-label', 'Recording... release hotkey to send');
-
-        // Prefer webm/opus; fall back to whatever the browser supports.
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-            ? 'audio/webm;codecs=opus'
-            : '';
-
-        this._mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-        this._mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) this._audioChunks.push(e.data);
-        };
-
-        this._mediaRecorder.onstop = () => {
-            stream.getTracks().forEach((t) => t.stop());
-            this._isRecording = false;
-            this.micBtn?.classList.remove('recording');
-            this.micBtn?.setAttribute('aria-label', 'Voice input');
-
-            const blob = new Blob(this._audioChunks, {
-                type: this._mediaRecorder.mimeType || 'audio/webm',
-            });
-            this._audioChunks = [];
-
-            if (this._onMicPressHandler) {
-                this._onMicPressHandler(blob, { includeScreenContext: true });
-            }
-        };
-
-        this._mediaRecorder.start();
+    startManualRecording() {
+        return this.microphone.startManualRecording();
     }
 
     loadMicHotkey() {
@@ -360,7 +183,7 @@ export class UIManager {
     }
 
     onMicPress(callback) {
-        this._onMicPressHandler = callback;
+        this.microphone.onAudio = callback;
     }
 
     onMicHotkeyChange(callback) {
@@ -449,22 +272,8 @@ export class UIManager {
         this.renderNextToolApproval();
     }
 
-    async applyVoiceMode(mode = this.voiceMode) {
-        if (!navigator.mediaDevices?.getUserMedia) return;
-
-        if (mode === 'automatic') {
-            if (this._isRecording) {
-                this.stopRecording();
-            }
-            if (!this._isAlwaysListening) {
-                await this.startAlwaysListening();
-            }
-            return;
-        }
-
-        if (this._isAlwaysListening) {
-            await this.stopAlwaysListening();
-        }
+    applyVoiceMode(mode = this.voiceMode) {
+        return this.microphone.applyVoiceMode(mode);
     }
 
     formatKeyDisplay(key) {
@@ -799,11 +608,7 @@ export class UIManager {
     }
 
     createAttachmentId() {
-        if (window.crypto?.randomUUID) {
-            return window.crypto.randomUUID();
-        }
-
-        return `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        return this.messageRenderer.createAttachmentId();
     }
 
     removePendingAttachment(attachmentId) {
@@ -889,23 +694,7 @@ export class UIManager {
     }
 
     readStoredPlaybackVolume() {
-        try {
-            const rawValue = localStorage.getItem(this.volumeStorageKey);
-            if (rawValue === null) {
-                return CONFIG.AUDIO.DEFAULT_VOLUME;
-            }
-
-            const parsedValue = Number(rawValue);
-            if (Number.isFinite(parsedValue) && parsedValue >= 0 && parsedValue <= 1) {
-                return parsedValue;
-            }
-
-            localStorage.removeItem(this.volumeStorageKey);
-        } catch (error) {
-            console.warn('Failed to restore playback volume:', error);
-        }
-
-        return CONFIG.AUDIO.DEFAULT_VOLUME;
+        return this.preferences.readStoredPlaybackVolume();
     }
 
     setPlaybackVolume(volume, { persist = true, notify = true } = {}) {
@@ -922,11 +711,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.volumeStorageKey, String(nextVolume));
-            } catch (error) {
-                console.warn('Failed to persist playback volume:', error);
-            }
+            this.preferences.save('AUDIO_VOLUME', String(nextVolume), 'playback volume');
         }
 
         if (notify && this.onVolumeChangeHandler) {
@@ -943,38 +728,11 @@ export class UIManager {
     }
 
     readStoredAgentMode() {
-        try {
-            const storedValue = localStorage.getItem(this.agentModeStorageKey);
-            if (storedValue !== null) {
-                return storedValue === 'true';
-            }
-
-            const legacyValue = localStorage.getItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
-            if (legacyValue !== null) {
-                const migratedAgentMode = legacyValue === 'false';
-                localStorage.setItem(this.agentModeStorageKey, String(migratedAgentMode));
-                localStorage.removeItem(CONFIG.UI.STORAGE_KEYS.INSTANT_MODE);
-                return migratedAgentMode;
-            }
-
-            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
-        } catch (error) {
-            console.warn('Failed to restore agent mode:', error);
-            return Boolean(CONFIG.UI.AGENT_MODE_DEFAULT);
-        }
+        return this.preferences.readStoredAgentMode();
     }
 
     readStoredHideThinking() {
-        try {
-            const storedValue = localStorage.getItem(this.hideThinkingStorageKey);
-            if (storedValue === null) {
-                return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
-            }
-            return storedValue === 'true';
-        } catch (error) {
-            console.warn('Failed to restore hide thinking setting:', error);
-            return Boolean(CONFIG.UI.HIDE_THINKING_DEFAULT);
-        }
+        return this.preferences.readStoredHideThinking();
     }
 
     setAgentMode(isEnabled, { persist = true } = {}) {
@@ -1000,11 +758,7 @@ export class UIManager {
         this.syncReasoningToggle();
 
         if (persist) {
-            try {
-                localStorage.setItem(this.agentModeStorageKey, String(this.agentModeEnabled));
-            } catch (error) {
-                console.warn('Failed to persist agent mode:', error);
-            }
+            this.preferences.save('AGENT_MODE', String(this.agentModeEnabled), 'agent mode');
         }
     }
 
@@ -1024,11 +778,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.hideThinkingStorageKey, String(this.hideThinkingEnabled));
-            } catch (error) {
-                console.warn('Failed to persist hide thinking setting:', error);
-            }
+            this.preferences.save('HIDE_THINKING', String(this.hideThinkingEnabled), 'hide thinking setting');
         }
     }
 
@@ -1069,23 +819,11 @@ export class UIManager {
     }
 
     normalizeVoiceMode(mode) {
-        return CONFIG.UI.VOICE_MODES.includes(mode)
-            ? mode
-            : CONFIG.UI.VOICE_MODE_DEFAULT;
+        return this.preferences.normalizeVoiceMode(mode);
     }
 
     readStoredVoiceMode() {
-        try {
-            const rawValue = localStorage.getItem(this.voiceModeStorageKey);
-            const mode = this.normalizeVoiceMode(rawValue);
-            if (rawValue !== null && rawValue !== mode) {
-                localStorage.removeItem(this.voiceModeStorageKey);
-            }
-            return mode;
-        } catch (error) {
-            console.warn('Failed to restore voice mode:', error);
-            return CONFIG.UI.VOICE_MODE_DEFAULT;
-        }
+        return this.preferences.readStoredVoiceMode();
     }
 
     setVoiceMode(mode, { persist = true, activate = true } = {}) {
@@ -1099,11 +837,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.voiceModeStorageKey, nextMode);
-            } catch (error) {
-                console.warn('Failed to persist voice mode:', error);
-            }
+            this.preferences.save('VOICE_MODE', nextMode, 'voice mode');
         }
 
         if (activate) {
@@ -1112,23 +846,11 @@ export class UIManager {
     }
 
     normalizeScreenCapturePolicy(policy) {
-        return CONFIG.UI.SCREEN_CAPTURE_POLICIES.includes(policy)
-            ? policy
-            : CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
+        return this.preferences.normalizeScreenCapturePolicy(policy);
     }
 
     readStoredScreenCapturePolicy() {
-        try {
-            const rawValue = localStorage.getItem(this.screenCapturePolicyStorageKey);
-            const policy = this.normalizeScreenCapturePolicy(rawValue);
-            if (rawValue !== null && rawValue !== policy) {
-                localStorage.removeItem(this.screenCapturePolicyStorageKey);
-            }
-            return policy;
-        } catch (error) {
-            console.warn('Failed to restore screen capture policy:', error);
-            return CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT;
-        }
+        return this.preferences.readStoredScreenCapturePolicy();
     }
 
     setScreenCapturePolicy(policy, { persist = true, notify = true } = {}) {
@@ -1142,11 +864,7 @@ export class UIManager {
         }
 
         if (persist) {
-            try {
-                localStorage.setItem(this.screenCapturePolicyStorageKey, nextPolicy);
-            } catch (error) {
-                console.warn('Failed to persist screen capture policy:', error);
-            }
+            this.preferences.save('SCREEN_CAPTURE_POLICY', nextPolicy, 'screen capture policy');
         }
 
         if (notify && this.onScreenCapturePolicyChangeHandler) {
@@ -1413,195 +1131,45 @@ export class UIManager {
     }
 
     setMessageContent(msgDiv, text, attachments = []) {
-        const normalizedAttachments = this.normalizeAttachments(attachments);
-        msgDiv.dataset.rawText = text;
-
-        if (normalizedAttachments.length) {
-            msgDiv.dataset.attachments = JSON.stringify(normalizedAttachments.map((attachment) => ({
-                id: attachment.id,
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                data: attachment.data,
-                url: attachment.url,
-                size: attachment.size,
-            })));
-        } else {
-            delete msgDiv.dataset.attachments;
-        }
-
-        if (msgDiv.classList.contains('astra') || msgDiv.classList.contains('thinking')) {
-            const unsafeHtml = marked.parse(text);
-            const safeHtml = DOMPurify.sanitize(unsafeHtml, {
-                USE_PROFILES: { html: true }
-            });
-            msgDiv.innerHTML = safeHtml;
-
-            for (const link of msgDiv.querySelectorAll('a')) {
-                link.setAttribute('target', '_blank');
-                link.setAttribute('rel', 'noopener noreferrer');
-            }
-            this.prependSenderHeader(msgDiv);
-            return;
-        }
-
-        msgDiv.replaceChildren();
-
-        if (text) {
-            const body = document.createElement('div');
-            body.className = 'message-body';
-            body.innerText = text;
-            msgDiv.appendChild(body);
-        }
-
-        if (normalizedAttachments.length) {
-            const gallery = document.createElement('div');
-            gallery.className = 'message-attachments';
-
-            for (const attachment of normalizedAttachments) {
-                gallery.appendChild(this.createAttachmentNode(attachment));
-            }
-
-            msgDiv.appendChild(gallery);
-        }
-        this.prependSenderHeader(msgDiv);
+        return this.messageRenderer.setMessageContent(msgDiv, text, attachments);
     }
 
     setMessageMetadata(msgDiv, metadata = {}) {
-        const senderType = metadata.senderType || '';
-        const inputSource = metadata.inputSource || '';
-        msgDiv.dataset.senderId = metadata.senderId || '';
-        msgDiv.dataset.senderDisplayName = metadata.senderDisplayName || '';
-        msgDiv.dataset.senderType = senderType;
-        msgDiv.dataset.inputSource = inputSource;
-        if (metadata.messageId) msgDiv.dataset.messageId = String(metadata.messageId);
-        if (metadata.awaitingMessageId && !metadata.messageId) {
-            msgDiv.dataset.awaitingMessageId = 'true';
-        }
-        if (metadata.retryableFailure?.message) {
-            msgDiv.dataset.retryError = metadata.retryableFailure.message;
-            msgDiv.dataset.retryAttempts = String(metadata.retryableFailure.attempts || 1);
-        }
-        const controlledTypes = ['human', 'external_agent', 'local_assistant', 'system', 'tool', 'integration_runtime'];
-        const controlledSources = ['local_text', 'local_voice', 'manual_relay', 'assistant_generation', 'system_runtime', 'tool_runtime', 'integration_runtime'];
-        if (controlledTypes.includes(senderType)) msgDiv.classList.add(`sender-${senderType.replaceAll('_', '-')}`);
-        if (controlledSources.includes(inputSource)) msgDiv.classList.add(`source-${inputSource.replaceAll('_', '-')}`);
-        if (this.conversationMode === 'manual_group') msgDiv.classList.add('group-message');
+        return this.messageRenderer.setMessageMetadata(msgDiv, metadata);
     }
 
     prependSenderHeader(msgDiv) {
-        if (this.conversationMode !== 'manual_group') return;
-        const existing = msgDiv.querySelector('.message-sender-header');
-        if (existing) existing.remove();
-        const header = document.createElement('div');
-        header.className = 'message-sender-header';
-        header.textContent = msgDiv.dataset.senderDisplayName || this.fallbackSenderLabel(msgDiv);
-        msgDiv.prepend(header);
+        return this.messageRenderer.prependSenderHeader(msgDiv);
     }
 
     fallbackSenderLabel(msgDiv) {
-        if (msgDiv.classList.contains('astra')) return this.localAssistantDisplayName;
-        if (msgDiv.classList.contains('thinking')) return `${this.localAssistantDisplayName} thinking`;
-        if (msgDiv.classList.contains('system')) return 'System';
-        if (msgDiv.classList.contains('tool')) return 'Tool';
-        return this.localHumanDisplayName;
+        return this.messageRenderer.fallbackSenderLabel(msgDiv);
     }
 
     normalizeAttachments(attachments) {
-        if (!Array.isArray(attachments)) {
-            return [];
-        }
-
-        return attachments
-            .map((attachment) => this.normalizeAttachment(attachment))
-            .filter(Boolean);
+        return this.messageRenderer.normalizeAttachments(attachments);
     }
 
     normalizeAttachment(attachment) {
-        if (!attachment || typeof attachment !== 'object') {
-            return null;
-        }
-
-        const data = typeof attachment.data === 'string' ? attachment.data.trim() : '';
-        const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
-        if (!data && !url) {
-            return null;
-        }
-
-        const mimeType = typeof attachment.mimeType === 'string'
-            ? attachment.mimeType
-            : typeof attachment.mime_type === 'string'
-                ? attachment.mime_type
-                : 'image/png';
-        if (!mimeType.startsWith('image/')) {
-            return null;
-        }
-
-        const size = Number.isFinite(attachment.size)
-            ? attachment.size
-            : Number.isFinite(attachment.size_bytes)
-                ? attachment.size_bytes
-                : null;
-
-        return {
-            id: typeof attachment.id === 'string' && attachment.id ? attachment.id : this.createAttachmentId(),
-            name: typeof attachment.name === 'string' && attachment.name.trim() ? attachment.name.trim() : 'image',
-            mimeType,
-            data: data || null,
-            url: url || null,
-            size,
-        };
+        return this.messageRenderer.normalizeAttachment(attachment);
     }
 
-    createAttachmentNode(attachment, { removable = false } = {}) {
-        const node = document.createElement('figure');
-        node.className = removable ? 'attachment-chip' : 'message-attachment';
-
-        const image = document.createElement('img');
-        image.className = removable ? 'attachment-chip-image' : 'message-attachment-image';
-        image.src = this.buildAttachmentSrc(attachment);
-        image.alt = attachment.name;
-        node.appendChild(image);
-
-        const caption = document.createElement('figcaption');
-        caption.className = removable ? 'attachment-chip-meta' : 'message-attachment-meta';
-        caption.textContent = this.formatAttachmentLabel(attachment.name, removable ? 18 : 28);
-        node.appendChild(caption);
-
-        if (removable) {
-            const removeButton = document.createElement('button');
-            removeButton.type = 'button';
-            removeButton.className = 'attachment-chip-remove';
-            removeButton.dataset.attachmentRemove = attachment.id;
-            removeButton.setAttribute('aria-label', `Remove ${attachment.name}`);
-            removeButton.textContent = 'x';
-            node.appendChild(removeButton);
-        }
-
-        return node;
+    createAttachmentNode(attachment, options = {}) {
+        return this.messageRenderer.createAttachmentNode(attachment, options);
     }
 
     buildAttachmentSrc(attachment) {
-        if (attachment.url) {
-            return attachment.url;
-        }
-
-        return `data:${attachment.mimeType};base64,${attachment.data}`;
+        return this.messageRenderer.buildAttachmentSrc(attachment);
     }
 
     formatAttachmentLabel(name, limit = 24) {
-        if (name.length <= limit) {
-            return name;
-        }
-
-        return `${name.slice(0, Math.max(0, limit - 1))}…`;
+        return this.messageRenderer.formatAttachmentLabel(name, limit);
     }
 
     setSessionScope(serverInstanceId, sessionId) {
-        const nextStorageKey = `${CONFIG.UI.STORAGE_KEYS.CHAT_HISTORY}:${serverInstanceId}:${sessionId}`;
-        if (this.chatHistoryStorageKey === nextStorageKey) return;
+        if (!this.historyStore.setScope(serverInstanceId, sessionId)) return;
 
         this.currentSessionId = sessionId;
-        this.chatHistoryStorageKey = nextStorageKey;
         this.currentAiMessageDiv = null;
         this.currentThinkingMessageDiv = null;
         this.activeRetryMessageId = null;
@@ -1609,80 +1177,23 @@ export class UIManager {
     }
 
     restoreChatHistory() {
-        if (!this.chatHistoryStorageKey) return;
-
-        const savedHistory = sessionStorage.getItem(this.chatHistoryStorageKey);
-        if (!savedHistory) {
-            this.renderMessages(this.defaultMessages);
-            this.persistChatHistory();
-            return;
-        }
-
-        try {
-            const messages = JSON.parse(savedHistory);
-            if (!Array.isArray(messages) || messages.length === 0) {
-                this.renderMessages(this.defaultMessages);
-                this.persistChatHistory();
-                return;
-            }
-            this.renderMessages(messages);
-        } catch (error) {
-            console.warn('Failed to restore chat history from session storage:', error);
-            sessionStorage.removeItem(this.chatHistoryStorageKey);
-            this.renderMessages(this.defaultMessages);
-            this.persistChatHistory();
-        }
+        this.historyStore.restore(
+            this.defaultMessages,
+            messages => this.renderMessages(messages),
+            () => this.serializeChatHistory(),
+        );
     }
 
     persistChatHistory() {
-        if (!this.chatHistoryStorageKey) return;
-
-        try {
-            sessionStorage.setItem(this.chatHistoryStorageKey, JSON.stringify(this.serializeChatHistory()));
-        } catch (error) {
-            console.warn('Failed to persist chat history:', error);
-        }
+        this.historyStore.persist(() => this.serializeChatHistory());
     }
 
     serializeChatHistory() {
-        return Array.from(this.chatHistory.querySelectorAll('.message')).map((message) => {
-            const sender = Array.from(message.classList).find((className) => className !== 'message') || 'astra';
-            return {
-                sender,
-                text: message.dataset.rawText || '',
-                attachments: this.readStoredAttachments(message.dataset.attachments),
-                senderId: message.dataset.senderId || '',
-                senderDisplayName: message.dataset.senderDisplayName || '',
-                senderType: message.dataset.senderType || '',
-                inputSource: message.dataset.inputSource || '',
-                messageId: Number(message.dataset.messageId) || null,
-                awaitingMessageId: message.dataset.awaitingMessageId === 'true',
-                retryableFailure: message.dataset.retryError ? {
-                    message: message.dataset.retryError,
-                    attempts: Number(message.dataset.retryAttempts) || 1,
-                } : null,
-            };
-        });
+        return this.historyStore.serialize(this.chatHistory);
     }
 
     readStoredAttachments(rawValue) {
-        if (!rawValue) {
-            return [];
-        }
-
-        try {
-            const parsed = JSON.parse(rawValue);
-            return this.normalizeAttachments(parsed).map((attachment) => ({
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                data: attachment.data,
-                url: attachment.url,
-                size: attachment.size,
-            }));
-        } catch (error) {
-            console.warn('Failed to parse stored attachments:', error);
-            return [];
-        }
+        return this.historyStore.readStoredAttachments(rawValue);
     }
 
     renderMessages(messages) {

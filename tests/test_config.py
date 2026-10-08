@@ -15,6 +15,45 @@ class ConfigTests(unittest.TestCase):
             config_file.flush()
             return Config(config_file.name)
 
+    def test_empty_document_and_empty_sections_preserve_defaults(self):
+        defaults = self._load({})
+        self.assertEqual(self._load(None).raw, defaults.raw)
+        self.assertEqual(
+            self._load({section: {} for section in defaults.raw}).raw,
+            defaults.raw,
+        )
+
+    def test_raw_sections_share_normalized_public_dictionaries(self):
+        config = self._load({
+            "llm": {
+                "host": " https://ollama.example.test/ ",
+                "generation": {"temperature": None, "max_tokens": 128},
+            },
+            "tts": {"engine": "pocket"},
+        })
+
+        self.assertEqual(config.raw["llm"]["host"], "https://ollama.example.test")
+        self.assertEqual(config.raw["llm"]["generation"], {"max_tokens": 128})
+        self.assertEqual(config.raw["tts"]["engine"], "pocket_tts")
+        self.assertIn("vision_watchdog", config.raw)
+        for section, values in config.raw.items():
+            with self.subTest(section=section):
+                self.assertIs(getattr(config, section), values)
+
+    def test_summary_generation_settings(self):
+        defaults = self._load({}).orchestrator
+        self.assertEqual(defaults["summary_timeout_s"], 300.0)
+        self.assertEqual(defaults["summary_num_predict"], 384)
+        custom = self._load({"orchestrator": {
+            "summary_timeout_s": 240.0, "summary_num_predict": 256,
+        }}).orchestrator
+        self.assertEqual(custom["summary_timeout_s"], 240.0)
+        self.assertEqual(custom["summary_num_predict"], 256)
+        for field, value in (("summary_timeout_s", 0), ("summary_timeout_s", 3601),
+                             ("summary_num_predict", 0), ("summary_num_predict", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                self._load({"orchestrator": {field: value}})
+
     def test_document_root_and_sections_must_be_mappings(self):
         for payload, expected in (
             (["not", "a", "mapping"], "document root must be a mapping"),
@@ -42,6 +81,7 @@ class ConfigTests(unittest.TestCase):
             ({"orchestrator": {"recovery_num_predict": True}}, "recovery_num_predict"),
             ({"voice_input": {"path": "native"}}, "voice_input.path"),
             ({"vision_watchdog": {"max_new_tokens": -1}}, "max_new_tokens"),
+            ({"telemetry": {"mode": "verbose"}}, "telemetry.mode"),
         )
         for payload, expected in invalid:
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
@@ -286,30 +326,22 @@ class ConfigTests(unittest.TestCase):
             self._load({"beliefs": {"timezone": "Mars/Olympus"}})
 
     def test_local_human_has_stable_defaults(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
         self.assertEqual(config.local_human, {"id": "local-human", "display_name": "You"})
 
     def test_context_uses_injected_memory_limit(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump(
-                {
-                    "context": {
-                        "history_limit": 8,
-                        "injected_memory_limit": 7,
-                        "semantic_memory_max_distance": 0.7,
-                        "semantic_memory_fallback_max_distance": 0.85,
-                        "semantic_memory_fallback_limit": 2,
-                        "episodic_memory_max_distance": 0.7,
-                    }
-                },
-                config_file,
-            )
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load(
+            {
+                "context": {
+                    "history_limit": 8,
+                    "injected_memory_limit": 7,
+                    "semantic_memory_max_distance": 0.7,
+                    "semantic_memory_fallback_max_distance": 0.85,
+                    "semantic_memory_fallback_limit": 2,
+                    "episodic_memory_max_distance": 0.7,
+                }
+            }
+        )
 
         self.assertEqual(config.context["history_limit"], 8)
         self.assertEqual(config.context["injected_memory_limit"], 7)
@@ -329,20 +361,14 @@ class ConfigTests(unittest.TestCase):
             self._load({"context": context})
 
     def test_autonomy_defaults_are_bounded_and_disabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertFalse(config.autonomy["enabled"])
         self.assertEqual(config.autonomy["max_chain_events"], 20)
         self.assertEqual(config.autonomy["global_llm_concurrency"], 1)
 
     def test_belief_storage_defaults_enabled_but_production_is_disabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertTrue(config.beliefs["enabled"])
         self.assertEqual(config.beliefs["processing_mode"], "disabled")
@@ -352,46 +378,25 @@ class ConfigTests(unittest.TestCase):
 
     def test_all_belief_processing_modes_are_accepted(self):
         for mode in ("disabled", "observer", "react_tool"):
-            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump(
-                    {"beliefs": {"enabled": True, "processing_mode": mode}},
-                    config_file,
-                )
-                config_file.flush()
-                config = Config(config_file.name)
+            with self.subTest(mode=mode):
+                config = self._load({"beliefs": {"enabled": True, "processing_mode": mode}})
             self.assertEqual(config.beliefs["processing_mode"], mode)
 
     def test_invalid_belief_processing_mode_fails(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({"beliefs": {"processing_mode": "invalid"}}, config_file)
-            config_file.flush()
-            with self.assertRaisesRegex(ValueError, "disabled, observer, react_tool"):
-                Config(config_file.name)
+        with self.assertRaisesRegex(ValueError, 'disabled, observer, react_tool'):
+            self._load({'beliefs': {'processing_mode': 'invalid'}})
 
     def test_legacy_belief_extraction_key_fails_with_migration_guidance(self):
         for value in (True, False):
-            with self.subTest(value=value), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump({"beliefs": {"extraction_enabled": value}}, config_file)
-                config_file.flush()
-                with self.assertRaisesRegex(ValueError, "was replaced.*processing_mode"):
-                    Config(config_file.name)
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'was replaced.*processing_mode'):
+                    self._load({'beliefs': {'extraction_enabled': value}})
 
     def test_disabled_belief_storage_rejects_active_producer(self):
         for mode in ("observer", "react_tool"):
-            with self.subTest(mode=mode), tempfile.NamedTemporaryFile(
-                "w", suffix=".yaml"
-            ) as config_file:
-                yaml.safe_dump(
-                    {"beliefs": {"enabled": False, "processing_mode": mode}},
-                    config_file,
-                )
-                config_file.flush()
-                with self.assertRaisesRegex(ValueError, "enabled=false.*disabled"):
-                    Config(config_file.name)
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, 'enabled=false.*disabled'):
+                    self._load({'beliefs': {'enabled': False, 'processing_mode': mode}})
 
     def test_tracked_template_uses_processing_mode_without_legacy_key(self):
         template_path = Path("app/config/assistant-template.yaml")
@@ -399,16 +404,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(template["beliefs"]["processing_mode"], "disabled")
         self.assertNotIn("extraction_enabled", template["beliefs"])
         self.assertNotIn("planner", template)
+        self.assertEqual(template["telemetry"]["mode"], "none")
 
         config = Config(template_path)
         self.assertEqual(config.llm["backend"], "ollama")
         self.assertEqual(config.assistant["display_name"], "Astra")
 
+    def test_telemetry_defaults_and_full_mode_are_normalized(self):
+        default = self._load({})
+        self.assertEqual(default.telemetry["mode"], "none")
+        self.assertEqual(default.telemetry["file_name"], "model-telemetry.jsonl")
+
+        configured = self._load({"telemetry": {"mode": "full", "file_name": "metrics.jsonl"}})
+        self.assertEqual(configured.telemetry["mode"], "full")
+        self.assertEqual(configured.telemetry["file_name"], "metrics.jsonl")
+
+        extended = self._load({"telemetry": {"mode": "extended"}})
+        self.assertEqual(extended.telemetry["mode"], "extended")
+
     def test_integration_config_defaults_memory_and_shell_enabled(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertTrue(config.integrations["memory"]["enabled"])
         self.assertTrue(config.integrations["shell"]["enabled"])
@@ -527,33 +542,21 @@ class ConfigTests(unittest.TestCase):
                 self._load({"integrations": {"mindcraft": mindcraft}})
 
     def test_voice_input_defaults_to_stt(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump({}, config_file)
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load({})
 
         self.assertEqual(config.voice_input["path"], "stt")
         self.assertEqual(config.voice_input["native_audio"]["payload_field"], "images")
         self.assertTrue(config.voice_input["native_audio"]["convert_to_wav"])
 
     def test_voice_input_merges_native_audio_overrides(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
-            yaml.safe_dump(
-                {
-                    "voice_input": {
-                        "path": "native_audio",
-                        "native_audio": {
-                            "payload_field": "audios",
-                            "sample_rate": 24000,
-                        },
-                    }
-                },
-                config_file,
-            )
-            config_file.flush()
-
-            config = Config(config_file.name)
+        config = self._load(
+            {
+                "voice_input": {
+                    "path": "native_audio",
+                    "native_audio": {"payload_field": "audios", "sample_rate": 24000},
+                }
+            }
+        )
 
         self.assertEqual(config.voice_input["path"], "native_audio")
         self.assertEqual(config.voice_input["native_audio"]["payload_field"], "audios")

@@ -1,12 +1,11 @@
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Path as ApiPath, Request, WebSocket, WebSocketDisconnect
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Callable, Iterator, Any
 import logging
 import re
-import subprocess
 import uuid
 import time
 import emoji
@@ -17,6 +16,14 @@ from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pydantic import BaseModel, Field
 from app.config import Config
+from app.http.audio_input import (
+    VOICE_INPUT_NATIVE_AUDIO,
+    VOICE_INPUT_STT,
+    build_native_audio_attachment,
+    is_invalid_stt_audio_error,
+    native_audio_config,
+    voice_input_path as resolve_voice_input_path,
+)
 
 from app.core.assistant_state import AssistantState
 from app.core.orchestrator_factory import build_orchestrator
@@ -49,7 +56,6 @@ from app.logging import setup_logging_from_config
 from app.perception.attachments import (
     MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
-    AudioAttachment,
     attachment_from_payload,
 )
 from app.perception.keys import PerceptionKey
@@ -69,17 +75,7 @@ from app.transport.websocket_connection import (
     send_turn_error as _send_turn_error,
     send_ws_payload as _send_ws_payload,
 )
-from app.knowledge import (
-    BeliefDetailDTO,
-    BeliefListResponse,
-    BeliefRecordStatus,
-    ContextPreviewResponse,
-    EffectiveBeliefsResponse,
-    KnowledgeService,
-    SavedMemoryListResponse,
-)
-from app.knowledge.models import BeliefFiltersDTO
-from app.beliefs.models import EpistemicStatus, VisibilityPolicy
+from app.http.knowledge import router as knowledge_router
 from app.llm.thinking_filter import ThinkingBlockFilter, strip_complete_thinking_blocks
 from app.paths import STATIC_DIR, resolve_app_path
 
@@ -94,9 +90,6 @@ TTS_QUEUE_MAXSIZE = 128
 VISION_CONTEXT_MAX_AGE_SECONDS = 2.0  # Tightened from 5.0s: fallback only for stale frames
 MAX_ATTACHMENTS_PER_TURN = 8
 MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
-VOICE_INPUT_STT = "stt"
-VOICE_INPUT_NATIVE_AUDIO = "native_audio"
-_PYAV_INVALID_DATA_ERRNO = "1094995529"
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+.*$", re.MULTILINE)
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -123,16 +116,6 @@ SessionIdPath = Annotated[
         pattern=SESSION_ID_PATTERN,
     ),
 ]
-SessionIdQuery = Annotated[
-    str,
-    Query(
-        min_length=1,
-        max_length=SESSION_ID_MAX_LENGTH,
-        pattern=SESSION_ID_PATTERN,
-    ),
-]
-
-
 def _runtime_app(request_or_ws: Request | WebSocket | None = None) -> FastAPI:
     scoped_app = getattr(request_or_ws, "app", None)
     return scoped_app if scoped_app is not None else app
@@ -144,97 +127,6 @@ def _runtime_config(application: FastAPI | None = None) -> Config:
     if settings is None:
         raise RuntimeError("Application settings are unavailable outside the lifespan")
     return settings
-
-
-def _voice_input_path(settings: Config) -> str:
-    path = str(settings.voice_input.get("path", VOICE_INPUT_STT)).strip().lower()
-    if path in {"native", "audio", "gemma4"}:
-        return VOICE_INPUT_NATIVE_AUDIO
-    if path in {VOICE_INPUT_STT, VOICE_INPUT_NATIVE_AUDIO}:
-        return path
-    logger.warning("Unknown voice_input.path=%r; falling back to %s", path, VOICE_INPUT_STT)
-    return VOICE_INPUT_STT
-
-
-def _native_audio_config(settings: Config | None = None) -> dict:
-    settings = settings or _runtime_config()
-    native_audio = settings.voice_input.get("native_audio", {})
-    return native_audio if isinstance(native_audio, dict) else {}
-
-
-def _is_invalid_stt_audio_error(exc: Exception) -> bool:
-    """Return True for decoder errors caused by incomplete or non-audio blobs."""
-    exc_type = type(exc)
-    if exc_type.__name__ != "InvalidDataError":
-        return False
-
-    module = getattr(exc_type, "__module__", "")
-    if module and not module.startswith("av"):
-        return False
-
-    message = str(exc)
-    return (
-        _PYAV_INVALID_DATA_ERRNO in message
-        or "Invalid data found when processing input" in message
-    )
-
-
-def _convert_audio_to_wav(
-    audio_bytes: bytes,
-    *,
-    sample_rate: int = 16000,
-    timeout_s: float = 15.0,
-) -> bytes:
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-ac",
-        "1",
-        "-ar",
-        str(sample_rate),
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-    result = subprocess.run(
-        command,
-        input=audio_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=timeout_s,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise ValueError(f"Audio conversion failed: {stderr or 'ffmpeg exited unsuccessfully'}")
-    return result.stdout
-
-
-def _build_native_audio_attachment(
-    audio_bytes: bytes,
-    settings: Config | None = None,
-) -> AudioAttachment:
-    native_audio = _native_audio_config(settings)
-    convert_to_wav = bool(native_audio.get("convert_to_wav", True))
-
-    if convert_to_wav:
-        sample_rate = int(native_audio.get("sample_rate", 16000))
-        payload = _convert_audio_to_wav(audio_bytes, sample_rate=sample_rate)
-        return AudioAttachment.from_bytes(
-            payload,
-            name="voice.wav",
-            mime_type="audio/wav",
-        )
-
-    return AudioAttachment.from_bytes(
-        audio_bytes,
-        name=str(native_audio.get("raw_name", "voice.webm")),
-        mime_type=str(native_audio.get("raw_mime_type", "audio/webm")),
-    )
 
 
 def _prepare_tts_text(text: str) -> str:
@@ -851,7 +743,7 @@ async def _startup_application(
     )
     application.state.audio_delivery.start()
     logger.info("TTS queue initialized (maxsize=%d)", TTS_QUEUE_MAXSIZE)
-    application.state.voice_input_path = _voice_input_path(settings)
+    application.state.voice_input_path = resolve_voice_input_path(settings)
     if application.state.voice_input_path == VOICE_INPUT_STT:
         application.state.stt = stt_builder(settings.stt)
     else:
@@ -930,6 +822,7 @@ def create_app(
     application = FastAPI(lifespan=lifespan)
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     application.include_router(router)
+    application.include_router(knowledge_router)
     return application
 
 
@@ -990,112 +883,6 @@ async def get_session(session_id: SessionIdPath, request: Request = None):
             for row in rows
         ],
     }
-
-
-def _knowledge_service(
-    *,
-    require_beliefs: bool = True,
-    require_memories: bool = False,
-    application: FastAPI | None = None,
-) -> KnowledgeService:
-    orchestrator = (application or app).state.orchestrator
-    repository = getattr(orchestrator, "belief_repository", None)
-    provider = getattr(orchestrator, "belief_context_provider", None)
-    memory_retriever = getattr(orchestrator, "memory_retriever", None)
-    memory_store = getattr(memory_retriever, "memory", None)
-    if require_beliefs and (repository is None or provider is None):
-        raise HTTPException(status_code=503, detail="Knowledge subsystem is unavailable")
-    if require_memories and memory_store is None:
-        raise HTTPException(status_code=503, detail="Saved memory storage is unavailable")
-    return KnowledgeService(
-        owner_agent_id=orchestrator.agent_id,
-        repository=repository,
-        context_provider=provider,
-        history_store=orchestrator.history,
-        memory_store=memory_store,
-    )
-
-
-def _require_known_session(service: KnowledgeService, session_id: str) -> None:
-    if not service.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-
-@router.get("/api/knowledge/memories", response_model=SavedMemoryListResponse)
-async def list_saved_memories(request: Request = None):
-    return _knowledge_service(
-        require_beliefs=False,
-        require_memories=True,
-        application=_runtime_app(request),
-    ).list_saved_memories()
-
-
-@router.get(
-    "/api/knowledge/beliefs/effective",
-    response_model=EffectiveBeliefsResponse,
-)
-async def get_effective_beliefs(session_id: SessionIdQuery, request: Request = None):
-    service = _knowledge_service(application=_runtime_app(request))
-    _require_known_session(service, session_id)
-    return service.effective_beliefs(session_id)
-
-
-@router.get("/api/knowledge/beliefs", response_model=BeliefListResponse)
-async def list_beliefs_for_inspection(
-    subject_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    source_sender_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    predicate: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    epistemic_status: EpistemicStatus | None = None,
-    visibility: VisibilityPolicy | None = None,
-    record_status: BeliefRecordStatus | None = None,
-    scope_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    source_session_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    offset: Annotated[int, Query(ge=0, le=100000)] = 0,
-    request: Request = None,
-):
-    filters = BeliefFiltersDTO(
-        subject_id=subject_id,
-        source_sender_id=source_sender_id,
-        predicate=predicate,
-        epistemic_status=epistemic_status,
-        visibility=visibility,
-        record_status=record_status,
-        scope_session_id=scope_session_id,
-        source_session_id=source_session_id,
-    )
-    return _knowledge_service(application=_runtime_app(request)).list_beliefs(
-        filters=filters,
-        limit=limit,
-        offset=offset,
-    )
-
-
-@router.get(
-    "/api/knowledge/beliefs/{belief_id}",
-    response_model=BeliefDetailDTO,
-)
-async def get_belief_for_inspection(
-    belief_id: Annotated[
-        str,
-        ApiPath(min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$"),
-    ],
-    request: Request = None,
-):
-    detail = _knowledge_service(application=_runtime_app(request)).get_belief_detail(belief_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Belief not found")
-    return detail
-
-
-@router.get(
-    "/api/knowledge/belief-context",
-    response_model=ContextPreviewResponse,
-)
-async def get_belief_context_preview(session_id: SessionIdQuery, request: Request = None):
-    service = _knowledge_service(application=_runtime_app(request))
-    _require_known_session(service, session_id)
-    return service.context_preview(session_id)
 
 
 def _session_coordinator(application: FastAPI) -> SessionTurnCoordinator:
@@ -1376,7 +1163,7 @@ async def websocket_endpoint(ws: WebSocket):
                     voice_input_path = getattr(
                         runtime_app.state,
                         "voice_input_path",
-                        _voice_input_path(settings),
+                        resolve_voice_input_path(settings),
                     )
 
                     if voice_input_path == VOICE_INPUT_NATIVE_AUDIO:
@@ -1389,7 +1176,7 @@ async def websocket_endpoint(ws: WebSocket):
                         try:
                             audio_attachment = await loop.run_in_executor(
                                 None,
-                                _build_native_audio_attachment,
+                                build_native_audio_attachment,
                                 audio_bytes,
                                 settings,
                             )
@@ -1399,7 +1186,7 @@ async def websocket_endpoint(ws: WebSocket):
                             await _send_turn_error(ws, "Audio preparation failed.")
                             continue
 
-                        native_audio = _native_audio_config(settings)
+                        native_audio = native_audio_config(settings)
                         display_text = str(native_audio.get("display_text", "Voice message"))
                         user_text = str(
                             native_audio.get(
@@ -1438,7 +1225,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 None, stt.transcribe, audio_bytes
                             )
                         except Exception as exc:
-                            if _is_invalid_stt_audio_error(exc):
+                            if is_invalid_stt_audio_error(exc):
                                 logger.debug(
                                     "[%s] Ignoring undecodable STT audio frame (%d bytes): %s",
                                     connection_id,

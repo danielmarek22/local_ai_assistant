@@ -62,6 +62,12 @@ This ordering matters: model arguments may express an intended action, but they 
 
     Integration events run through a durable autonomy queue. Each event declares an exact capability allowlist, correlation lineage, and notification policy. Internal final text is journaled; only explicit notification actions interrupt the user.
 
+## Operation outcomes
+
+The operation journal accepts `running → pending` and `running/pending → success/error/denied/unavailable/cancelled`. Terminal outcomes are final. Identical status/result retries leave the record and timestamps unchanged; contradictory results, including late pending acknowledgements, are retained in `integration_operation_conflicts` and available through `operation_conflicts()`. Acceptance and conflict recording are transactional across store connections.
+
+Beginning the same invocation again preserves its state. Reusing an ID with different capability, session, or lineage raises an error. Invalid result statuses are rejected; unknown external operation IDs remain a no-op. Session deletion cancels active operations and subsequent completions cannot revive them. Corrections require a new operation; there is no implicit terminal-state override.
+
 ## Presentation events
 
 The model's visible response is processed into separate runtime events:
@@ -79,7 +85,10 @@ The server translates those events into WebSocket payloads. The UI controls play
 ## Failure boundaries
 
 - Invalid client payloads fail before orchestration.
-- Capability schemas are validated before invocation.
+- Capability authority is checked at dispatch, independently of schema exposure.
+  An empty permitted set denies all tools; event calls missing explicit authority
+  also deny all tools. Participant/internal calls may use unrestricted application
+  authority. Allowed calls still pass schema, availability, approval, and domain checks.
 - A failed optional context provider does not stop the turn.
 - User input is durable before retrieval; semantic and episodic query failures are
   isolated independently, preserving successful context from the other provider.

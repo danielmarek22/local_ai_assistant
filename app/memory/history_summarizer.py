@@ -2,8 +2,10 @@ from app.logging import trace_event
 from app.llm.base import response_text
 
 class HistorySummarizer:
-    def __init__(self, llm):
+    def __init__(self, llm, *, timeout_s: float = 300.0, num_predict: int = 384):
         self.llm = llm
+        self.timeout_s = timeout_s
+        self.num_predict = num_predict
 
     def summarize(
         self,
@@ -61,7 +63,9 @@ class HistorySummarizer:
         response = self.llm.chat(
             messages=prompt,
             think_override=False,
-            tools=[] 
+            tools=[],
+            timeout_override=self.timeout_s,
+            options_override={"num_predict": self.num_predict, "temperature": 0.2},
         )
 
         buffer = response_text(response, context="History summarization")

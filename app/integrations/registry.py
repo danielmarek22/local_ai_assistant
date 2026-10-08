@@ -83,7 +83,7 @@ class IntegrationRegistry:
 
     def get_native_tools(
         self,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         invocation_context: InvocationContext | None = None,
     ) -> list[dict]:
         native_tools = []
@@ -175,6 +175,12 @@ class IntegrationRegistry:
         self._started = True
 
     def invoke(self, call: ToolCall, context: InvocationContext) -> ToolResult:
+        # Schema exposure guides the model; authority must also hold at dispatch.
+        if (
+            context.allowed_capabilities is not None
+            and call.capability not in context.allowed_capabilities
+        ):
+            return ToolResult.denied(f"Capability is not permitted for this invocation: {call.capability}")
         registered = self._tools.get(call.capability)
         if registered is None:
             return ToolResult.error(f"Unknown capability: {call.capability}")

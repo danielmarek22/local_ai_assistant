@@ -6,6 +6,7 @@ from typing import Iterator
 
 from . import image_fallback
 from .base import InferenceFailure, LLMClient
+from .stream_decoder import decode_buffered_chunk, decode_chunk
 from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.logging import trace_event
 
@@ -29,7 +30,6 @@ _THINKING_MIN_PREDICT = 2048
 # sequences at the top level; they must be passed inside `options`. See
 # _build_stream_options for where these are injected.
 _BUILTIN_STOP_SEQUENCES = ["<|eot_id|>", "<|im_end|>", "<|end_of_sentence|>"]
-_MAX_BUFFERED_LINE_BYTES = 512_000
 _MAX_BUFFERED_CONTENT_CHARS = 256_000
 _MAX_BUFFERED_THINKING_CHARS = 1_000_000
 _MAX_BUFFERED_TOOL_JSON_CHARS = 128_000
@@ -60,9 +60,12 @@ class OllamaClient(LLMClient):
         timeout_s: float = 30.0,
         max_retries: int = 2,
         retry_backoff_s: float = 0.25,
+        telemetry=None,
     ):
         self.model = model
         self._preload_url = f"{host}/api/generate"
+        self._show_url = f"{host}/api/show"
+        self._ps_url = f"{host}/api/ps"
         self.url = f"{host}/api/chat"
         self.options = options or {}
         self.thinking_enabled = thinking_enabled
@@ -71,6 +74,7 @@ class OllamaClient(LLMClient):
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        self.telemetry = telemetry
         self._multimodal_supported = True
         self.last_chat_dropped_current_images = False
         self.last_chat_dropped_current_images_count = 0
@@ -103,6 +107,24 @@ class OllamaClient(LLMClient):
         except Exception as exc:
             logger.warning("Failed to preload model: %s", exc)
 
+    def load_telemetry_metadata(self) -> None:
+        """Best-effort model metadata lookup used only by full telemetry."""
+        if self.telemetry is None or not getattr(self.telemetry, "full", False):
+            return
+        try:
+            response = self.session.post(
+                self._show_url,
+                json={"model": self.model},
+                timeout=min(self.timeout_s, 30.0),
+            )
+            response.raise_for_status()
+            data = response.json()
+            details = data.get("details", {}) if isinstance(data, dict) else {}
+            quantization = details.get("quantization_level") if isinstance(details, dict) else None
+            self.telemetry.set_model_metadata(quantization=quantization)
+        except Exception as exc:
+            logger.warning("Unable to read Ollama model metadata for telemetry: %s", exc)
+
     def close(self) -> None:
         self.session.close()
 
@@ -119,15 +141,15 @@ class OllamaClient(LLMClient):
         max_retries_override: int | None = None,
         tools: list[dict] | None = None,
         format_override: dict | str | None = None,
+        telemetry_session_id: str | None = None,
     ) -> dict:
         """
         Blocking, non-streaming call.
         Used for summarizers, classifiers, and other structured workflows.
 
         `options_override` is merged on top of instance defaults per-call
-        without mutating them. `stream_chat` intentionally does not expose
-        this parameter because streaming responses are always user-facing and
-        apply their own fixed safety defaults (temperature cap, stop tokens).
+        without mutating them. Streaming calls merge overrides after applying
+        their mode-specific generation defaults.
         """
         think_value = self._resolve_think_value(think_override)
 
@@ -135,16 +157,15 @@ class OllamaClient(LLMClient):
         if options_override:
             request_options.update(options_override)
 
-        request_messages = messages
+        fallback = image_fallback.ImageFallback(
+            messages, multimodal_supported=self._multimodal_supported,
+        )
         self.last_chat_dropped_current_images = False
         self.last_chat_dropped_current_images_count = 0
         self.last_chat_image_fallback_strategy = None
 
-        if not self._multimodal_supported:
-            request_messages, _ = image_fallback.strip_images_from_messages(request_messages)
-
         payload = self._build_payload(
-            request_messages,
+            fallback.attempt.messages,
             stream=False,
             think_value=think_value,
             options=request_options,
@@ -160,81 +181,26 @@ class OllamaClient(LLMClient):
         trace_event("llm", "chat_request", payload=payload)
 
         request_started = time.perf_counter()
-        try:
-            r = self._post_with_retry(
-                payload,
-                stream=False,
-                timeout_override=timeout_override,
-                max_retries_override=image_fallback.resolve_request_retries(
-                    request_messages,
-                    max_retries_override,
-                ),
-            )
-        except requests.HTTPError as exc:
-            if not image_fallback.should_retry_without_images(
-                exc,
-                request_messages,
-                multimodal_supported=self._multimodal_supported,
-            ):
+        while True:
+            try:
+                r = self._post_with_retry(
+                    payload,
+                    stream=False,
+                    timeout_override=timeout_override,
+                    max_retries_override=image_fallback.resolve_request_retries(
+                        fallback.attempt.messages,
+                        max_retries_override,
+                    ),
+                )
+                break
+            except requests.HTTPError as exc:
+                payload["messages"] = self._next_image_attempt(fallback, exc, mode="chat").messages
+            except requests.RequestException as exc:
                 raise self._inference_failure(exc) from exc
 
-            response_text = image_fallback.http_error_text(exc)
-            if image_fallback.error_indicates_model_without_images(response_text):
-                self._multimodal_supported = False
-
-            fallback_candidates = image_fallback.build_fallback_messages(request_messages)
-            if not fallback_candidates:
-                raise
-
-            last_exc: requests.HTTPError = exc
-            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = fallback_messages
-                logger.warning(
-                    "Ollama chat rejected image payload (status=%s); retrying %s.",
-                    getattr(last_exc.response, "status_code", None),
-                    strategy,
-                )
-                trace_event(
-                    "llm",
-                    "chat_retry_without_images",
-                    payload={
-                        "status_code": getattr(last_exc.response, "status_code", None),
-                        "response_text": image_fallback.http_error_text(last_exc),
-                        "strategy": strategy,
-                        "dropped_current_images_count": dropped_current_images_count,
-                    },
-                )
-                try:
-                    r = self._post_with_retry(
-                        payload,
-                        stream=False,
-                        timeout_override=timeout_override,
-                        max_retries_override=image_fallback.resolve_request_retries(
-                            fallback_messages,
-                            max_retries_override,
-                        ),
-                    )
-                    self.last_chat_image_fallback_strategy = strategy
-                    if dropped_current_images_count > 0:
-                        self.last_chat_dropped_current_images = True
-                        self.last_chat_dropped_current_images_count = dropped_current_images_count
-                    break
-                except requests.HTTPError as retry_exc:
-                    if not image_fallback.should_retry_without_images(
-                        retry_exc,
-                        fallback_messages,
-                        multimodal_supported=self._multimodal_supported,
-                    ):
-                        raise self._inference_failure(retry_exc) from retry_exc
-                    last_exc = retry_exc
-                    if image_fallback.error_indicates_model_without_images(image_fallback.http_error_text(retry_exc)):
-                        self._multimodal_supported = False
-                except requests.RequestException as retry_exc:
-                    raise self._inference_failure(retry_exc) from retry_exc
-            else:
-                raise self._inference_failure(last_exc) from last_exc
-        except requests.RequestException as exc:
-            raise self._inference_failure(exc) from exc
+        self.last_chat_image_fallback_strategy = fallback.attempt.strategy
+        self.last_chat_dropped_current_images_count = fallback.attempt.dropped_current_images_count
+        self.last_chat_dropped_current_images = fallback.attempt.dropped_current_images_count > 0
 
         try:
             data = r.json()
@@ -274,6 +240,15 @@ class OllamaClient(LLMClient):
             },
         )
 
+        self._record_telemetry(
+            data,
+            started=request_started,
+            request_options=request_options,
+            call_mode="blocking",
+            phase="blocking",
+            telemetry_session_id=telemetry_session_id,
+        )
+
         return message
 
     def chat_buffered(
@@ -286,6 +261,7 @@ class OllamaClient(LLMClient):
         tools: list[dict] | None = None,
         generation_phase: str | None = None,
         react_iteration: int | None = None,
+        telemetry_session_id: str | None = None,
     ) -> dict:
         """Consume a native streamed generation atomically before exposing its result."""
         think_value = self._resolve_think_value(think_override)
@@ -335,28 +311,14 @@ class OllamaClient(LLMClient):
                         )
                     if not line:
                         continue
-                    if first_chunk_ms is None:
-                        first_chunk_ms = round((now - started) * 1000, 2)
-                    if len(line) > _MAX_BUFFERED_LINE_BYTES:
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama stream chunk exceeded the bounded line size.",
-                        )
-                    try:
-                        chunk = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama returned malformed streamed JSON.",
-                        ) from exc
-                    if not isinstance(chunk, dict) or not isinstance(chunk.get("message", {}), dict):
-                        raise InferenceFailure(
-                            "malformed_response",
-                            "Ollama returned an invalid streamed response shape.",
-                        )
+                    chunk = decode_buffered_chunk(line)
                     message = chunk.get("message", {})
                     content = message.get("content") or ""
                     thinking = message.get("thinking") or ""
+                    if first_chunk_ms is None and (
+                        content or thinking or message.get("tool_calls")
+                    ):
+                        first_chunk_ms = round((now - started) * 1000, 2)
                     if not isinstance(content, str) or not isinstance(thinking, str):
                         raise InferenceFailure(
                             "malformed_response",
@@ -441,6 +403,16 @@ class OllamaClient(LLMClient):
                 "generation_token_count": final_chunk.get("eval_count"),
             },
         )
+        self._record_telemetry(
+            final_chunk,
+            started=started,
+            request_options=request_options,
+            time_to_first_token_ms=first_chunk_ms,
+            call_mode="buffered",
+            phase=generation_phase or "buffered",
+            react_iteration=react_iteration,
+            telemetry_session_id=telemetry_session_id,
+        )
         return message
 
     def stream_chat(
@@ -451,6 +423,7 @@ class OllamaClient(LLMClient):
         options_override: dict | None = None,
         generation_deadline_s: float | None = None,
         timeout_override: float | None = None,
+        telemetry_session_id: str | None = None,
     ) -> Iterator[str | dict]:
         """
         Streaming call. Yields text chunks for user-facing responses.
@@ -461,16 +434,15 @@ class OllamaClient(LLMClient):
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
         request_options = self._merge_options(request_options, options_override)
-        request_messages = messages
+        fallback = image_fallback.ImageFallback(
+            messages, multimodal_supported=self._multimodal_supported,
+        )
         self.last_stream_dropped_current_images = False
         self.last_stream_dropped_current_images_count = 0
         self.last_stream_image_fallback_strategy = None
 
-        if not self._multimodal_supported:
-            request_messages, _ = image_fallback.strip_images_from_messages(request_messages)
-
         payload = self._build_payload(
-            request_messages,
+            fallback.attempt.messages,
             stream=True,
             think_value=think_value,
             options=request_options,
@@ -486,73 +458,27 @@ class OllamaClient(LLMClient):
 
         collected_content: list[str] = []
         collected_thinking: list[str] = []
-        try:
-            yield from self._stream_payload(
-                payload,
-                collected_content,
-                collected_thinking,
-                generation_deadline_s=generation_deadline_s,
-                timeout_override=timeout_override,
-            )
-        except requests.HTTPError as exc:
-            if not image_fallback.should_retry_without_images(
-                exc,
-                request_messages,
-                multimodal_supported=self._multimodal_supported,
-            ):
+        while True:
+            try:
+                stream_result = yield from self._stream_payload(
+                    payload,
+                    collected_content,
+                    collected_thinking,
+                    generation_deadline_s=generation_deadline_s,
+                    timeout_override=timeout_override,
+                )
+                break
+            except requests.HTTPError as exc:
+                payload["messages"] = self._next_image_attempt(fallback, exc, mode="stream").messages
+            except requests.RequestException as exc:
+                if fallback.attempt.strategy is not None:
+                    # Keep the existing fallback-stream exception contract.
+                    raise
                 raise self._inference_failure(exc) from exc
 
-            response_text = image_fallback.http_error_text(exc)
-            if image_fallback.error_indicates_model_without_images(response_text):
-                self._multimodal_supported = False
-
-            fallback_candidates = image_fallback.build_fallback_messages(request_messages)
-            if not fallback_candidates:
-                raise
-
-            last_exc: requests.HTTPError = exc
-            for fallback_messages, strategy, dropped_current_images_count in fallback_candidates:
-                payload["messages"] = fallback_messages
-                logger.warning(
-                    "Ollama stream rejected image payload (status=%s); retrying %s.",
-                    getattr(last_exc.response, "status_code", None),
-                    strategy,
-                )
-                trace_event(
-                    "llm",
-                    "stream_retry_without_images",
-                    payload={
-                        "status_code": getattr(last_exc.response, "status_code", None),
-                        "response_text": image_fallback.http_error_text(last_exc),
-                        "strategy": strategy,
-                        "dropped_current_images_count": dropped_current_images_count,
-                    },
-                )
-                try:
-                    yield from self._stream_payload(
-                        payload, collected_content, collected_thinking,
-                        generation_deadline_s=generation_deadline_s,
-                        timeout_override=timeout_override,
-                    )
-                    self.last_stream_image_fallback_strategy = strategy
-                    if dropped_current_images_count > 0:
-                        self.last_stream_dropped_current_images = True
-                        self.last_stream_dropped_current_images_count = dropped_current_images_count
-                    break
-                except requests.HTTPError as retry_exc:
-                    if not image_fallback.should_retry_without_images(
-                        retry_exc,
-                        fallback_messages,
-                        multimodal_supported=self._multimodal_supported,
-                    ):
-                        raise self._inference_failure(retry_exc) from retry_exc
-                    last_exc = retry_exc
-                    if image_fallback.error_indicates_model_without_images(image_fallback.http_error_text(retry_exc)):
-                        self._multimodal_supported = False
-            else:
-                raise self._inference_failure(last_exc) from last_exc
-        except requests.RequestException as exc:
-            raise self._inference_failure(exc) from exc
+        self.last_stream_image_fallback_strategy = fallback.attempt.strategy
+        self.last_stream_dropped_current_images_count = fallback.attempt.dropped_current_images_count
+        self.last_stream_dropped_current_images = fallback.attempt.dropped_current_images_count > 0
 
         logger.info(
             "Ollama stream complete (content_len=%d, thinking_len=%d)",
@@ -567,6 +493,45 @@ class OllamaClient(LLMClient):
                 "thinking": "".join(collected_thinking),
             },
         )
+        if stream_result is not None:
+            self._record_telemetry(
+                stream_result["final_chunk"],
+                started=stream_result["started"],
+                request_options=request_options,
+                time_to_first_token_ms=stream_result["time_to_first_token_ms"],
+                call_mode="streaming",
+                phase="response",
+                telemetry_session_id=telemetry_session_id,
+            )
+
+    def _next_image_attempt(
+        self,
+        fallback: image_fallback.ImageFallback,
+        exc: requests.HTTPError,
+        *,
+        mode: str,
+    ) -> image_fallback.ImageAttempt:
+        try:
+            attempt = fallback.retry(exc)
+        finally:
+            self._multimodal_supported = fallback.multimodal_supported
+        if attempt is None:
+            raise self._inference_failure(exc) from exc
+        status_code = getattr(exc.response, "status_code", None)
+        logger.warning(
+            "Ollama %s rejected image payload (status=%s); retrying %s.",
+            mode, status_code, attempt.strategy,
+        )
+        trace_event(
+            "llm", f"{mode}_retry_without_images",
+            payload={
+                "status_code": status_code,
+                "response_text": image_fallback.http_error_text(exc),
+                "strategy": attempt.strategy,
+                "dropped_current_images_count": attempt.dropped_current_images_count,
+            },
+        )
+        return attempt
 
     # ------------------------------------------------------------------
     # Private — streaming
@@ -579,13 +544,15 @@ class OllamaClient(LLMClient):
         collected_thinking: list[str],
         generation_deadline_s: float | None = None,
         timeout_override: float | None = None,
-    ) -> Iterator[str | dict]: # Update return type
+    ) -> Iterator[str | dict]:
         """
         Consume a streaming response from /api/chat (native NDJSON format).
         """
         in_thinking_block = False
 
         started = time.perf_counter()
+        first_token_ms = None
+        final_chunk: dict = {}
         with self._post_stream(payload, timeout_override=timeout_override) as r:
             for line in r.iter_lines():
                 if generation_deadline_s is not None and time.perf_counter() - started > generation_deadline_s:
@@ -596,13 +563,15 @@ class OllamaClient(LLMClient):
                 if not line:
                     continue
 
-                chunk = json.loads(line.decode("utf-8"))
+                chunk = decode_chunk(line)
                 message = chunk.get("message", {})
                 content = message.get("content")
                 thinking = message.get("thinking")
                 
                 # Intercept native tool calls and yield as a dict
                 tool_calls = message.get("tool_calls")
+                if first_token_ms is None and (content or thinking or tool_calls):
+                    first_token_ms = round((time.perf_counter() - started) * 1000, 2)
                 if tool_calls:
                     yield {"tool_calls": tool_calls}
 
@@ -622,6 +591,7 @@ class OllamaClient(LLMClient):
                     yield content
 
                 if chunk.get("done"):
+                    final_chunk = chunk
                     if in_thinking_block:
                         yield "\n</think>\n\n"
                     if chunk.get("done_reason") == "length":
@@ -630,6 +600,11 @@ class OllamaClient(LLMClient):
                             "before finishing — response may be truncated."
                         )
                     break
+        return {
+            "final_chunk": final_chunk,
+            "started": started,
+            "time_to_first_token_ms": first_token_ms,
+        }
 
     # ------------------------------------------------------------------
     # Private — request builders
@@ -820,6 +795,133 @@ class OllamaClient(LLMClient):
                 time.sleep(backoff)
 
         raise RuntimeError("unreachable")  # loop always raises or returns
+
+    def _record_telemetry(
+        self,
+        data: dict,
+        *,
+        started: float,
+        request_options: dict,
+        call_mode: str,
+        phase: str,
+        time_to_first_token_ms: float | None = None,
+        react_iteration: int | None = None,
+        telemetry_session_id: str | None = None,
+    ) -> None:
+        if self.telemetry is None or not getattr(self.telemetry, "enabled", False):
+            return
+        http_wall_duration_ms = (time.perf_counter() - started) * 1000
+        prompt_tokens = data.get("prompt_eval_count")
+        completion_tokens = data.get("eval_count")
+        eval_duration_ms = self._nanoseconds_to_ms(data.get("eval_duration"))
+        decode_tokens_per_s = None
+        if completion_tokens is not None and eval_duration_ms:
+            decode_tokens_per_s = float(completion_tokens) / (eval_duration_ms / 1000.0)
+        context_tokens_total = None
+        if prompt_tokens is not None and completion_tokens is not None:
+            context_tokens_total = int(prompt_tokens) + int(completion_tokens)
+        total_model_duration_ms = self._nanoseconds_to_ms(data.get("total_duration"))
+        if total_model_duration_ms is None:
+            total_model_duration_ms = http_wall_duration_ms
+        extended_metrics = {}
+        if getattr(self.telemetry, "extended", False):
+            cached_prompt_tokens = next(
+                (
+                    data.get(key)
+                    for key in (
+                        "cached_prompt_tokens",
+                        "cached_prompt_eval_count",
+                        "prompt_cache_count",
+                    )
+                    if data.get(key) is not None
+                ),
+                None,
+            )
+            extended_metrics = {
+                "model_load_duration_ms": self._nanoseconds_to_ms(
+                    data.get("load_duration")
+                ),
+                "cached_prompt_tokens": cached_prompt_tokens,
+                "actually_evaluated_prompt_tokens": prompt_tokens,
+                **self._extended_runtime_metrics(),
+            }
+
+        self.telemetry.record_model_call(
+            session_id=telemetry_session_id,
+            status="success",
+            call_mode=call_mode,
+            phase=phase,
+            react_iteration=react_iteration,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_eval_duration_ms=self._nanoseconds_to_ms(
+                data.get("prompt_eval_duration")
+            ),
+            eval_duration_ms=eval_duration_ms,
+            time_to_first_token_ms=time_to_first_token_ms,
+            decode_tokens_per_s=decode_tokens_per_s,
+            total_model_duration_ms=total_model_duration_ms,
+            http_wall_duration_ms=http_wall_duration_ms,
+            context_tokens_total=context_tokens_total,
+            model_name=self.model,
+            num_ctx=request_options.get("num_ctx"),
+            num_gpu_layers=request_options.get("num_gpu"),
+            done_reason=data.get("done_reason"),
+            **extended_metrics,
+        )
+
+    def _extended_runtime_metrics(self) -> dict:
+        defaults = {
+            "ollama_model_vram_bytes": None,
+            "kv_cache_bytes": None,
+            "context_allocation_tokens": None,
+            "active_model_runners": None,
+            "active_contexts": None,
+        }
+        if self.telemetry is None or not getattr(self.telemetry, "extended", False):
+            return defaults
+        try:
+            response = self.session.get(
+                self._ps_url,
+                timeout=min(self.timeout_s, 2.0),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            logger.debug("Unable to read Ollama runtime telemetry: %s", exc)
+            return defaults
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return defaults
+        runner = next(
+            (
+                item
+                for item in models
+                if isinstance(item, dict)
+                and (item.get("model") == self.model or item.get("name") == self.model)
+            ),
+            None,
+        )
+        active_contexts = None
+        reported_contexts = [
+            item.get("active_contexts")
+            for item in models
+            if isinstance(item, dict) and isinstance(item.get("active_contexts"), int)
+        ]
+        if reported_contexts:
+            active_contexts = sum(reported_contexts)
+        if runner is None:
+            return {**defaults, "active_model_runners": len(models), "active_contexts": active_contexts}
+        kv_cache_bytes = runner.get("kv_cache_bytes")
+        if kv_cache_bytes is None:
+            kv_cache_bytes = runner.get("kv_cache_size")
+        return {
+            "ollama_model_vram_bytes": runner.get("size_vram"),
+            "kv_cache_bytes": kv_cache_bytes,
+            "context_allocation_tokens": runner.get("context_length"),
+            "active_model_runners": len(models),
+            "active_contexts": active_contexts,
+        }
 
     @staticmethod
     def _nanoseconds_to_ms(value):

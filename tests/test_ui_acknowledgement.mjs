@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { MessageRenderer } from '../static/js/message-renderer.mjs';
+import { ChatHistoryStore } from '../static/js/chat-history-store.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -18,6 +20,8 @@ function message() {
 
 test('pending identity survives serialization and refresh, and replay is idempotent', () => {
     const ui = Object.create(UIManager.prototype);
+    ui.messageRenderer = new MessageRenderer();
+    ui.historyStore = new ChatHistoryStore(attachments => attachments);
     const original = message();
     ui.setMessageMetadata(original, { awaitingMessageId: true });
     ui.chatHistory = { querySelectorAll: () => [original] };
@@ -52,4 +56,41 @@ test('text, voice and relay mark pending identity before initial persistence', (
     ui.appendUserMessage('Text');
     ui.appendVoiceUserMessage('Voice');
     ui.appendRelayMessage('Relay', 'Person', 'human');
+});
+
+test('preference setters retain UI state, callbacks and persistence controls', async () => {
+    const { PreferenceStore } = await import('../static/js/preferences.mjs');
+    const { CONFIG } = await import('../static/js/config.js');
+    const saved = new Map();
+    const ui = Object.create(UIManager.prototype);
+    ui.preferences = new PreferenceStore(() => ({ setItem: (key, value) => saved.set(key, value) }));
+    ui.syncReasoningToggle = () => {};
+    ui.setAgentMode(true);
+    assert.equal(ui.isAgentModeEnabled(), true);
+    assert.equal(ui.isInstantModeEnabled(), false);
+    assert.equal(ui.shouldUseReasoningForSend(), true);
+    assert.equal(saved.get(CONFIG.UI.STORAGE_KEYS.AGENT_MODE), 'true');
+    ui.setAgentMode(false, { persist: false });
+    assert.equal(ui.isInstantModeEnabled(), true);
+    assert.equal(saved.get(CONFIG.UI.STORAGE_KEYS.AGENT_MODE), 'true');
+    ui.playbackVolumeInput = {};
+    ui.playbackVolumeValue = {};
+    let volume;
+    ui.onVolumeChangeHandler = value => { volume = value; };
+    ui.setPlaybackVolume(2);
+    assert.equal(ui.getPlaybackVolume(), 1);
+    assert.equal(ui.playbackVolumeValue.textContent, '100%');
+    assert.equal(volume, 1);
+    ui.voiceModeButtons = [];
+    const activated = [];
+    ui.applyVoiceMode = mode => activated.push(mode);
+    ui.setVoiceMode('invalid', { activate: false });
+    assert.deepEqual(activated, []);
+    ui.setVoiceMode(CONFIG.UI.VOICE_MODES[0]);
+    assert.deepEqual(activated, [CONFIG.UI.VOICE_MODES[0]]);
+    ui.screenPolicyButtons = [];
+    let policy;
+    ui.onScreenCapturePolicyChangeHandler = value => { policy = value; };
+    ui.setScreenCapturePolicy('invalid');
+    assert.equal(policy, CONFIG.UI.SCREEN_CAPTURE_POLICY_DEFAULT);
 });

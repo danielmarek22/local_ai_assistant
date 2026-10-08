@@ -216,6 +216,14 @@ class InvocationContext:
     notification_callback: NotificationCallback | None = None
     authoritative_turn: object | None = None
     prepared_belief_turn: object | None = None
+    # None is unrestricted application authority; an empty set permits no tools.
+    allowed_capabilities: frozenset[CapabilityId] | None = None
+
+    def __post_init__(self) -> None:
+        if self.allowed_capabilities is not None:
+            object.__setattr__(self, "allowed_capabilities", frozenset(self.allowed_capabilities))
+        elif self.event_id is not None:
+            object.__setattr__(self, "allowed_capabilities", frozenset())
 
 
 @dataclass(frozen=True)

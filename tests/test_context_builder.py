@@ -14,7 +14,7 @@ class FakeHistoryStore:
         self.rows = rows
         self.last_limit = None
 
-    def get_recent(self, session_id: str, limit: int):
+    def get_recent(self, session_id: str, limit: int, *, conversation_only=False):
         self.last_limit = limit
         return self.rows
 
@@ -262,7 +262,7 @@ class ContextBuilderTests(unittest.TestCase):
 
     def test_build_keeps_every_message_since_summary_checkpoint(self):
         history = FakeHistoryStore([
-            {"role": "user", "content": f"Message {index}"}
+            {"id": index + 1, "role": "user", "content": f"Message {index}"}
             for index in range(9)
         ])
         builder = ContextBuilder(
@@ -272,9 +272,11 @@ class ContextBuilderTests(unittest.TestCase):
             history_limit=10,
         )
 
-        builder.build(session_id="abc123", user_text="Current question")
+        messages = builder.build(session_id="abc123", user_text="Current question")
 
-        self.assertEqual(history.last_limit, 5)
+        self.assertEqual(history.last_limit, 10)
+        self.assertEqual([message["content"] for message in messages[1:-1]],
+                         [f"Message {index}" for index in range(4, 9)])
 
     def test_build_deduplicates_current_user_message_against_stored_attachment_variant(self):
         image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"

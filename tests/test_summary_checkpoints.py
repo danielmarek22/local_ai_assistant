@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.core.context_builder import ContextBuilder
 from app.core.turn_finalizer import TurnFinalizer
 from app.memory.chat_history import ChatHistoryStore
 from app.memory.summary_store import SummaryStore
@@ -30,6 +31,48 @@ class SummaryCheckpointTests(unittest.TestCase):
                 )
             return conn.execute("SELECT MAX(id) FROM chat_history").fetchone()[0]
 
+    def restored_history(self, limit=10):
+        messages = ContextBuilder(
+            "System", self.history, history_limit=limit, summary_store=self.store,
+        ).build("session", "Current question")
+        return [message["content"] for message in messages[1:-1]]
+
+    def test_reader_uses_global_ids_with_interleaved_sessions_and_ineligible_rows(self):
+        self.seed(100, session="other")
+        checkpoint = self.seed(1, role="assistant")
+        self.store.set("session", "Previous summary", checkpoint)
+        self.seed(2)
+        self.seed(30, session="other")
+        self.seed(2, role="assistant")
+        self.seed(20, role="tool")
+        self.seed(20, role="system")
+        self.seed(20, excluded=1)
+        self.assertEqual(self.restored_history(), [
+            "session-user-0", "session-user-1",
+            "session-assistant-0", "session-assistant-1",
+        ])
+
+    def test_reader_keeps_newest_backlog_within_configured_bound(self):
+        checkpoint = self.seed(1, role="assistant")
+        self.store.set("session", "Previous summary", checkpoint)
+        self.seed(20)
+        self.assertEqual(self.restored_history(4),
+                         [f"session-user-{number}" for number in range(16, 20)])
+        self.assertEqual(self.store.get("session")[1], checkpoint)
+
+    def test_reader_keeps_two_recent_anchors_when_summary_is_current(self):
+        checkpoint = self.seed(5)
+        self.store.set("session", "Previous summary", checkpoint)
+        self.assertEqual(self.restored_history(), ["session-user-3", "session-user-4"])
+        self.assertEqual(self.restored_history(1), ["session-user-4"])
+        self.assertEqual(self.restored_history(0), [])
+
+    def test_reader_without_summary_uses_full_eligible_history_budget(self):
+        self.seed(5)
+        self.seed(20, role="tool")
+        self.assertEqual(self.restored_history(3),
+                         ["session-user-2", "session-user-3", "session-user-4"])
+
     def test_checkpoint_at_one_thousand_does_not_stall(self):
         checkpoint = self.seed(1000)
         self.store.set("session", "Previous summary", checkpoint)
@@ -41,15 +84,15 @@ class SummaryCheckpointTests(unittest.TestCase):
 
     def test_backlog_is_processed_in_order_in_bounded_batches(self):
         last_id = self.seed(1100)
-        for _ in range(11):
+        for _ in range(550):
             self.finalizer.finalize("session")
         batches = [call.args[0] for call in self.summarizer.summarize.call_args_list]
-        self.assertEqual([len(batch) for batch in batches], [100] * 11)
+        self.assertEqual([len(batch) for batch in batches], [2] * 550)
         self.assertEqual([row["content"] for batch in batches for row in batch],
                          [f"session-user-{number}" for number in range(1100)])
         self.assertEqual(self.store.get("session")[1], last_id)
         self.finalizer.finalize("session")
-        self.assertEqual(self.summarizer.summarize.call_count, 11)
+        self.assertEqual(self.summarizer.summarize.call_count, 550)
 
     def test_tools_exclusions_and_other_sessions_do_not_count_or_shift_checkpoint(self):
         self.seed(1)

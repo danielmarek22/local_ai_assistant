@@ -28,6 +28,14 @@ Core orchestration logic of the assistant.
   turn identity, retrieval, assistant persistence, and finalization. Generation receives
   only a tool-trace writer, not the history store or orchestrator itself. Model/tool
   resources remain application-owned; a generator does not close them.
+- `generation_step.py` represents each native inference outcome as `FinalText`,
+  `AcceptedToolCall`, or `InvalidToolCall`. Invalid calls retain their raw name,
+  arguments, and diagnostic for correction; accepted structure does not confer
+  execution authority. The existing first-tool-call policy remains in the generator.
+- `ResponseRenderer` owns one response's avatar parser, visible text, and expression
+  state. Direct and buffered generation share its push/finish lifecycle, while their
+  callers retain reasoning separation, group-envelope handling, and empty-response
+  policy. Rendering does not execute tools or persist conversation state.
 - `app/avatar/stream_processor.py` evaluates balanced bracket candidates against the configured avatar
   allowlists and removes invalid candidates. Escaped brackets and brackets inside
   fenced code, inline code, Markdown links, images, and references remain ordinary text.

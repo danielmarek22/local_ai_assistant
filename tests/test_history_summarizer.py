@@ -51,6 +51,34 @@ class HistorySummarizerTests(unittest.TestCase):
             self.assertEqual(self.llm.chat.call_args.kwargs["tools"], [])
             self.assertIs(self.llm.chat.call_args.kwargs["think_override"], False)
 
+    def test_summary_uses_dedicated_generation_budget(self):
+        self.llm.chat.return_value = {"content": "A factual summary."}
+        for kwargs, timeout, tokens in (({}, 300.0, 384),
+                                       ({"timeout_s": 240.0, "num_predict": 256}, 240.0, 256)):
+            with self.subTest(kwargs=kwargs):
+                HistorySummarizer(self.llm, **kwargs).summarize(
+                    [{"role": "user", "content": "A fact"}]
+                )
+                call = self.llm.chat.call_args.kwargs
+                self.assertEqual(call["timeout_override"], timeout)
+                self.assertEqual(call["options_override"],
+                                 {"num_predict": tokens, "temperature": 0.2})
+
+    def test_failed_batch_does_not_grow_when_new_messages_arrive(self):
+        self.add_exchange("First fact")
+        self.llm.chat.side_effect = TimeoutError("inference timeout")
+        with self.assertLogs("turn_finalizer", level="ERROR"):
+            self.finalizer.finalize("session")
+        failed_prompt = self.llm.chat.call_args.kwargs["messages"]
+        self.add_exchange("Later fact")
+        self.llm.chat.side_effect = None
+        self.llm.chat.return_value = {"content": "First summary"}
+        self.finalizer.finalize("session")
+        self.assertEqual(self.llm.chat.call_args.kwargs["messages"], failed_prompt)
+        self.assertEqual(self.store.get("session"), ("First summary", 2))
+        self.finalizer.finalize("session")
+        self.assertEqual(self.store.get("session")[1], 4)
+
     def test_invalid_summary_keeps_saved_summary_and_checkpoint_for_retry(self):
         for response in ({"content": ""}, {"content": " \n "}, {},
                          {"content": None}, {"content": 123}, None, "not a message"):

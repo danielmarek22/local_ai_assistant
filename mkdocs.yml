@@ -63,6 +63,9 @@ nav:
       - PocketTTS: services/pocket-tts.md
       - Mindcraft integration: services/mindcraft.md
   - Roadmap: roadmap.md
+  - Milestone 0+ sanity check: milestone-0-plus.md
+  - Framework comparison: reviews/framework-comparison.md
+  - Future improvements: reviews/future-improvements.md
 
 markdown_extensions:
   - admonition

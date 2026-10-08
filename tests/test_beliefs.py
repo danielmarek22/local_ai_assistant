@@ -25,7 +25,7 @@ from app.beliefs import (
     SubjectKind,
 )
 from app.core.conversation import InputSource, SenderType
-from app.core.orchestrator_factory import _build_belief_components
+from app.core.orchestrator_factory import BeliefComponents, _build_belief_components
 from app.core.turn_completion import CompletedUserTurn
 from app.llm.ollama_stream import OllamaClient
 from app.core.context_builder import ContextBuilder
@@ -155,11 +155,15 @@ class FakeStructuredLLM:
         }
 
 
-class BeliefStoreAndUpdateTests(unittest.TestCase):
+class BeliefRepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.repository = BeliefRepository(self.db)
         self.service = BeliefUpdateService(self.repository)
+
+
+class BeliefStoreAndUpdateTests(BeliefRepositoryTestCase):
 
     def apply(
         self,
@@ -2268,7 +2272,7 @@ class FakeHistory:
             latest[item["sender_id"]] = item
         return list(reversed(list(latest.values())))[:limit]
 
-    def get_recent(self, session_id=None, limit=10):
+    def get_recent(self, session_id=None, limit=10, *, conversation_only=False):
         return self.rows[-limit:]
 
     def get_summary_batch(self, session_id, after_message_id, limit):
@@ -2288,11 +2292,7 @@ class FakeSummarizer:
         raise AssertionError("summary should not run")
 
 
-class BeliefSnapshotAndWiringTests(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-        self.repository = BeliefRepository(self.db)
-        self.service = BeliefUpdateService(self.repository)
+class BeliefSnapshotAndWiringTests(BeliefRepositoryTestCase):
 
     def _apply_create(
         self, message_id, session_id, predicate, value, visibility="AGENT_CURRENT"
@@ -2471,37 +2471,37 @@ class BeliefSnapshotAndWiringTests(unittest.TestCase):
                 history_store=FakeHistory(),
                 agent_id="agent-a",
             ),
-            (None, None, [], None, None),
+            BeliefComponents(),
         )
 
         storage_only = SimpleNamespace(beliefs=base)
-        repository, provider, observers, integration, _preparer = _build_belief_components(
+        components = _build_belief_components(
             config=storage_only,
             llm=FakeStructuredLLM(wire_batch(ignore_reason="NO_CHANGE")),
             db=self.db,
             history_store=FakeHistory(),
             agent_id="agent-a",
         )
-        self.assertIsNotNone(repository)
-        self.assertIsNotNone(provider)
-        self.assertEqual(observers, [])
-        self.assertIsNone(integration)
-        repository.close()
+        self.assertIsNotNone(components.repository)
+        self.assertIsNotNone(components.context_provider)
+        self.assertEqual(components.completion_observers, [])
+        self.assertIsNone(components.integration)
+        components.repository.close()
 
         opted_in = SimpleNamespace(
             beliefs={**base, "processing_mode": "observer"}
         )
-        repository, provider, observers, integration, _preparer = _build_belief_components(
+        components = _build_belief_components(
             config=opted_in,
             llm=FakeStructuredLLM(wire_batch(ignore_reason="NO_CHANGE")),
             db=self.db,
             history_store=FakeHistory(),
             agent_id="agent-a",
         )
-        self.assertIsNotNone(provider)
-        self.assertEqual(len(observers), 1)
-        self.assertIsNone(integration)
-        repository.close()
+        self.assertIsNotNone(components.context_provider)
+        self.assertEqual(len(components.completion_observers), 1)
+        self.assertIsNone(components.integration)
+        components.repository.close()
 
 
 class BeliefTurnIntegrationTests(unittest.TestCase):
@@ -2759,23 +2759,23 @@ class BeliefTurnIntegrationTests(unittest.TestCase):
                 "max_expiry_days": 90,
             },
         )
-        repository, provider, observers, _integration, _preparer = _build_belief_components(
+        components = _build_belief_components(
             config=config, llm=llm, db=self.db, history_store=self.history,
             agent_id="astra",
         )
-        observers[0].observe(CompletedUserTurn(
+        components.completion_observers[0].observe(CompletedUserTurn(
             "astra", "group-a", 201, "My favorite editor is Neovim", NOW, "UTC",
             sender_id=sender_id, sender_display_name="Claude",
             sender_type=SenderType.EXTERNAL_AGENT,
             input_source=InputSource.MANUAL_RELAY,
         ))
-        beliefs = repository.get_active("astra", "another-session", now=NOW)
+        beliefs = components.repository.get_active("astra", "another-session", now=NOW)
         self.assertEqual(len(beliefs), 1)
         self.assertEqual(beliefs[0].subject_id, sender_id)
         self.assertEqual(beliefs[0].source_sender_id, sender_id)
         self.assertEqual(beliefs[0].epistemic_status.value, "SELF_REPORT")
-        self.assertIn('self-report by "Claude"', provider.context_for_turn("group-a"))
-        repository.close()
+        self.assertIn('self-report by "Claude"', components.context_provider.context_for_turn("group-a"))
+        components.repository.close()
 
     def test_external_agent_attributed_claim_end_to_end(self):
         source_id = "relay:external_agent:claude"

@@ -1,28 +1,32 @@
 import logging
 import time
 import json
-import inspect
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, Generator
 
 from app.core.events import (
-    AssistantSpeechEvent,
     AssistantThinkingEvent,
     AssistantStateEvent,
-    AvatarExpressionEvent,
-    AvatarAnimationEvent,
+    TurnEvent,
 )
 from app.core.assistant_state import AssistantState
-from app.avatar.stream_processor import StreamProcessor
+from app.core.generation_step import (
+    AcceptedToolCall, FinalText, GenerationStepResult, InvalidToolCall, parse_tool_call,
+)
+from app.core.response_renderer import ResponseRenderer
 from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.core.conversation import (
+    AssistantEnvelopeFilter,
+    GROUP_CONTEXT_INSTRUCTION,
+    unwrap_assistant_envelope,
     InputSource,
     SenderAttribution,
     SenderType,
 )
 from app.logging import trace_event
-from app.llm.base import InferenceFailure
+from app.llm.base import InferenceFailure, LLMClient
+from app.core.tool_executor import ToolExecutor
 from app.integrations import (
     CapabilityId,
     IntegrationEvent,
@@ -33,7 +37,6 @@ from app.integrations import (
 
 logger = logging.getLogger("orchestrator")
 
-_DEFAULT_AVATAR_EXPRESSION = "neutral"
 SAFE_EMPTY_RESPONSE_FALLBACK = "I'm sorry, I lost my train of thought. Could you repeat that?"
 _BELIEF_CAPABILITY = CapabilityId("beliefs", "update")
 DEFAULT_GENERATION_DEADLINE_S = 600.0
@@ -73,7 +76,7 @@ class ResponseGenerator:
     """Per-turn inference, native tool routing, recovery, and response event emission."""
 
     def __init__(
-        self, llm, tool_executor, record_tool_trace, *, allowed_animations=None,
+        self, llm: LLMClient, tool_executor: ToolExecutor, record_tool_trace, *, allowed_animations=None,
         allowed_expressions=None, max_late_routing_steps=5,
         generation_deadline_s=DEFAULT_GENERATION_DEADLINE_S,
         recovery_deadline_s=DEFAULT_RECOVERY_DEADLINE_S,
@@ -88,6 +91,12 @@ class ResponseGenerator:
         self.generation_deadline_s = generation_deadline_s
         self.recovery_deadline_s = recovery_deadline_s
         self.recovery_num_predict = recovery_num_predict
+
+    @staticmethod
+    def _is_group_context(messages) -> bool:
+        return any(message.get("role") == "system"
+                   and GROUP_CONTEXT_INSTRUCTION in message.get("content", "")
+                   for message in messages)
 
     def _inject_late_routing_system_message(self, messages: list[dict]) -> None:
         inject_hidden_system_message(
@@ -131,35 +140,24 @@ class ResponseGenerator:
         logger.info("[%s] Calling LLM (streaming)", session_id)
         yield AssistantStateEvent(state=AssistantState.RESPONDING)
 
-        visible_buffer = ""
         thinking_buffer = ""
-        expression_initialized = False
         start_ts = time.perf_counter()
-        processor = StreamProcessor(
+        renderer = ResponseRenderer(
+            session_id,
             allowed_animations=self.allowed_animations,
             allowed_expressions=self.allowed_expressions,
         )
         thinking_splitter = ThinkingBlockSplitter()
+        envelope_filter = AssistantEnvelopeFilter(self._is_group_context(messages))
 
-        stream_kwargs = {"think_override": think_override}
-        stream_parameters = inspect.signature(self.llm.stream_chat).parameters
-        accepts_stream_kwargs = any(
-            item.kind == inspect.Parameter.VAR_KEYWORD
-            for item in stream_parameters.values()
-        )
-        if options_override is not None and (
-            accepts_stream_kwargs or "options_override" in stream_parameters
+        for chunk in self.llm.stream_chat(
+            messages,
+            think_override=think_override,
+            options_override=options_override,
+            generation_deadline_s=generation_deadline_s,
+            timeout_override=timeout_override,
+            telemetry_session_id=session_id,
         ):
-            stream_kwargs["options_override"] = options_override
-        if generation_deadline_s is not None and (
-            accepts_stream_kwargs or "generation_deadline_s" in stream_parameters
-        ):
-            stream_kwargs["generation_deadline_s"] = generation_deadline_s
-        if timeout_override is not None and (
-            accepts_stream_kwargs or "timeout_override" in stream_parameters
-        ):
-            stream_kwargs["timeout_override"] = timeout_override
-        for chunk in self.llm.stream_chat(messages, **stream_kwargs):
             text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
             if not text_chunk:
                 continue
@@ -168,49 +166,29 @@ class ResponseGenerator:
             if thinking_chunk:
                 thinking_buffer += thinking_chunk
                 yield AssistantThinkingEvent(text=thinking_chunk)
+            visible_chunk = envelope_filter.push(visible_chunk)
             if not visible_chunk:
                 continue
                 
-            if not visible_buffer and not visible_chunk.strip():
+            if not renderer.text and not visible_chunk.strip():
                 continue
-            visible_buffer, expression_initialized = yield from self._emit_processor_events(
-                session_id,
-                processor.push(visible_chunk),
-                visible_buffer,
-                expression_initialized,
-            )
+            yield from renderer.push(visible_chunk)
 
         final_visible_chunk, final_thinking_chunk = thinking_splitter.flush()
         if final_thinking_chunk:
             thinking_buffer += final_thinking_chunk
             yield AssistantThinkingEvent(text=final_thinking_chunk)
 
-        if final_visible_chunk:
-            if not visible_buffer and not final_visible_chunk.strip():
-                final_visible_chunk = ""
-            if final_visible_chunk:
-                visible_buffer, expression_initialized = yield from self._emit_processor_events(
-                    session_id,
-                    processor.push(final_visible_chunk),
-                    visible_buffer,
-                    expression_initialized,
-                )
-
-        visible_buffer, expression_initialized = yield from self._emit_processor_events(
-            session_id,
-            processor.flush(),
-            visible_buffer,
-            expression_initialized,
-        )
-
-        if not expression_initialized:
-            logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
-            yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
+        final_visible_chunk = (envelope_filter.push(final_visible_chunk)
+                               + envelope_filter.flush())
+        if final_visible_chunk and (renderer.text or final_visible_chunk.strip()):
+            yield from renderer.push(final_visible_chunk)
+        yield from renderer.finish()
 
         logger.info(
             "[%s] LLM response complete (chars=%d, thinking_chars=%d, duration=%.2f ms)",
             session_id,
-            len(visible_buffer),
+            len(renderer.text),
             len(thinking_buffer),
             (time.perf_counter() - start_ts) * 1000,
         )
@@ -219,11 +197,11 @@ class ResponseGenerator:
             "llm_stream_complete",
             session_id=session_id,
             payload={
-                "visible_response": visible_buffer,
+                "visible_response": renderer.text,
                 "reasoning_response": thinking_buffer,
             },
         )
-        return visible_buffer
+        return renderer.text
 
     def stream_late_routed_response(
         self,
@@ -231,7 +209,7 @@ class ResponseGenerator:
         messages,
         user_text: str,
         tool_approval_callback: Callable[[dict], bool] | None = None,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         event: IntegrationEvent | None = None,
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         persist_tool_traces: bool = True,
@@ -240,8 +218,13 @@ class ResponseGenerator:
         initial_think_override=None,
     ):
         logger.info("[%s] Calling LLM with native late routing", session_id)
+        # Freeze application authority before inference or callbacks can mutate it.
+        # Event turns without explicit authority fail closed.
+        execution_capabilities = (
+            frozenset(allowed_capabilities) if allowed_capabilities is not None
+            else frozenset() if event is not None else None
+        )
         
-        # THE MISSING LINK: Inject the high-level instruction before the loop
         self._inject_late_routing_system_message(messages)
         if prepared_belief_turn is not None:
             try:
@@ -255,12 +238,7 @@ class ResponseGenerator:
             else:
                 inject_hidden_system_message(messages, catalog_message)
 
-        resolver = getattr(self.llm, "resolve_think_value", None)
-        normal_think = (
-            resolver(initial_think_override)
-            if callable(resolver)
-            else (True if initial_think_override is None else initial_think_override)
-        )
+        normal_think = self.llm.resolve_think_value(initial_think_override)
         turn_state = _LateRoutingTurnState(
             normal_think=normal_think,
             phase=_GenerationPhase.INITIAL,
@@ -280,7 +258,7 @@ class ResponseGenerator:
                     session_id=session_id,
                     messages=messages,
                     user_text=user_text,
-                    allowed_capabilities=allowed_capabilities,
+                    allowed_capabilities=execution_capabilities,
                     authoritative_turn=authoritative_turn,
                     prepared_belief_turn=prepared_belief_turn,
                     excluded_capabilities=(
@@ -311,9 +289,9 @@ class ResponseGenerator:
                     react_iteration=step,
                 ))
 
-            if result["tool_call"] is None and result["tool_error"] is None:
-                if result["response"] and result["response"].strip():
-                    return result["response"]
+            if isinstance(result, FinalText):
+                if result.response and result.response.strip():
+                    return result.response
                 reason = (
                     "empty_after_tool_interaction"
                     if turn_state.tool_interactions
@@ -326,9 +304,8 @@ class ResponseGenerator:
                     reason=reason,
                 ))
 
-            tool_call = result["tool_call"]
-            tool_name = result["tool_name"]
-            tool_arguments = result["tool_arguments"]
+            tool_name = result.tool_name
+            tool_arguments = result.tool_arguments
             is_belief_call = tool_name == str(_BELIEF_CAPABILITY)
             if is_belief_call:
                 turn_state.belief_attempts += 1
@@ -354,14 +331,15 @@ class ResponseGenerator:
                         "repository_accessed": False,
                     },
                 )
-            elif result["tool_error"] is not None:
-                tool_result = ToolResult.error(result["tool_error"])
+            elif isinstance(result, InvalidToolCall):
+                tool_result = ToolResult.error(result.error)
             else:
                 tool_result = yield from self._execute_late_tool_call(
                     session_id=session_id,
-                    call=tool_call,
+                    call=result.call,
                     user_text=user_text,
                     tool_approval_callback=tool_approval_callback,
+                    allowed_capabilities=execution_capabilities,
                     event=event,
                     notification_callback=notification_callback,
                     authoritative_turn=authoritative_turn,
@@ -481,38 +459,24 @@ class ResponseGenerator:
         session_id: str,
         messages,
         user_text: str,
-        allowed_capabilities: set[CapabilityId] | None = None,
+        allowed_capabilities: set[CapabilityId] | frozenset[CapabilityId] | None = None,
         authoritative_turn=None,
         prepared_belief_turn=None,
         excluded_capabilities: frozenset[CapabilityId] = frozenset(),
         inference_phase: _GenerationPhase = _GenerationPhase.INITIAL,
         normal_think=True,
         react_iteration: int = 1,
-    ):
+    ) -> Generator[TurnEvent, None, GenerationStepResult]:
         yield AssistantStateEvent(state=AssistantState.THINKING)
         start_ts = time.perf_counter()
 
-        # Fetch native schemas when the executor supports native discovery.
-        # Keep this backward-compatible with older test doubles and wrappers.
-        tools = getattr(self.tool_executor, "get_native_tools", None)
-        if callable(tools):
-            kwargs = {
-                "session_id": session_id,
-                "user_text": user_text,
-                "authoritative_turn": authoritative_turn,
-                "prepared_belief_turn": prepared_belief_turn,
-            }
-            try:
-                native_tools = (
-                    tools(**kwargs)
-                    if allowed_capabilities is None
-                    else tools(allowed_capabilities, **kwargs)
-                )
-            except TypeError:
-                # Backward compatibility for existing executor test doubles/wrappers.
-                native_tools = tools() if allowed_capabilities is None else tools(allowed_capabilities)
-        else:
-            native_tools = []
+        native_tools = self.tool_executor.get_native_tools(
+            allowed_capabilities=allowed_capabilities,
+            session_id=session_id,
+            user_text=user_text,
+            authoritative_turn=authoritative_turn,
+            prepared_belief_turn=prepared_belief_turn,
+        )
         if excluded_capabilities:
             excluded_names = {str(item) for item in excluded_capabilities}
             native_tools = [
@@ -523,26 +487,17 @@ class ResponseGenerator:
         is_correction = inference_phase is _GenerationPhase.CORRECTION
         think_value = False if is_correction else normal_think
         options_override = {"num_predict": 512} if is_correction else None
-        buffered_chat = getattr(self.llm, "chat_buffered", None)
-        if callable(buffered_chat):
-            message = buffered_chat(
-                messages=messages,
-                think_override=think_value,
-                options_override=options_override,
-                tools=native_tools,
-                timeout_override=self.generation_deadline_s,
-                generation_deadline_s=self.generation_deadline_s,
-                generation_phase=inference_phase.value,
-                react_iteration=react_iteration,
-            )
-        else:
-            message = self.llm.chat(
-                messages=messages,
-                think_override=think_value,
-                options_override=options_override,
-                tools=native_tools,
-                timeout_override=self.generation_deadline_s,
-            )
+        message = self.llm.chat_buffered(
+            messages=messages,
+            think_override=think_value,
+            options_override=options_override,
+            tools=native_tools,
+            timeout_override=self.generation_deadline_s,
+            generation_deadline_s=self.generation_deadline_s,
+            generation_phase=inference_phase.value,
+            react_iteration=react_iteration,
+            telemetry_session_id=session_id,
+        )
         inference_duration_ms = (time.perf_counter() - start_ts) * 1000
         trace_event(
             "orchestrator",
@@ -558,36 +513,18 @@ class ResponseGenerator:
             },
         )
 
-        tool_call: ToolCall | None = None
-        tool_error: str | None = None
-        tool_name = ""
-        tool_arguments: object = {}
-
-        # 1. Yield any background thinking the model did in one chunk
+        tool_step: AcceptedToolCall | InvalidToolCall | None = None
         thinking_text = message.get("thinking")
         if thinking_text:
             yield AssistantThinkingEvent(text=thinking_text)
 
-        # 2. Check for native tool calls
         if message.get("tool_calls"):
-            # Gemma 4 usually only calls one tool at a time in this loop
-            tc = message["tool_calls"][0]
-            try:
-                if not isinstance(tc, dict):
-                    raise ValueError("Tool call must be an object")
-                function = tc.get("function", {})
-                if not isinstance(function, dict):
-                    raise ValueError("Tool function must be an object")
-                tool_name = function.get("name", "")
-                tool_arguments = function.get("arguments", {})
-                capability = CapabilityId.parse(tool_name)
-                if not isinstance(tool_arguments, dict):
-                    raise ValueError("Tool arguments must be an object")
-                tool_call = ToolCall(capability=capability, arguments=tool_arguments)
-                logger.info("[%s] Native routing selected capability '%s'", session_id, capability)
-            except (TypeError, ValueError) as exc:
-                tool_error = f"Invalid tool call {tool_name!r}: {exc}"
-                logger.warning("[%s] %s", session_id, tool_error)
+            # Preserve the current policy: only the first native call is selected.
+            tool_step = parse_tool_call(message["tool_calls"][0])
+            if isinstance(tool_step, AcceptedToolCall):
+                logger.info("[%s] Native routing selected capability '%s'", session_id, tool_step.call.capability)
+            else:
+                logger.warning("[%s] %s", session_id, tool_step.error)
 
         logger.info(
             "[%s] Late-routed response step complete (duration=%.2f ms)",
@@ -595,57 +532,24 @@ class ResponseGenerator:
             (time.perf_counter() - start_ts) * 1000,
         )
         
-        if tool_call is not None or tool_error is not None:
-            return {
-                "response": "",
-                "tool_call": tool_call,
-                "tool_error": tool_error,
-                "tool_name": tool_name,
-                "tool_arguments": tool_arguments,
-            }
-        
-        # If no tool was called, process whatever visible text it generated
-        visible_content = message.get("content", "")
-        clean_response = ""
-        
-        if visible_content:
-            yield AssistantStateEvent(state=AssistantState.RESPONDING)
-            
-            # Re-introduce the StreamProcessor to parse avatar tags out of the raw block
-            processor = StreamProcessor(
-                allowed_animations=self.allowed_animations,
-                allowed_expressions=self.allowed_expressions,
-            )
-            expression_initialized = False
-            
-            # Push the text through the processor to strip tags and yield animation events
-            clean_response, expression_initialized = yield from self._emit_processor_events(
-                session_id,
-                processor.push(visible_content),
-                "",
-                expression_initialized,
-            )
-            
-            # Flush any remaining text in the processor's buffer
-            clean_response, expression_initialized = yield from self._emit_processor_events(
-                session_id,
-                processor.flush(),
-                clean_response,
-                expression_initialized,
-            )
+        if tool_step is not None:
+            return tool_step
 
-            # Ensure a default expression is set if the model didn't provide one
-            if not expression_initialized:
-                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
-                yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
-            
-        return {
-            "response": clean_response,
-            "tool_call": None,
-            "tool_error": None,
-            "tool_name": "",
-            "tool_arguments": {},
-        }
+        visible_content = message.get("content", "")
+        if self._is_group_context(messages):
+            visible_content = unwrap_assistant_envelope(visible_content)
+        if not visible_content:
+            return FinalText("")
+
+        yield AssistantStateEvent(state=AssistantState.RESPONDING)
+        renderer = ResponseRenderer(
+            session_id,
+            allowed_animations=self.allowed_animations,
+            allowed_expressions=self.allowed_expressions,
+        )
+        yield from renderer.push(visible_content)
+        yield from renderer.finish()
+        return FinalText(renderer.text)
 
     def _force_tool_free_response(
         self,
@@ -764,6 +668,7 @@ class ResponseGenerator:
         notification_callback: Callable[[NotificationRequest], bool] | None = None,
         authoritative_turn=None,
         prepared_belief_turn=None,
+        allowed_capabilities: frozenset[CapabilityId] | None = None,
     ):
         capability = str(call.capability)
         yield AssistantThinkingEvent(text=f"\n[Using {capability}]\n")
@@ -775,6 +680,7 @@ class ResponseGenerator:
                 "approval_callback": tool_approval_callback,
                 "authoritative_turn": authoritative_turn,
                 "prepared_belief_turn": prepared_belief_turn,
+                "allowed_capabilities": allowed_capabilities,
             }
             if event is not None:
                 execute_kwargs.update({
@@ -799,35 +705,3 @@ class ResponseGenerator:
             },
         )
         return result
-
-    def _emit_processor_events(
-        self,
-        session_id: str,
-        events: list[tuple[str, str]],
-        visible_buffer: str,
-        expression_initialized: bool,
-    ):
-        for event_type, value in events:
-            if event_type == "expression":
-                expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", session_id, value)
-                yield AvatarExpressionEvent(expression=value)
-                continue
-
-            if event_type == "animation":
-                logger.info("[%s] Model selected avatar animation '%s'", session_id, value)
-                yield AvatarAnimationEvent(animation=value)
-                continue
-
-            if not value or not value.strip():
-                continue
-
-            if not expression_initialized:
-                expression_initialized = True
-                logger.info("[%s] Model selected avatar expression '%s'", session_id, _DEFAULT_AVATAR_EXPRESSION)
-                yield AvatarExpressionEvent(expression=_DEFAULT_AVATAR_EXPRESSION)
-
-            visible_buffer += value
-            yield AssistantSpeechEvent(text=value)
-
-        return visible_buffer, expression_initialized
