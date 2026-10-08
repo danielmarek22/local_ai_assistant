@@ -492,6 +492,7 @@ async def _forward_orchestrator_events(
         await _send_ws_payload(ws, {
             "type": "assistant_audio", "url": f"/static/audio/{audio_id}.wav",
         })
+        logger.info("[%s] Assistant audio frame submitted (%s.wav)", connection_id, audio_id)
 
     async with SpeechStream(send_speech) as speech:
         async for event in run_generator(event_iterator):
@@ -649,6 +650,7 @@ async def _autonomy_notification_sink(
                 "turn_id": turn_id,
                 "origin": "integration_event",
             })
+            logger.info("[%s] Assistant audio frame submitted (%s.wav)", session_id, audio_id)
 
 
 async def _autonomy_approval_provider(

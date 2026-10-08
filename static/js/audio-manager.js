@@ -4,9 +4,12 @@ export class AudioManager {
     constructor() {
         this.audioQueue = [];
         this.isPlaying = false;
+        this.playbackBlocked = false;
         this.isSpeechActive = false;
         this.speechEndTimer = null;
         this.audioContext = null;
+        this.contextResumePromise = null;
+        this.loadedAudioUrl = null;
         this.analyser = null;
         this.dataArray = null;
         this.onSpeechStart = null;
@@ -14,10 +17,12 @@ export class AudioManager {
         
         this.audioEl = new Audio();
         this.audioEl.crossOrigin = "anonymous";
+        this.audioEl.preload = 'auto';
         this.volume = CONFIG.AUDIO.DEFAULT_VOLUME;
         this.audioEl.volume = this.volume;
 
         this.audioEl.onplaying = () => {
+            console.debug('Assistant audio playing:', this.audioEl.currentSrc);
             this.updateSpeechActivity();
         };
         this.audioEl.onpause = () => {
@@ -26,9 +31,20 @@ export class AudioManager {
         
         this.audioEl.onended = () => {
             this.isPlaying = false;
+            this.loadedAudioUrl = null;
             this.playNext();
             this.updateSpeechActivity();
         };
+
+        // Unlock speech during a real interaction, including enabling voice mode.
+        // A transcript arriving over WebSocket is not a user activation event.
+        document.addEventListener('pointerdown', () => this.init());
+        document.addEventListener('keydown', () => this.init());
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'hidden') this.retryPlayback();
+        });
+        window.addEventListener('focus', () => this.retryPlayback());
+        window.addEventListener('pageshow', () => this.retryPlayback());
     }
 
     init() {
@@ -49,9 +65,46 @@ export class AudioManager {
             this.analyser.connect(this.audioContext.destination);
 
             console.log("Audio Context Initialized with Clean Audio");
-        } else if (this.audioContext.state === 'suspended') {
-            this.audioContext.resume();
         }
+        this.retryPlayback();
+    }
+
+    async resumeAudioContext() {
+        if (!this.audioContext || this.audioContext.state === 'running') return true;
+        if (this.contextResumePromise) return this.contextResumePromise;
+
+        // Autoplay blocking may leave resume() pending instead of rejecting it.
+        // Keep the queue recoverable even when the browser never settles it.
+        let resumeTimer;
+        this.contextResumePromise = new Promise((resolve) => {
+            resumeTimer = window.setTimeout(() => {
+                console.warn('Audio context resume timed out; speech is waiting for activation');
+                resolve(false);
+            }, CONFIG.AUDIO.CONTEXT_RESUME_TIMEOUT_MS);
+            try {
+                Promise.resolve(this.audioContext.resume()).then(() => {
+                    resolve(this.audioContext.state === 'running');
+                }, (error) => {
+                    console.warn('Audio context could not resume:', error);
+                    resolve(false);
+                });
+            } catch (error) {
+                console.warn('Audio context could not resume:', error);
+                resolve(false);
+            }
+        }).finally(() => {
+            window.clearTimeout(resumeTimer);
+            this.contextResumePromise = null;
+        });
+        return this.contextResumePromise;
+    }
+
+    retryPlayback() {
+        this.playbackBlocked = false;
+        // Call resume synchronously from interaction handlers, even with no clips
+        // queued, so voice replies can play after the user switches tabs.
+        void this.resumeAudioContext();
+        this.playNext();
     }
 
     makeDistortionCurve(amount) {
@@ -69,6 +122,7 @@ export class AudioManager {
     }
 
     queueAudio(url) {
+        console.debug('Assistant audio received:', url, 'visibility:', document.visibilityState);
         this.audioQueue.push(url);
         this.playNext();
     }
@@ -133,15 +187,35 @@ export class AudioManager {
     }
 
     playNext() {
-        if (this.isPlaying || this.audioQueue.length === 0) return;
+        if (this.isPlaying || this.playbackBlocked || this.audioQueue.length === 0) return;
 
         this.isPlaying = true;
         const audioUrl = this.audioQueue.shift();
-        this.audioEl.src = audioUrl;
-        
-        this.audioEl.play().catch(e => {
+        // Loading is independent of speaker permission. Start the request before
+        // waiting for resume(), and retain the loaded resource on blocked retries.
+        if (this.loadedAudioUrl !== audioUrl) {
+            this.loadedAudioUrl = audioUrl;
+            this.audioEl.src = audioUrl;
+            this.audioEl.load();
+            console.debug('Assistant audio loading:', audioUrl);
+        }
+        // Do not consume a clip silently through a suspended Web Audio graph.
+        this.resumeAudioContext().then((running) => {
+            if (!running) {
+                throw new DOMException('Audio context is not running', 'NotAllowedError');
+            }
+            return this.audioEl.play();
+        }).catch(e => {
             console.error("Audio play failed:", e);
             this.isPlaying = false;
+            if (e.name === 'NotAllowedError' || e.name === 'AbortError') {
+                // Keep the first blocked clip and its order. Retry on activation
+                // rather than draining the entire speech queue on one rejection.
+                this.audioQueue.unshift(audioUrl);
+                this.playbackBlocked = true;
+            } else {
+                this.loadedAudioUrl = null;
+            }
             this.updateSpeechActivity();
             this.playNext();
         });

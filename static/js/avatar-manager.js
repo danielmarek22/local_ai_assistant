@@ -373,6 +373,9 @@ export class AvatarManager {
     handleVisibilityChange() {
         this.isPageVisible = document.visibilityState !== 'hidden';
         if (this.isPageVisible) {
+            // Hidden tabs stop receiving frames. Do not apply that whole gap to
+            // gestures which are just starting when the tab becomes visible.
+            this.clock.getDelta();
             this.processGestureQueue();
         }
     }
@@ -623,7 +626,7 @@ export class AvatarManager {
     animate() {
         requestAnimationFrame(this.animate);
         
-        const deltaTime = this.clock.getDelta();
+        const deltaTime = Math.min(this.clock.getDelta(), 0.1);
         this.controls.update(); 
 
         if (this.currentVrm) {

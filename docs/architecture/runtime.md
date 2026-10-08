@@ -104,12 +104,14 @@ Autonomous speech notifications follow the same text-first ordering.
 
 Each synthesis caller has a 30-second deadline covering queue admission and completion.
 The serial backend call also has a 30-second deadline. GPT-SoVITS additionally uses
-5-second connection and 20-second read timeouts. A turn can queue eight pending speech
-fragments; saturation or synthesis failure drops remaining optional speech while text
-continues. After text generation ends, speech drains for at most 30 seconds before its
-consumer is cancelled. Turn ownership is retained during that bounded drain to avoid
-misattributing late audio to another turn. Application audio shutdown drains for at most
-five seconds, then rejects remaining jobs.
+5-second connection and 20-second read timeouts. Pending speech for the current reply
+is buffered as text, with no sentence-count cutoff. One consumer synthesizes and sends
+each fragment in order, with a 30-second deadline per fragment. Healthy replies may
+take longer than 30 seconds overall without losing their last sentences. A synthesis
+or delivery failure abandons remaining optional speech while text continues. Turn
+ownership is retained until speech completes or fails to avoid misattributing late
+audio to another turn. Application audio shutdown drains for at most five seconds,
+then rejects remaining jobs.
 
 An in-process engine cannot be forcibly interrupted by cancelling an async wait.
 If its execution deadline expires, speech is disabled until application restart;
