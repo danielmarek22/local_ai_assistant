@@ -66,6 +66,35 @@ undefined names, keeping adoption separate from broad formatting cleanup:
 venv_app/bin/ruff check --select E9,F63,F7,F82 app tests main.py
 ```
 
+## Inspecting model traces
+
+`logs/trace.log` records structured events. `context_builder.context_built` shows
+context assembly; its separate `memory_context` field is a diagnostic copy of the
+memory already included in the system message. It does not represent a second
+injection. Later routing and belief instructions can add more system messages.
+
+Use `llm.request_payload` to inspect the actual HTTP request after those additions.
+Every transport attempt records a fresh `request_id`; `inference_id` links attempts,
+request metadata, and the completed response. `session_id` links calls to a chat.
+An image fallback records the changed request separately. Media bytes are omitted
+from logs without changing the request sent to the model.
+
+Trace text is preserved in full by default. Optional `logging.trace_max_string_chars`
+and `logging.trace_max_event_chars` limits affect logs only; both default to `null`.
+String limits mark omitted characters explicitly. Event limits retain valid JSON
+with `log_truncation` metadata and an escaped preview. File rotation still bounds
+retained logs using the configured size and backup count.
+
+Set `logging.trace_include_thinking: true` to record the model's native `thinking`
+field in a separate `llm.thinking_output` event after each completed call. The
+default is `false`. Streaming chunks are joined into one event, so this does not
+add an entry per token. Response metadata includes the thinking character count
+even when its text is disabled. This setting does not request thinking from the
+model or alter its output. Thinking text is diagnostic output; successful tool
+results remain the evidence that an action happened.
+
+Restart Astra after changing logging settings.
+
 ## Incremental type checks
 
 CI runs strict mypy checks on both supported Python versions. `mypy.ini` lists the

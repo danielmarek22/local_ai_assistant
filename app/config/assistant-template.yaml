@@ -139,6 +139,11 @@ logging:
   trace_file_name: trace.log
   trace_max_bytes: 10000000
   trace_backup_count: 5
+  # null preserves full diagnostic text; media bytes are always omitted.
+  trace_max_string_chars: null
+  trace_max_event_chars: null
+  # One separate model-returned thinking event per completed inference.
+  trace_include_thinking: false
 
 telemetry:
   # none: disabled; minimal: INFO summary; full: JSONL; extended: JSONL plus system/GPU data.

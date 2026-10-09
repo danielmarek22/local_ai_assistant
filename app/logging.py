@@ -14,6 +14,9 @@ _TRACE_LOGGER_NAME = "trace"
 _SENSITIVE_BINARY_KEYS = {"base64_data", "data", "images", "audios"}
 _DEFAULT_MAX_STRING_CHARS = 4000
 _DEFAULT_MAX_LOG_CHARS = 12000
+_TRACE_MAX_STRING_CHARS: int | None = None
+_TRACE_MAX_EVENT_CHARS: int | None = None
+_TRACE_INCLUDE_THINKING = False
 _WARNED_UNREGISTERED_TRACE_EVENTS: set[str] = set()
 
 # Trace naming convention table.
@@ -37,6 +40,8 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
     ),
     "context_builder": ("context_built",),
     "llm": (
+        "request_payload",
+        "thinking_output",
         "chat_request",
         "chat_response",
         "chat_retry_without_images",
@@ -115,12 +120,12 @@ def _sanitize_for_debug(
     value: Any,
     *,
     parent_key: str | None = None,
-    max_string_chars: int = _DEFAULT_MAX_STRING_CHARS,
+    max_string_chars: int | None = _DEFAULT_MAX_STRING_CHARS,
     max_depth: int = 8,
     _depth: int = 0,
 ) -> Any:
     if _depth >= max_depth:
-        return "<max-depth-reached>"
+        return "<log-only omission: max-depth-reached>"
 
     if isinstance(value, dict):
         return {
@@ -149,8 +154,8 @@ def _sanitize_for_debug(
     if isinstance(value, str):
         if parent_key in _SENSITIVE_BINARY_KEYS:
             return f"<omitted {parent_key} len={len(value)}>"
-        if len(value) > max_string_chars:
-            return f"{value[:max_string_chars]}... [truncated {len(value) - max_string_chars} chars]"
+        if max_string_chars is not None and len(value) > max_string_chars:
+            return f"{value[:max_string_chars]}... [log-only truncation: {len(value) - max_string_chars} chars omitted]"
         return value
 
     if isinstance(value, (int, float, bool)) or value is None:
@@ -180,17 +185,41 @@ def _sanitize_for_debug(
 def serialize_for_debug(
     value: Any,
     *,
-    max_chars: int = _DEFAULT_MAX_LOG_CHARS,
-    max_string_chars: int = _DEFAULT_MAX_STRING_CHARS,
+    max_chars: int | None = _DEFAULT_MAX_LOG_CHARS,
+    max_string_chars: int | None = _DEFAULT_MAX_STRING_CHARS,
+    max_depth: int = 8,
 ) -> str:
-    sanitized = _sanitize_for_debug(value, max_string_chars=max_string_chars)
+    sanitized = _sanitize_for_debug(value, max_string_chars=max_string_chars, max_depth=max_depth)
     try:
         rendered = json.dumps(sanitized, ensure_ascii=True, indent=2, sort_keys=True)
     except TypeError:
         rendered = repr(sanitized)
 
-    if len(rendered) > max_chars:
-        return f"{rendered[:max_chars]}... [truncated {len(rendered) - max_chars} chars]"
+    if max_chars is not None and len(rendered) > max_chars:
+        # Never slice serialized JSON: keep a parseable event with explicit
+        # diagnostic-only truncation metadata and an escaped preview.
+        envelope = {
+            key: sanitized[key]
+            for key in ("component", "event", "event_key", "session_id")
+            if isinstance(sanitized, dict) and key in sanitized
+        }
+        envelope["log_truncation"] = {
+            "log_only": True,
+            "reason": "event_limit",
+            "original_chars": len(rendered),
+            "limit_chars": max_chars,
+        }
+        envelope["preview"] = ""
+        low, high = 0, min(len(rendered), max_chars)
+        while low < high:
+            middle = (low + high + 1) // 2
+            envelope["preview"] = rendered[:middle]
+            if len(json.dumps(envelope, ensure_ascii=True, indent=2)) <= max_chars:
+                low = middle
+            else:
+                high = middle - 1
+        envelope["preview"] = rendered[:low]
+        return json.dumps(envelope, ensure_ascii=True, indent=2)
     return rendered
 
 
@@ -208,11 +237,15 @@ def setup_logging(
     trace_file_name: str = "trace.log",
     trace_max_bytes: int | None = None,
     trace_backup_count: int | None = None,
+    trace_max_string_chars: int | None = None,
+    trace_max_event_chars: int | None = None,
+    trace_include_thinking: bool = False,
 ) -> None:
     global _CONFIGURED_HANDLERS
     global _LOGGING_CONFIGURED
     global _PREVIOUS_ROOT_LEVEL
     global _PREVIOUS_TRACE_STATE
+    global _TRACE_MAX_STRING_CHARS, _TRACE_MAX_EVENT_CHARS, _TRACE_INCLUDE_THINKING
 
     if _LOGGING_CONFIGURED:
         logging.getLogger(__name__).debug("Logging already configured, skipping")
@@ -320,6 +353,9 @@ def setup_logging(
     _PREVIOUS_ROOT_LEVEL = previous_root_level
     _PREVIOUS_TRACE_STATE = previous_trace_state
     _LOGGING_CONFIGURED = True
+    _TRACE_MAX_STRING_CHARS = trace_max_string_chars
+    _TRACE_MAX_EVENT_CHARS = trace_max_event_chars
+    _TRACE_INCLUDE_THINKING = trace_include_thinking
 
 
 def reset_logging() -> None:
@@ -328,6 +364,7 @@ def reset_logging() -> None:
     global _LOGGING_CONFIGURED
     global _PREVIOUS_ROOT_LEVEL
     global _PREVIOUS_TRACE_STATE
+    global _TRACE_MAX_STRING_CHARS, _TRACE_MAX_EVENT_CHARS, _TRACE_INCLUDE_THINKING
 
     root = logging.getLogger()
     trace_logger = logging.getLogger(_TRACE_LOGGER_NAME)
@@ -353,6 +390,9 @@ def reset_logging() -> None:
     _PREVIOUS_ROOT_LEVEL = None
     _PREVIOUS_TRACE_STATE = None
     _LOGGING_CONFIGURED = False
+    _TRACE_MAX_STRING_CHARS = None
+    _TRACE_MAX_EVENT_CHARS = None
+    _TRACE_INCLUDE_THINKING = False
     _WARNED_UNREGISTERED_TRACE_EVENTS.clear()
 
 
@@ -371,6 +411,9 @@ def setup_logging_from_config(config: dict | None = None) -> None:
         trace_file_name=config.get("trace_file_name", "trace.log"),
         trace_max_bytes=config.get("trace_max_bytes"),
         trace_backup_count=config.get("trace_backup_count"),
+        trace_max_string_chars=config.get("trace_max_string_chars"),
+        trace_max_event_chars=config.get("trace_max_event_chars"),
+        trace_include_thinking=config.get("trace_include_thinking", False),
     )
 
 
@@ -410,4 +453,21 @@ def trace_event(
     if payload is not None:
         record["payload"] = payload
 
-    trace_logger.debug(serialize_for_debug(record))
+    trace_logger.debug(serialize_for_debug(
+        record,
+        max_chars=_TRACE_MAX_EVENT_CHARS,
+        max_string_chars=_TRACE_MAX_STRING_CHARS,
+        max_depth=32,
+    ))
+
+
+def trace_thinking_output(thinking: str | None, *, session_id: str | None = None,
+                          **metadata: Any) -> None:
+    """Log model-returned native thinking once, only when explicitly enabled."""
+    if not _TRACE_INCLUDE_THINKING or not thinking:
+        return
+    trace_event("llm", "thinking_output", session_id=session_id, payload={
+        **metadata,
+        "thinking": thinking,
+        "thinking_chars": len(thinking),
+    })

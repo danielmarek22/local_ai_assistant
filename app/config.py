@@ -335,6 +335,9 @@ class _LoggingConfig(_StrictConfigModel):
     trace_file_name: str = "trace.log"
     trace_max_bytes: int = Field(default=10_000_000, gt=0, le=10_000_000_000)
     trace_backup_count: int = Field(default=5, ge=0, le=1000)
+    trace_max_string_chars: int | None = Field(default=None, gt=0, le=10_000_000)
+    trace_max_event_chars: int | None = Field(default=None, ge=1024, le=100_000_000)
+    trace_include_thinking: bool = False
 
     @field_validator("level", "console_level", "file_level", "trace_level")
     @classmethod

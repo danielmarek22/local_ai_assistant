@@ -2,13 +2,14 @@ import requests
 import json
 import time
 import logging
+import uuid
 from typing import Iterator
 
 from . import image_fallback
 from .base import InferenceFailure, LLMClient
 from .stream_decoder import decode_buffered_chunk, decode_chunk
 from app.llm.thinking_filter import ThinkingBlockSplitter
-from app.logging import trace_event
+from app.logging import trace_event, trace_thinking_output
 
 logger = logging.getLogger("ollama_client")
 
@@ -151,6 +152,7 @@ class OllamaClient(LLMClient):
         without mutating them. Streaming calls merge overrides after applying
         their mode-specific generation defaults.
         """
+        trace_context = self._new_trace_context("blocking", telemetry_session_id)
         think_value = self._resolve_think_value(think_override)
 
         request_options = self.options.copy()
@@ -178,7 +180,9 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
-        trace_event("llm", "chat_request", payload=payload)
+        trace_event("llm", "chat_request", session_id=telemetry_session_id, payload={
+            **trace_context, "message_count": len(messages), "effective_think": think_value,
+        })
 
         request_started = time.perf_counter()
         while True:
@@ -191,6 +195,7 @@ class OllamaClient(LLMClient):
                         fallback.attempt.messages,
                         max_retries_override,
                     ),
+                    trace_context=trace_context,
                 )
                 break
             except requests.HTTPError as exc:
@@ -220,9 +225,11 @@ class OllamaClient(LLMClient):
         trace_event(
             "llm",
             "chat_response",
+            session_id=telemetry_session_id,
             payload={
+                **trace_context,
                 "content": message.get("content"),
-                "thinking": message.get("thinking"),
+                "thinking_chars_received": len(message.get("thinking") or ""),
                 "done_reason": finish_reason,
                 "http_wall_duration_ms": round(
                     (time.perf_counter() - request_started) * 1000, 2
@@ -239,6 +246,7 @@ class OllamaClient(LLMClient):
                 "generation_token_count": data.get("eval_count"),
             },
         )
+        trace_thinking_output(message.get("thinking"), **trace_context)
 
         self._record_telemetry(
             data,
@@ -264,6 +272,10 @@ class OllamaClient(LLMClient):
         telemetry_session_id: str | None = None,
     ) -> dict:
         """Consume a native streamed generation atomically before exposing its result."""
+        trace_context = self._new_trace_context(
+            "buffered", telemetry_session_id,
+            generation_phase=generation_phase, react_iteration=react_iteration,
+        )
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
         request_options = self._merge_options(request_options, options_override)
@@ -280,7 +292,8 @@ class OllamaClient(LLMClient):
             len(messages),
         )
         effective_num_predict = request_options.get("num_predict")
-        trace_event("llm", "chat_request", payload={
+        trace_event("llm", "chat_request", session_id=telemetry_session_id, payload={
+            **trace_context,
             "buffered": True,
             "generation_phase": generation_phase,
             "react_iteration": react_iteration,
@@ -301,7 +314,9 @@ class OllamaClient(LLMClient):
         completed = False
         final_chunk: dict = {}
         try:
-            with self._post_stream(payload, timeout_override=timeout_override) as response:
+            with self._post_stream(
+                payload, timeout_override=timeout_override, trace_context=trace_context,
+            ) as response:
                 for line in response.iter_lines():
                     now = time.perf_counter()
                     if generation_deadline_s is not None and now - started > generation_deadline_s:
@@ -375,7 +390,9 @@ class OllamaClient(LLMClient):
         trace_event(
             "llm",
             "chat_response",
+            session_id=telemetry_session_id,
             payload={
+                **trace_context,
                 "buffered": True,
                 "generation_phase": generation_phase,
                 "react_iteration": react_iteration,
@@ -403,6 +420,7 @@ class OllamaClient(LLMClient):
                 "generation_token_count": final_chunk.get("eval_count"),
             },
         )
+        trace_thinking_output(message["thinking"], **trace_context)
         self._record_telemetry(
             final_chunk,
             started=started,
@@ -431,6 +449,7 @@ class OllamaClient(LLMClient):
         Thinking tokens are wrapped in <think>…</think> and yielded inline
         so the orchestrator can process or strip them downstream.
         """
+        trace_context = self._new_trace_context("streaming", telemetry_session_id)
         think_value = self._resolve_think_value(think_override)
         request_options = self._build_stream_options(think_value)
         request_options = self._merge_options(request_options, options_override)
@@ -454,7 +473,9 @@ class OllamaClient(LLMClient):
             think_value,
             len(messages),
         )
-        trace_event("llm", "stream_request", payload=payload)
+        trace_event("llm", "stream_request", session_id=telemetry_session_id, payload={
+            **trace_context, "message_count": len(messages), "effective_think": think_value,
+        })
 
         collected_content: list[str] = []
         collected_thinking: list[str] = []
@@ -466,6 +487,7 @@ class OllamaClient(LLMClient):
                     collected_thinking,
                     generation_deadline_s=generation_deadline_s,
                     timeout_override=timeout_override,
+                    trace_context=trace_context,
                 )
                 break
             except requests.HTTPError as exc:
@@ -488,11 +510,14 @@ class OllamaClient(LLMClient):
         trace_event(
             "llm",
             "stream_response",
+            session_id=telemetry_session_id,
             payload={
+                **trace_context,
                 "content": "".join(collected_content),
-                "thinking": "".join(collected_thinking),
+                "thinking_chars_received": sum(map(len, collected_thinking)),
             },
         )
+        trace_thinking_output("".join(collected_thinking), **trace_context)
         if stream_result is not None:
             self._record_telemetry(
                 stream_result["final_chunk"],
@@ -544,6 +569,7 @@ class OllamaClient(LLMClient):
         collected_thinking: list[str],
         generation_deadline_s: float | None = None,
         timeout_override: float | None = None,
+        trace_context: dict | None = None,
     ) -> Iterator[str | dict]:
         """
         Consume a streaming response from /api/chat (native NDJSON format).
@@ -553,7 +579,9 @@ class OllamaClient(LLMClient):
         started = time.perf_counter()
         first_token_ms = None
         final_chunk: dict = {}
-        with self._post_stream(payload, timeout_override=timeout_override) as r:
+        with self._post_stream(
+            payload, timeout_override=timeout_override, trace_context=trace_context,
+        ) as r:
             for line in r.iter_lines():
                 if generation_deadline_s is not None and time.perf_counter() - started > generation_deadline_s:
                     raise InferenceFailure(
@@ -703,7 +731,21 @@ class OllamaClient(LLMClient):
     # Private — HTTP
     # ------------------------------------------------------------------
 
-    def _post_stream(self, payload: dict, timeout_override: float | None = None) -> requests.Response:
+    @staticmethod
+    def _new_trace_context(call_mode: str, session_id: str | None, **fields) -> dict:
+        return {"inference_id": uuid.uuid4().hex, "call_mode": call_mode,
+                "session_id": session_id, **fields}
+
+    @staticmethod
+    def _trace_request_payload(payload: dict, trace_context: dict | None, attempt: int = 1) -> None:
+        context = trace_context or {}
+        trace_event("llm", "request_payload", session_id=context.get("session_id"), payload={
+            **context, "request_id": uuid.uuid4().hex,
+            "transport_attempt": attempt, "request": payload,
+        })
+
+    def _post_stream(self, payload: dict, timeout_override: float | None = None,
+                     trace_context: dict | None = None) -> requests.Response:
         """
         Issue a streaming POST to the native chat endpoint. Returns the raw
         Response used as a context manager so the caller can iterate lines
@@ -712,6 +754,7 @@ class OllamaClient(LLMClient):
         Separated from _post_with_retry because streaming responses cannot be
         retried transparently — partial output may already have been yielded.
         """
+        self._trace_request_payload(payload, trace_context)
         response = self.session.post(
             self.url,
             json=payload,
@@ -727,6 +770,7 @@ class OllamaClient(LLMClient):
         stream: bool,
         timeout_override: float | None = None,
         max_retries_override: int | None = None,
+        trace_context: dict | None = None,
     ) -> requests.Response:
         """
         Issue a non-streaming POST with exponential-backoff retry.
@@ -741,6 +785,7 @@ class OllamaClient(LLMClient):
         for attempt in range(1, attempts + 1):
             attempt_started = time.perf_counter()
             try:
+                self._trace_request_payload(payload, trace_context, attempt)
                 response = self.session.post(
                     self.url,
                     json=payload,
@@ -758,7 +803,9 @@ class OllamaClient(LLMClient):
                         "Ollama inference request failed category=%s attempt=%d/%d retry=false",
                         category, attempt, attempts,
                     )
-                    trace_event("llm", "request_failure", payload={
+                    trace_event("llm", "request_failure",
+                                session_id=(trace_context or {}).get("session_id"), payload={
+                        **(trace_context or {}),
                         "attempt": attempt,
                         "max_attempts": attempts,
                         "attempt_duration_ms": round((time.perf_counter() - attempt_started) * 1000, 2),
@@ -772,7 +819,9 @@ class OllamaClient(LLMClient):
                 trace_event(
                     "llm",
                     "request_retry",
+                    session_id=(trace_context or {}).get("session_id"),
                     payload={
+                        **(trace_context or {}),
                         "attempt": attempt,
                         "max_attempts": attempts,
                         "attempt_duration_ms": round(
