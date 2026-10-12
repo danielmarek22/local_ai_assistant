@@ -64,6 +64,7 @@ TRACE_EVENT_CONVENTIONS: dict[str, tuple[str, ...]] = {
         "tool_result",
     ),
     "memory_retriever": ("retrieval_result",),
+    "scratchpad_context": ("scratchpad_retrieval",),
     "memory_action": (
         "memory_action_skipped",
         "memory_action_applied",

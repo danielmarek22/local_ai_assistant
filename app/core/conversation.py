@@ -114,6 +114,36 @@ def unwrap_assistant_envelope(content: str, *, sender_id: str | None = None) -> 
     return content
 
 
+class AssistantEnvelopeError(RuntimeError):
+    """Invalid generated attribution output requiring a user-controlled retry."""
+
+    category = "invalid_assistant_envelope"
+
+
+_LEADING_AVATAR_TAG_RE = re.compile(r"\[(?:state|expression|animation|gesture):[a-zA-Z_]+\]\s*")
+_AVATAR_TAG_PREFIXES = ("[state:", "[expression:", "[animation:", "[gesture:")
+
+
+def _split_generated_prefix(content: str) -> tuple[str, str]:
+    candidate = content.lstrip()
+    while match := _LEADING_AVATAR_TAG_RE.match(candidate):
+        candidate = candidate[match.end():]
+    return content[:len(content) - len(candidate)], candidate
+
+
+def normalize_generated_assistant_output(content: str) -> str:
+    """Decode generated envelopes, rejecting wrappers that cannot be unwrapped.
+
+    Unlike history normalization, output validation must not release malformed
+    metadata to display or speech. Quoted examples and ordinary text pass through.
+    """
+    prefix, candidate = _split_generated_prefix(content)
+    result = unwrap_assistant_envelope(candidate)
+    if _split_generated_prefix(result)[1].startswith("PARTICIPANT_MESSAGE"):
+        raise AssistantEnvelopeError("Model returned an invalid participant envelope")
+    return prefix + result if result != candidate else content
+
+
 class AssistantEnvelopeFilter:
     """Hold a possible envelope until complete; pass ordinary streaming text through."""
 
@@ -125,16 +155,20 @@ class AssistantEnvelopeFilter:
         if self.passthrough:
             return text
         self.pending += text
-        candidate = self.pending.lstrip()
-        marker = "PARTICIPANT_MESSAGE "
-        if marker.startswith(candidate) or candidate.startswith(marker):
+        _, candidate = _split_generated_prefix(self.pending)
+        marker = "PARTICIPANT_MESSAGE"
+        possible_avatar_tag = any(
+            prefix.startswith(candidate) or (candidate.startswith(prefix) and "]" not in candidate)
+            for prefix in _AVATAR_TAG_PREFIXES
+        )
+        if possible_avatar_tag or marker.startswith(candidate) or candidate.startswith(marker):
             return ""
         self.passthrough = True
         result, self.pending = self.pending, ""
         return result
 
     def flush(self) -> str:
-        result = unwrap_assistant_envelope(self.pending)
+        result = normalize_generated_assistant_output(self.pending)
         self.pending = ""
         return result
 

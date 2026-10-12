@@ -15,6 +15,17 @@ class ConfigTests(unittest.TestCase):
             config_file.flush()
             return Config(config_file.name)
 
+    def test_scratchpad_defaults_disable_and_limits(self):
+        defaults = self._load({}).integrations["scratchpad"]
+        self.assertEqual(defaults["recall_limit"], 3)
+        self.assertTrue(defaults["enabled"])
+        self.assertFalse(self._load({"integrations": {"scratchpad": {"enabled": False}}}).integrations["scratchpad"]["enabled"])
+        for field, value in (("recall_limit", 0), ("recall_limit", 21),
+                             ("query_max_chars", 2001), ("context_max_chars", 299),
+                             ("max_distance", 2.1), ("recall_limit", True)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self._load({"integrations": {"scratchpad": {field: value}}})
+
     def test_empty_document_and_empty_sections_preserve_defaults(self):
         defaults = self._load({})
         self.assertEqual(self._load(None).raw, defaults.raw)

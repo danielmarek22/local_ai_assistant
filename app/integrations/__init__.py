@@ -20,6 +20,7 @@ from app.integrations.contracts import (
     ToolSpec,
     ReplayPolicy,
 )
+from app.integrations.scratchpad import ScratchpadIntegration
 from app.integrations.registry import IntegrationRegistry
 from app.integrations.beliefs import BeliefIntegration
 from app.integrations.builtins import MemoryIntegration, ShellIntegration, WebIntegration
@@ -57,6 +58,7 @@ __all__ = [
     "MemoryIntegration",
     "MindcraftClient",
     "MindcraftIntegration",
+    "ScratchpadIntegration",
     "ShellIntegration",
     "WebIntegration",
     "VisionIntegration",

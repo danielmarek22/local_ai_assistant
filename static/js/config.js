@@ -5,7 +5,7 @@ export const CONFIG = {
         RECONNECT_INTERVAL_MS: 3000
     },
     AVATAR: {
-        MODEL_PATH: '/static/avatar.vrm',
+        MODEL_PATH: '/static/avatars/default.vrm',
         EXPRESSIONS: ['happy', 'angry', 'sad', 'relaxed', 'surprised', 'neutral'],
         
         // State animation variants are selected at random.

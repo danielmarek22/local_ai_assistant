@@ -223,6 +223,20 @@ class Database:
 
     def _init_schema(self):
         cursor = self.conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scratchpad (
+            id TEXT PRIMARY KEY,
+            owner_agent_id TEXT NOT NULL,
+            content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)
+        )
+        """)
+        cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scratchpad_owner_updated
+        ON scratchpad(owner_agent_id, updated_at DESC, id)
+        """)
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS chat_history (

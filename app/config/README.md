@@ -88,3 +88,7 @@ Observer mode may process eligible instant turns after the response. React-tool 
 does not: instant turns bypass all native tools. Storage, belief context, and Knowledge
 inspection remain available in all three processing modes while `beliefs.enabled` is
 true.
+
+## Notebook
+
+`integrations.scratchpad` enables persistent free-form notes and automatic recall. It defaults to enabled, with three recalled notes, cosine distance at most 0.70, a 2,000-character query and a 3,000-character context payload. Set `enabled: false` to remove tools and recall without erasing notes. See [Notebook](../../docs/architecture/scratchpad.md) for tool contracts, limits, and offline repair.

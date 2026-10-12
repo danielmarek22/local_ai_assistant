@@ -37,6 +37,11 @@ class VectorStore:
                 embedding_function=self.embedding_fn,
                 metadata={"hnsw:space": "cosine"}
             )
+            self.scratchpad_collection = self.client.get_or_create_collection(
+                name="scratchpad",
+                embedding_function=self.embedding_fn,
+                metadata={"hnsw:space": "cosine"},
+            )
         except Exception:
             self.client.close()
             raise

@@ -81,6 +81,7 @@ class Orchestrator:
         vector_store=None,
         belief_repository: "BeliefRepository | None" = None,
         avatar_wardrobe: "AvatarWardrobe | None" = None,
+        scratchpad_context_provider=None,
         max_late_routing_steps: int = 5,
     ):
         self.llm = llm
@@ -98,6 +99,7 @@ class Orchestrator:
         self.agent_id = agent_id
         self.timezone_name = timezone_name
         self.belief_context_provider = belief_context_provider
+        self.scratchpad_context_provider = scratchpad_context_provider
         self.local_human_id = local_human_id
         self.local_human_name = local_human_name
         self.local_assistant_name = local_assistant_name
@@ -319,6 +321,10 @@ class Orchestrator:
                 user_text=turn_input.user_text,
             )
 
+            scratchpad_context = self._collect_scratchpad_context(
+                session_id, retrieval_text, current_message_id=user_message_id,
+            )
+
             # 4. Context construction
             messages = self._build_context(
                 session_id=session_id,
@@ -328,6 +334,7 @@ class Orchestrator:
                 attachments=turn_input.attachments,
                 current_sender=sender,
                 session_kind=session_kind,
+                scratchpad_context=scratchpad_context,
             )
 
             # 5. LLM response: stream directly unless agent/native tool routing is active.
@@ -641,6 +648,11 @@ class Orchestrator:
                 user_text="",
                 memory_context=retrieval.memory_context,
                 integration_context=integration_context,
+                scratchpad_context=(
+                    self._collect_scratchpad_context(session_id, event_text)
+                    if any(CapabilityId("scratchpad", action) in spec.allowed_capabilities
+                           for action in ("read", "search")) else None
+                ),
                 attachments=[
                     ImageAttachment(
                         name=item.name,
@@ -751,6 +763,7 @@ class Orchestrator:
         attachments: list[Attachment] | None = None,
         current_sender: SenderAttribution | None = None,
         session_kind: SessionKind | str | None = None,
+        scratchpad_context: str | None = None,
     ):
         logger.info("[%s] Building context", session_id)
 
@@ -763,6 +776,7 @@ class Orchestrator:
             attachments=attachments or [],
             current_sender=current_sender,
             session_kind=session_kind,
+            **({"scratchpad_context": scratchpad_context} if scratchpad_context else {}),
         )
 
         logger.debug(
@@ -773,6 +787,17 @@ class Orchestrator:
             bool(integration_context),
         )
         return messages
+
+    def _collect_scratchpad_context(self, session_id, text, current_message_id=None):
+        if self.scratchpad_context_provider is None:
+            return None
+        try:
+            return self.scratchpad_context_provider.context_for_turn(
+                session_id, text, current_message_id,
+            )
+        except Exception:
+            logger.exception("[%s] Notebook context collection failed", session_id)
+            return None
 
     def _collect_belief_context(self, session_id: str) -> str | None:
         provider = self.belief_context_provider

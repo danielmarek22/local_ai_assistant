@@ -133,6 +133,7 @@ class FakeContextBuilder:
             "memory_context": memory_context,
             "integration_context": integration_context,
             "belief_context": kwargs.get("belief_context"),
+            "scratchpad_context": kwargs.get("scratchpad_context"),
             "attachments": kwargs.get("attachments", []),
             "current_sender": kwargs.get("current_sender"),
             "session_kind": kwargs.get("session_kind"),
@@ -308,6 +309,47 @@ class OrchestratorTests(unittest.TestCase):
             vector_store=vector_store,
         )
         return orch, llm, history, memory, summary_store, summarizer, tool_executor, context_builder
+
+    def test_scratchpad_recall_once_per_turn_including_instant_and_tool_loop(self):
+        from unittest.mock import Mock
+        for instant in (False, True):
+            with self.subTest(instant=instant):
+                built = self._build_orchestrator(
+                    summary_trigger=999, late_routing_enabled=True,
+                    chat_responses=[
+                        {"content": "", "tool_calls": [{"function": {
+                            "name": "shell__execute", "arguments": {"command": "echo hello"},
+                        }}]},
+                        {"content": "Finished"},
+                    ],
+                )
+                provider = Mock()
+                provider.context_for_turn.return_value = '[{"id":"note-1","content":"Project Kite"}]'
+                built[0].scratchpad_context_provider = provider
+                list(built[0].handle_user_input(self.SESSION_ID, "Project Kite", instant_mode=instant))
+                provider.context_for_turn.assert_called_once_with(self.SESSION_ID, "Project Kite", 1)
+                self.assertIn("Project Kite", built[7].calls[0]["scratchpad_context"])
+                self.assertEqual(len(built[1].chat_calls), 0 if instant else 2)
+
+    def test_scratchpad_event_recall_requires_explicit_read_or_search_permission(self):
+        from unittest.mock import Mock
+        for action in (None, "write", "read", "search"):
+            with self.subTest(action=action):
+                built = self._build_orchestrator(summary_trigger=999, chat_responses=[{"content": "Handled"}])
+                provider = Mock()
+                provider.context_for_turn.return_value = "[]"
+                built[0].scratchpad_context_provider = provider
+                event = IntegrationEvent(EventId("test", "observed"), {"value": "Kite"})
+                spec = EventSpec(event.event, "Observed", {"type": "object"},
+                                 allowed_capabilities=(CapabilityId("scratchpad", action),) if action else ())
+                list(built[0].handle_integration_event(self.SESSION_ID, event, spec))
+                self.assertEqual(provider.context_for_turn.call_count, int(action in {"read", "search"}))
+                self.assertEqual(built[7].calls[0]["scratchpad_context"], "[]" if action in {"read", "search"} else None)
+        built = self._build_orchestrator(summary_trigger=999)
+        provider = Mock()
+        built[0].scratchpad_context_provider = provider
+        list(built[0].handle_proactive_event(self.SESSION_ID, "Vision event"))
+        provider.context_for_turn.assert_not_called()
 
     def test_close_releases_owned_storage_in_reverse_order_once(self):
         for autonomy_attached in (False, True):

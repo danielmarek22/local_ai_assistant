@@ -17,9 +17,10 @@ from app.core.generation_step import (
 from app.core.response_renderer import ResponseRenderer
 from app.llm.thinking_filter import ThinkingBlockSplitter
 from app.core.conversation import (
+    AssistantEnvelopeError,
     AssistantEnvelopeFilter,
     GROUP_CONTEXT_INSTRUCTION,
-    unwrap_assistant_envelope,
+    normalize_generated_assistant_output,
     InputSource,
     SenderAttribution,
     SenderType,
@@ -537,7 +538,7 @@ class ResponseGenerator:
 
         visible_content = message.get("content", "")
         if self._is_group_context(messages):
-            visible_content = unwrap_assistant_envelope(visible_content)
+            visible_content = normalize_generated_assistant_output(visible_content)
         if not visible_content:
             return FinalText("")
 
@@ -575,6 +576,9 @@ class ResponseGenerator:
                 generation_deadline_s=self.recovery_deadline_s,
                 timeout_override=self.recovery_deadline_s,
             )
+        except AssistantEnvelopeError:
+            # Reuse the turn failure/retry action, without another model call.
+            raise
         except Exception as exc:
             failure_category = getattr(exc, "category", type(exc).__name__)
             logger.warning(
@@ -627,6 +631,8 @@ class ResponseGenerator:
         )
         if latest_observation:
             instruction += f"\n\nLatest tool observation:\n{latest_observation}"
+        if ResponseGenerator._is_group_context(messages):
+            instruction += f"\n\n{GROUP_CONTEXT_INSTRUCTION}"
         return [
             {"role": "system", "content": instruction},
             {"role": "user", "content": user_text},

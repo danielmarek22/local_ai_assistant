@@ -11,6 +11,7 @@ The roadmap is a dependency map, not a promise carved into an ancient GPU. Astra
 flowchart TD
     M0[0 · Docs and stabilization]
     M0P[0+ · Architectural sanity check]
+    SP[Notebook · Free-form notes + recall]
     M1[1 · Runtime profiles]
     M2[2 · Embodiment + 3D world]
     M3[3 · Information access]
@@ -24,7 +25,7 @@ flowchart TD
     M11[11 · Executive Astra]
     R[∞ · Research hell]
 
-    M0 --> M0P --> M1
+    M0 --> M0P --> SP --> M1
     M1 --> M2
     M1 --> M3
     M1 --> M4
@@ -76,6 +77,18 @@ Assess what Astra should own versus reuse before expanding the architecture. The
 **Deliverable complete:** analysis and decision gates are documented. The three immediate repairs—dispatch authorization, summary-checkpoint reading, and terminal operation transitions—remain tracked in the [framework comparison](reviews/framework-comparison.md#1-findings-to-address-before-expansion); verify their completion separately before expanding the affected paths.
 
 Future improvements are assigned to the milestones below. The [standalone improvement document](reviews/future-improvements.md) retains detailed rationale, external references, and acceptance criteria. Astra keeps its custom orchestration and domain services; framework adoption remains conditional on a useful comparison.
+
+</div>
+
+<div class="astra-roadmap" markdown>
+
+## Before M1 · Notebook experiment
+
+<span class="astra-roadmap-badge">IMPLEMENTED · LIVE EVALUATION</span>
+
+The [persistent notebook](architecture/scratchpad.md) gives Astra free-form notes with write/read/recent/search/edit/delete tools and automatic semantic recall on conversational turns. It coexists with memory and beliefs. Observe what Astra chooses to write and whether relevant notes return naturally across conversations before considering any cognitive-system consolidation.
+
+**Validation:** deterministic storage, native-tool, context, and authority checks plus an isolated live recall experiment. Continued normal use evaluates relevance and spontaneous note-taking. M1 must isolate or disable the notebook in Demo and Relay profiles.
 
 </div>
 

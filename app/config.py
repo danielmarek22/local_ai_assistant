@@ -429,6 +429,14 @@ class _MemoryIntegrationConfig(_EnabledIntegrationConfig):
     enabled: bool = True
 
 
+class _ScratchpadIntegrationConfig(_EnabledIntegrationConfig):
+    enabled: bool = True
+    recall_limit: int = Field(default=3, ge=1, le=20)
+    max_distance: float = Field(default=0.70, ge=0.0, le=2.0)
+    query_max_chars: int = Field(default=2000, ge=1, le=2000)
+    context_max_chars: int = Field(default=3000, ge=300, le=12000)
+
+
 class _ShellIntegrationConfig(_EnabledIntegrationConfig):
     enabled: bool = True
     timeout: int = Field(default=15, gt=0, le=3600)
@@ -536,6 +544,7 @@ class _MindcraftIntegrationConfig(_EnabledIntegrationConfig):
 class _IntegrationsConfig(_StrictConfigModel):
     web: _WebIntegrationConfig = Field(default_factory=_WebIntegrationConfig)
     memory: _MemoryIntegrationConfig = Field(default_factory=_MemoryIntegrationConfig)
+    scratchpad: _ScratchpadIntegrationConfig = Field(default_factory=_ScratchpadIntegrationConfig)
     shell: _ShellIntegrationConfig = Field(default_factory=_ShellIntegrationConfig)
     mindcraft: _MindcraftIntegrationConfig = Field(
         default_factory=_MindcraftIntegrationConfig

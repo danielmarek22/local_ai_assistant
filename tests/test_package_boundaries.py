@@ -43,6 +43,7 @@ class PackageBoundaryTests(unittest.TestCase):
             "app.memory",
             "app.perception",
             "app.storage",
+            "app.scratchpad",
             "app.stt",
             "app.tools",
             "app.tts",
