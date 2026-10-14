@@ -54,6 +54,7 @@ nav:
       - Runtime lifecycle: architecture/runtime.md
       - Context construction: architecture/context-building.md
       - Memory: architecture/memory.md
+      - Notebook: architecture/scratchpad.md
       - Beliefs: architecture/beliefs.md
   - Development:
       - Working on Astra: guides/development.md

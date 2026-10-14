@@ -53,6 +53,8 @@ from app.beliefs import (
     BeliefTurnPreparer,
     REACT_TOOL_BELIEF_VERSION,
 )
+from app.scratchpad import ScratchpadStore, ScratchpadContextProvider
+from app.integrations.scratchpad import ScratchpadIntegration
 from app.paths import DATA_DIR, STATIC_DIR, resolve_app_path
 from app.telemetry import TelemetryRecorder
 
@@ -364,7 +366,21 @@ def _build_orchestrator(
     )
     wardrobe = AvatarWardrobe(outfit_catalog, initial_outfit)
 
+    scratchpad_provider = None
+    scratchpad_cfg = config.integrations.get("scratchpad", {})
     integrations = [RuntimeIntegration(), VisionIntegration(), OutfitIntegration(wardrobe)]
+    if scratchpad_cfg.get("enabled", True):
+        scratchpad_store = ScratchpadStore(
+            db, vector_store.scratchpad_collection, agent_id,
+            max_distance=scratchpad_cfg.get("max_distance", 0.70),
+        )
+        integrations.append(ScratchpadIntegration(scratchpad_store))
+        scratchpad_provider = ScratchpadContextProvider(
+            scratchpad_store, history_store,
+            recall_limit=scratchpad_cfg.get("recall_limit", 3),
+            query_max_chars=scratchpad_cfg.get("query_max_chars", 2000),
+            context_max_chars=scratchpad_cfg.get("context_max_chars", 3000),
+        )
     if beliefs.integration is not None:
         integrations.append(beliefs.integration)
         logger.info("Belief ReAct integration registered")
@@ -489,6 +505,7 @@ def _build_orchestrator(
         agent_id=agent_id,
         timezone_name=str(config.beliefs.get("timezone", "UTC")),
         belief_context_provider=beliefs.context_provider,
+        scratchpad_context_provider=scratchpad_provider,
         local_human_id=config.local_human["id"],
         local_human_name=config.local_human["display_name"],
         local_assistant_name=assistant_name,

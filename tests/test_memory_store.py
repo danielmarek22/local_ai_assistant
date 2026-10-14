@@ -335,6 +335,26 @@ class MemoryStoreTests(unittest.TestCase):
 
 
 class ReconcileIndexesCommandTests(unittest.TestCase):
+    def test_enabled_notebook_reconciles_with_current_owner_and_closes_resources(self):
+        database, vectors, notebook = Mock(), Mock(), Mock()
+        notebook.reconcile_index.return_value = {"canonical_count": 3}
+        config = SimpleNamespace(
+            local_human={"id": "person-1", "display_name": "Local Person"},
+            assistant={"id": "astra", "display_name": "Astra"},
+            integrations={"scratchpad": {"enabled": True}},
+        )
+        with patch.object(main_module, "Database", return_value=database), \
+                patch.object(main_module, "VectorStore", return_value=vectors), \
+                patch.object(main_module, "MemoryStore"), \
+                patch.object(main_module, "ChatHistoryStore"), \
+                patch.object(main_module, "ScratchpadStore", return_value=notebook) as store_type:
+            report = main_module.reconcile_indexes(config)
+        store_type.assert_called_once_with(database, vectors.scratchpad_collection, "astra")
+        self.assertEqual(report["scratchpad"], {"canonical_count": 3})
+        notebook.reconcile_index.assert_called_once_with()
+        vectors.close.assert_called_once_with()
+        database.close.assert_called_once_with()
+
     def test_cli_dispatches_reconciliation_and_prints_json_report(self):
         report = {
             "semantic": {"canonical_count": 1, "upserted_count": 1, "removed_count": 0},
@@ -375,10 +395,11 @@ class ReconcileIndexesCommandTests(unittest.TestCase):
         config = SimpleNamespace(
             local_human={"id": "person-1", "display_name": "Local Person"},
             assistant={"id": "astra", "display_name": "Astra"},
+            integrations={"scratchpad": {"enabled": False}},
         )
 
         with patch.object(main_module, "Database", return_value=database), patch.object(
-            main_module, "VectorStore", return_value=object()
+            main_module, "VectorStore", return_value=Mock()
         ), patch.object(
             main_module, "MemoryStore", return_value=semantic
         ), patch.object(
@@ -398,12 +419,13 @@ class ReconcileIndexesCommandTests(unittest.TestCase):
         config = SimpleNamespace(
             local_human={"id": "person-1", "display_name": "Local Person"},
             assistant={"id": "astra", "display_name": "Astra"},
+            integrations={"scratchpad": {"enabled": False}},
         )
         semantic = Mock()
         semantic.reconcile_index.side_effect = RuntimeError("index unavailable")
 
         with patch.object(main_module, "Database", return_value=database), patch.object(
-            main_module, "VectorStore", return_value=object()
+            main_module, "VectorStore", return_value=Mock()
         ), patch.object(
             main_module, "MemoryStore", return_value=semantic
         ), patch.object(main_module, "ChatHistoryStore", return_value=Mock()):

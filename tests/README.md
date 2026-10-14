@@ -75,6 +75,13 @@ Tests currently focus on deterministic core behavior that can be validated witho
 - `test_sentence_splitter.py`
   - Sentence chunking for streaming/TTS
 
+- `test_scratchpad_store.py`, `test_scratchpad_integration.py`, and `test_scratchpad_context.py`
+  - Persistent free-form notes, ownership/revision checks, canonical survival after index failure,
+    stale vector filtering, offline repair, bounded previews, deleted-session fencing,
+    factory enable/disable composition, and automatic query/prompt construction
+  - Orchestrator tests cover one recall per conversational turn, instant mode, tool loops,
+    and explicit event read/search authority; maintenance tests cover the third index
+
 ## Running the Suite
 
 Run all tests from the repository root:

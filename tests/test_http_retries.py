@@ -116,8 +116,10 @@ class HttpRetryTests(unittest.TestCase):
         payload = post_mock.call_args.kwargs["json"]
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["options"]["num_predict"], 512)
-        request_trace = trace_mock.call_args_list[0]
-        response_trace = trace_mock.call_args_list[1]
+        request_trace = next(call for call in trace_mock.call_args_list
+                             if call.args[:2] == ("llm", "chat_request"))
+        response_trace = next(call for call in trace_mock.call_args_list
+                              if call.args[:2] == ("llm", "chat_response"))
         self.assertEqual(request_trace.args[:2], ("llm", "chat_request"))
         self.assertEqual(response_trace.args[:2], ("llm", "chat_response"))
         request_meta = request_trace.kwargs["payload"]

@@ -9,16 +9,18 @@ from app.memory.memory_store import MemoryStore
 from app.paths import DATA_DIR, STATIC_DIR
 from app.storage.database import Database
 from app.storage.vector_store import VectorStore
+from app.scratchpad import ScratchpadStore
 from app.ui.console import print_event
 
 
 def reconcile_indexes(config: Config) -> dict[str, dict[str, int]]:
-    """Rebuild both retrieval indexes from canonical SQLite records."""
+    """Offline rebuild of retrieval indexes from canonical SQLite records."""
     db = Database(
         path=str(DATA_DIR / "assistant.db"),
         legacy_local_human_id=config.local_human["id"],
         legacy_local_human_name=config.local_human["display_name"],
     )
+    vector_store = None
     try:
         vector_store = VectorStore(path=str(DATA_DIR / "vectordb"))
         assistant_id = str(config.assistant.get("id", "default-agent")).strip()
@@ -33,12 +35,21 @@ def reconcile_indexes(config: Config) -> dict[str, dict[str, int]]:
             local_assistant_name=assistant_name or "Astra",
         )
         memory = MemoryStore(db, vector_store)
-        return {
+        report = {
             "semantic": memory.reconcile_index(),
             "episodic": history.reconcile_index(),
         }
+        if config.integrations.get("scratchpad", {}).get("enabled", True):
+            report["scratchpad"] = ScratchpadStore(
+                db, vector_store.scratchpad_collection, assistant_id or "default-agent",
+            ).reconcile_index()
+        return report
     finally:
-        db.close()
+        try:
+            if vector_store is not None:
+                vector_store.close()
+        finally:
+            db.close()
 
 
 def _argument_parser() -> argparse.ArgumentParser:

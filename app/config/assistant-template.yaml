@@ -139,6 +139,11 @@ logging:
   trace_file_name: trace.log
   trace_max_bytes: 10000000
   trace_backup_count: 5
+  # null preserves full diagnostic text; media bytes are always omitted.
+  trace_max_string_chars: null
+  trace_max_event_chars: null
+  # One separate model-returned thinking event per completed inference.
+  trace_include_thinking: false
 
 telemetry:
   # none: disabled; minimal: INFO summary; full: JSONL; extended: JSONL plus system/GPU data.
@@ -155,6 +160,12 @@ integrations:
     max_results: 5
   memory:
     enabled: true
+  scratchpad:
+    enabled: true
+    recall_limit: 3
+    max_distance: 0.70
+    query_max_chars: 2000
+    context_max_chars: 3000
   shell:
     enabled: true
     timeout: 15

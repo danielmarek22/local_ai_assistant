@@ -15,6 +15,17 @@ class ConfigTests(unittest.TestCase):
             config_file.flush()
             return Config(config_file.name)
 
+    def test_scratchpad_defaults_disable_and_limits(self):
+        defaults = self._load({}).integrations["scratchpad"]
+        self.assertEqual(defaults["recall_limit"], 3)
+        self.assertTrue(defaults["enabled"])
+        self.assertFalse(self._load({"integrations": {"scratchpad": {"enabled": False}}}).integrations["scratchpad"]["enabled"])
+        for field, value in (("recall_limit", 0), ("recall_limit", 21),
+                             ("query_max_chars", 2001), ("context_max_chars", 299),
+                             ("max_distance", 2.1), ("recall_limit", True)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self._load({"integrations": {"scratchpad": {field: value}}})
+
     def test_empty_document_and_empty_sections_preserve_defaults(self):
         defaults = self._load({})
         self.assertEqual(self._load(None).raw, defaults.raw)
@@ -295,11 +306,29 @@ class ConfigTests(unittest.TestCase):
             ({"logging": {"max_bytes": 0}}, "logging.max_bytes"),
             ({"logging": {"backup_count": -1}}, "logging.backup_count"),
             ({"logging": {"trace_max_bytes": True}}, "logging.trace_max_bytes"),
+            ({"logging": {"trace_max_string_chars": 0}}, "logging.trace_max_string_chars"),
+            ({"logging": {"trace_max_event_chars": 100}}, "logging.trace_max_event_chars"),
+            ({"logging": {"trace_max_event_chars": True}}, "logging.trace_max_event_chars"),
+            ({"logging": {"trace_include_thinking": "true"}}, "logging.trace_include_thinking"),
             ({"logging": {"typo": True}}, "logging.typo"),
         )
         for payload, expected in invalid:
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, expected):
                 self._load(payload)
+
+    def test_trace_text_limits_and_thinking_are_configurable(self):
+        defaults = self._load({}).logging
+        self.assertIsNone(defaults.get("trace_max_string_chars"))
+        self.assertIsNone(defaults.get("trace_max_event_chars"))
+        self.assertFalse(defaults["trace_include_thinking"])
+        settings = self._load({"logging": {
+            "trace_max_string_chars": 20000,
+            "trace_max_event_chars": 100000,
+            "trace_include_thinking": True,
+        }}).logging
+        self.assertEqual(settings["trace_max_string_chars"], 20000)
+        self.assertEqual(settings["trace_max_event_chars"], 100000)
+        self.assertTrue(settings["trace_include_thinking"])
 
     def test_logging_file_names_cannot_escape_the_log_directory(self):
         invalid = (

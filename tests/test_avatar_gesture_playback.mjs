@@ -21,6 +21,7 @@ function manager(visible = true) {
         gestureQueue: new TurnGestureQueue(8), gestureCatalog: {wave: 'wave', nod: 'nod'},
         gestureAnimations: {wave: 'wave', nod: 'nod'}, stateAnimations: {idle: ['idle'], responding: ['idle']},
         animations: {}, currentState: 'idle', currentAction: null,
+        clock: new THREE.Clock(),
         isPageVisible: visible, isGesturePlaying: false, activeGestureName: null,
     });
     for (const name of ['wave', 'nod', 'idle']) {
@@ -66,4 +67,44 @@ test('a completed one-shot can be replayed explicitly', () => {
     assert.equal(avatar.animations.wave.time, 0);
     avatar.mixer.update(1.1);
     assert.equal(completions, 2);
+});
+
+test('visibility recovery discards the hidden-time gap before starting queued gestures', () => {
+    const avatar = manager(false);
+    let resets = 0;
+    avatar.clock = { getDelta: () => { resets++; return 45; } };
+    avatar.queueGesture('wave', 'turn');
+    globalThis.document = { visibilityState: 'visible' };
+    try {
+        avatar.handleVisibilityChange();
+        assert.equal(resets, 1);
+        assert.equal(avatar.currentAction, avatar.animations.wave);
+        assert.equal(avatar.currentAction.time, 0);
+    } finally {
+        delete globalThis.document;
+    }
+});
+
+test('a long gap between frames does not skip a one-shot or destabilize face updates', () => {
+    const avatar = manager();
+    avatar.queueGesture('wave', 'turn');
+    avatar.clock = { getDelta: () => 45 };
+    const deltas = [];
+    avatar.controls = { update() {} };
+    avatar.renderer = { render() {} };
+    avatar.currentVrm = {
+        expressionManager: { getValue: () => 0, setValue() {} },
+        update: delta => deltas.push(delta),
+    };
+    avatar.updateEyes = avatar.updateBlinking = avatar.updateExpression = delta => deltas.push(delta);
+    avatar.getAudioLevel = () => ({});
+    globalThis.requestAnimationFrame = () => {};
+    try {
+        avatar.animate();
+        assert.equal(avatar.isGesturePlaying, true);
+        assert.equal(avatar.animations.wave.time, 0.1);
+        assert.deepEqual(deltas, [0.1, 0.1, 0.1, 0.1]);
+    } finally {
+        delete globalThis.requestAnimationFrame;
+    }
 });
